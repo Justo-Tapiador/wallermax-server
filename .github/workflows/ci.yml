@@ -1,0 +1,111 @@
+# Continuous integration for wallermax-server.
+#
+# Three jobs, from cheapest to most expensive:
+#
+#   lint    — formatting and clippy (warnings are errors) on Linux;
+#   test    — the full test suite on Linux and Windows (the two platforms
+#             the project is developed against);
+#   docker  — builds the container image with the Dockerfile (which pins
+#             the MSRV toolchain, so this doubles as the MSRV check) and
+#             smoke-tests /health and /metrics inside the container.
+#
+# Everything runs on `cargo --locked`, so the committed Cargo.lock is part
+# of what CI protects.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs of the same branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable, rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo test
+        run: cargo test --locked
+
+  docker:
+    name: docker build + smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (MSRV toolchain, cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: wallermax-server:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test (/health, /metrics, static index)
+        run: |
+          docker run -d --name wallermax-ci -p 8080:8080 wallermax-server:ci
+
+          # Wait for startup (migrations + listener) with a timeout.
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/health > /dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          curl -fsS http://127.0.0.1:8080/health
+          echo
+          curl -fsS http://127.0.0.1:8080/metrics | grep -F 'wallermax_uptime_seconds'
+          curl -fsS -o /dev/null -w 'static index: %{http_code}\n' http://127.0.0.1:8080/
+
+          docker rm -f wallermax-ci

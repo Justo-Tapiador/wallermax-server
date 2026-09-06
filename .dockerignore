@@ -1,0 +1,30 @@
+# Build outputs never enter the image build context (keeps builds fast and
+# the image honest: everything is rebuilt from source inside the builder).
+/target
+**/target
+
+# Version control and CI configuration are not needed to compile.
+/.git
+/.github
+
+# Local overrides and secrets must never leak into the image.
+wallermax.local.toml
+.env
+
+# Local databases produced by `cargo run` (the container keeps its data on
+# the /data volume instead).
+*.db
+*.db-wal
+*.db-shm
+
+# TLS material is mounted at runtime, never baked in.
+/certs
+
+# Deliverables and development-only files.
+*.zip
+*.patch
+*.log
+
+# OS junk.
+.DS_Store
+Thumbs.db

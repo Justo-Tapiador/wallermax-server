@@ -1,0 +1,34 @@
+# Minimal deployment example for wallermax-server.
+#
+#   docker compose up -d --build
+#
+# The SQLite database lives on the `wallermax-data` named volume; every
+# configuration value can be overridden through WALLERMAX_* environment
+# variables (see README.md, "Environment variable overrides").
+#
+# For production: set a real WALLERMAX_AUTH__JWT_SECRET (openssl rand -hex 32)
+# and consider enabling [tls] with mounted certificate material.
+services:
+  wallermax-server:
+    build: .
+    image: wallermax-server
+    container_name: wallermax-server
+    ports:
+      - "8080:8080"
+    volumes:
+      - wallermax-data:/data
+      # Mount real TLS material here and set:
+      #   WALLERMAX_TLS__ENABLED=true
+      #   WALLERMAX_TLS__CERT_PATH=/app/certs/cert.pem
+      #   WALLERMAX_TLS__KEY_PATH=/app/certs/key.pem
+      # - ./certs:/app/certs:ro
+    environment:
+      # DEVELOPMENT secret, same as wallermax.toml. Replace for anything
+      # exposed beyond localhost.
+      WALLERMAX_AUTH__JWT_SECRET: "dev-only-secret-replace-via-WALLERMAX_AUTH__JWT_SECRET"
+    restart: unless-stopped
+    # The container has no curl/wget: probe from the host or let your
+    # orchestrator hit GET /health on the published port.
+
+volumes:
+  wallermax-data:

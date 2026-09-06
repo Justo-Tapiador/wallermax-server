@@ -1,0 +1,21 @@
+# Rust build output
+/target
+
+# Local configuration overrides (see README.md)
+wallermax.local.toml
+
+# Environment files
+.env
+
+# Logs
+*.log
+
+# SQLite databases produced by local runs (see [database] in wallermax.toml)
+*.db
+*.db-wal
+*.db-shm
+
+# TLS material for [tls] development runs (never commit keys)
+/certs
+
+target/
