@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Inicio</title>
+</head>
+<body>
+  <h1>Página de inicio (vista)</h1>
+  <p>Esta vista se sirve desde <code>views/index.jhs</code>: llega aquí
+     cuando <code>public/index.html</code> no existe, porque la ruta
+     estática manda mientras el fichero esté presente.</p>
+  <ul>
+    <li><a href="/contacto">Contacto (auto-ruta a views/contacto.jhs)</a></li>
+    <li><a href="/hello.jhs">Plantilla bajo public/ (render al vuelo)</a></li>
+  </ul>
+</body>
+</html>

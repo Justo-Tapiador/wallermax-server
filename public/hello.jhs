@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Plantilla .jhs</title>
+</head>
+<body>
+  <h1>Hola desde una plantilla .jhs</h1>
+<?jhs
+  var items = ["uno", "dos", "tres"];
+  items.forEach(function (item, i) {
+    echo("<li>elemento " + (i + 1) + ": " + item + "</li>\n");
+  });
+?>
+  <p>Resultado de una expresión: <?= 40 + 2 ?></p>
+  <p>Con escape automático: <?= "<b>no en negrita</b>" ?></p>
+  <p>Sin escape (contenido de confianza): <?= raw("<b>sí en negrita</b>") ?></p>
+  <p>Año actual: <?= new Date().getFullYear() ?></p>
+<?jhs console.log("línea de depuración desde la plantilla"); ?>
+</body>
+</html>

@@ -99,6 +99,10 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
         );
     }
 
+    if let Err(error) = validate_templates(config) {
+        return Err(error.into());
+    }
+
     if !config.database.enabled {
         return Ok(AppState::new(config.clone()));
     }
@@ -193,6 +197,29 @@ pub async fn serve(config: AppConfig) -> Result<(), ServerError> {
     }
 }
 
+/// Checks the `[templates]` startup requirements: while enabled, the
+/// views directory must exist (mirroring the `[static]` root check).
+fn validate_templates(config: &AppConfig) -> Result<(), String> {
+    if !config.templates.enabled {
+        return Ok(());
+    }
+    let views = Path::new(&config.templates.views_dir);
+    if !views.is_dir() {
+        return Err(format!(
+            "template rendering is enabled but the views directory `{}` does not exist; \
+             create it or point `templates.views_dir` at an existing directory",
+            config.templates.views_dir
+        ));
+    }
+    tracing::info!(
+        views_dir = %config.templates.views_dir,
+        auto_escape = config.templates.auto_escape,
+        cache = config.templates.cache,
+        "dynamic template rendering enabled"
+    );
+    Ok(())
+}
+
 /// Log line describing the mounted route families.
 fn route_map(config: &AppConfig, auth_enabled: bool, tls: bool) -> String {
     let mut routes = String::new();
@@ -218,6 +245,9 @@ fn route_map(config: &AppConfig, auth_enabled: bool, tls: bool) -> String {
     }
     if config.static_files.enabled {
         routes.push_str("  |  + static files");
+    }
+    if config.templates.enabled {
+        routes.push_str("  |  + .jhs templates");
     }
     if let Some(listen) = config.tls.http_listen.as_deref() {
         if tls {

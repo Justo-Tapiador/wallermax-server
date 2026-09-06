@@ -2,16 +2,20 @@
 //!
 //! A modular, secure and high-performance web server written in Rust.
 //!
-//! This is the **Phase 4 production-readiness release**: layered
-//! configuration (built-in defaults, `TOML` files and environment
-//! variables), a composable middleware pipeline (security headers, CORS,
-//! request-id, logging, rate limiting, body limits, timeouts), a
-//! JSON-first HTTP API, SQLite user storage behind the
-//! [`UserRepository`](db::UserRepository) abstraction, JWT authentication
-//! with roles and rotating refresh tokens, static file serving, a
-//! Prometheus metrics endpoint, proxy-aware client IPs and optional TLS
-//! (rustls). See `README.md` for the full feature list and the
-//! phase-by-phase roadmap.
+//! This is the **Phase 5 release**: on top of the Phase 4
+//! production-readiness stack — layered configuration (built-in
+//! defaults, `TOML` files and environment variables), a composable
+//! middleware pipeline (security headers, CORS, request-id, logging,
+//! rate limiting, body limits, timeouts), a JSON-first HTTP API, SQLite
+//! user storage behind the [`UserRepository`](db::UserRepository)
+//! abstraction, JWT authentication with roles and rotating refresh
+//! tokens, static file serving, a Prometheus metrics endpoint,
+//! proxy-aware client IPs and optional TLS (rustls) — it adds the
+//! **dynamic `.jhs` template engine** ([`template_engine`]): PHP-style
+//! JavaScript templates rendered in a hardened sandbox, served on the
+//! fly from `[static]` and auto-routed from `[templates] views_dir`.
+//! See `README.md` for the full feature list and the phase-by-phase
+//! roadmap.
 //!
 //! ## Module map
 //!
@@ -26,6 +30,7 @@
 //! | [`db`]               | SQLite pool, migrations, `UserRepository` trait            |
 //! | [`metrics`]          | Prometheus registry and exposition                        |
 //! | [`extractors`]       | `AuthUser` / `AdminUser` / `JsonBody` extractors           |
+//! | [`template_engine`]  | Sandboxed `.jhs` template rendering (`[templates]`)         |
 //! | [`routes`]           | Route modules (`/`, `/api`, `/health`, auth, admin, static) |
 //! | [`middleware`]       | Composable request/response middleware                     |
 //! | [`logging`]          | `tracing` subscriber setup                                 |
@@ -49,6 +54,7 @@ pub mod rate_limit;
 pub mod routes;
 pub mod server;
 pub mod state;
+pub mod template_engine;
 
 mod util;
 

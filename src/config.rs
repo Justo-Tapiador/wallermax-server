@@ -68,6 +68,8 @@ pub struct AppConfig {
     /// Static file serving (the `[static]` section).
     #[serde(rename = "static")]
     pub static_files: StaticConfig,
+    /// Dynamic `.jhs` template rendering (the `[templates]` section).
+    pub templates: TemplatesConfig,
     /// Prometheus metrics exposition (the `[metrics]` section).
     pub metrics: MetricsConfig,
     /// TLS (HTTPS) serving (the `[tls]` section).
@@ -388,6 +390,62 @@ impl Default for StaticConfig {
     }
 }
 
+/// Dynamic `.jhs` template rendering (the `[templates]` section).
+///
+/// Templates are HTML with embedded JavaScript using `<?jhs ... ?>`
+/// code blocks and `<?= ... ?>` output expressions (the `node-jhs2`
+/// syntax), rendered inside a hardened sandbox (no `require`, no
+/// `Buffer`, no file system, no network; runaway loops are bounded by
+/// `loop_iteration_limit`).
+///
+/// While enabled:
+///
+/// - `GET`/`HEAD` requests for an existing `*.jhs` file under the
+///   `[static]` root are **rendered** (the source is never served
+///   raw);
+/// - otherwise-unmatched paths auto-route to views: `GET /contacto`
+///   renders `views_dir/contacto.jhs`, `GET /blog` renders
+///   `views_dir/blog.jhs` or `views_dir/blog/index.jhs`, and `GET /`
+///   falls back to `views_dir/index.jhs` when the static index file
+///   is missing;
+/// - API routes keep precedence and requests that resolve to nothing
+///   answer the standard JSON 404 envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TemplatesConfig {
+    /// Enables dynamic template rendering.
+    pub enabled: bool,
+    /// Directory holding the view templates, relative to the working
+    /// directory (absolute paths are allowed too). It must exist at
+    /// startup while rendering is enabled. `..` segments are rejected
+    /// at validation.
+    pub views_dir: String,
+    /// Cache compiled templates, invalidating entries when their
+    /// modification time changes (recompiles are automatic; no restart
+    /// needed).
+    pub cache: bool,
+    /// HTML-escape all dynamic output (`<?= ?>` expressions and
+    /// `echo()` calls); literal template text is never escaped, and
+    /// `raw()` always bypasses the escaper.
+    pub auto_escape: bool,
+    /// Upper bound on loop iterations inside one render. Protects the
+    /// workers from runaway template loops (the sandbox throws when a
+    /// template exceeds it).
+    pub loop_iteration_limit: u64,
+}
+
+impl Default for TemplatesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            views_dir: String::from("views"),
+            cache: true,
+            auto_escape: true,
+            loop_iteration_limit: 10_000_000,
+        }
+    }
+}
+
 /// Prometheus metrics settings.
 ///
 /// While enabled, `GET <path>` (default `/metrics`) serves all collected
@@ -531,6 +589,7 @@ impl AppConfig {
         self.validate_database()?;
         self.validate_auth()?;
         self.validate_static()?;
+        self.validate_templates()?;
         self.validate_metrics()?;
         self.validate_tls()?;
         self.validate_trusted_proxies()?;
@@ -732,6 +791,29 @@ impl AppConfig {
             return Err(ConfigError::Message(
                 "`static.index_file` must be a plain file name (no path separators, no `..`)"
                     .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validates the `[templates]` section.
+    fn validate_templates(&self) -> Result<(), ConfigError> {
+        let templates = &self.templates;
+
+        if templates.views_dir.is_empty() || templates.views_dir.contains('\0') {
+            return Err(ConfigError::Message(
+                "`templates.views_dir` must be a non-empty path".to_owned(),
+            ));
+        }
+        if has_parent_segment(&templates.views_dir) {
+            return Err(ConfigError::Message(format!(
+                "`templates.views_dir` must not contain `..` path segments: {:?}",
+                templates.views_dir
+            )));
+        }
+        if templates.loop_iteration_limit == 0 {
+            return Err(ConfigError::Message(
+                "`templates.loop_iteration_limit` must be greater than zero".to_owned(),
             ));
         }
         Ok(())

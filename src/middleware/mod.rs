@@ -8,9 +8,11 @@
 //!
 //! ```text
 //! request  ->  security headers -> cors -> request id -> logging
-//!              -> rate limit -> body limit -> timeout -> routes
+//!              -> rate limit -> body limit -> timeout -> templates
+//!              -> routes
 //! response <-  security headers <- cors <- request id <- logging
-//!              <- rate limit <- body limit <- timeout <- routes
+//!              <- rate limit <- body limit <- timeout <- templates
+//!              <- routes
 //! ```
 //!
 //! Ordering rationale:
@@ -27,6 +29,9 @@
 //! - **Body limit** combines an early `Content-Length` check with
 //!   tower-http's stream enforcement.
 //! - **Timeout** bounds the total handling time of whatever remains.
+//! - **Templates** (9th) renders `.jhs` requests and auto-routes views
+//!   while `[templates]` is enabled; its errors answer the JSON error
+//!   envelope with the request id, which this position guarantees.
 //!
 //! Each middleware is toggled independently through the `[middleware]`
 //! section of the configuration (see [`crate::config::MiddlewareConfig`]).
@@ -39,6 +44,7 @@ pub mod logging;
 pub mod rate_limit;
 pub mod request_id;
 pub mod security_headers;
+pub mod templates;
 pub mod timeout;
 
 use axum::middleware;
@@ -56,6 +62,16 @@ use crate::state::AppState;
 pub fn apply(config: &AppConfig, state: AppState, router: Router<AppState>) -> Router<AppState> {
     // NOTE: `Router::layer` wraps the existing stack, so layers are applied
     // in REVERSE execution order (the last applied is outermost, runs first).
+
+    // 9th in execution order: dynamic `.jhs` template rendering.
+    let router = if config.templates.enabled {
+        router.layer(middleware::from_fn_with_state(
+            state.clone(),
+            templates::run,
+        ))
+    } else {
+        router
+    };
 
     // 8th in execution order: stream-level enforcement of the body limit.
     let router = if config.middleware.body_limit {

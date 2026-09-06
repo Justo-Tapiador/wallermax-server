@@ -110,6 +110,36 @@ index_file = "index.html"
 # serve a real site, relax content_security_policy to allow the assets
 # you actually use, e.g. "default-src 'self'".
 
+[templates]
+# Dynamic .jhs template rendering (PHP-style JavaScript templates,
+# ported faithfully from the node-jhs2 engine and sandboxed with
+# boa_engine: no require, no Buffer, no file system, no network).
+# While enabled: GET /hello.jhs renders public/hello.jhs on the fly
+# (the source is never served raw), otherwise-unmatched paths
+# auto-route to views/ (GET /contacto -> views/contacto.jhs,
+# GET /blog -> views/blog.jhs or views/blog/index.jhs), API routes
+# keep precedence and unresolved paths answer the JSON 404 envelope.
+# Template errors answer the standard JSON error envelope (500).
+enabled = true
+
+# Directory holding the view templates, relative to the working
+# directory (absolute paths are allowed too). It must exist at startup
+# while rendering is enabled. `..` segments are rejected at validation.
+views_dir = "views"
+
+# Cache compiled templates, recompiling automatically when a file's
+# modification time changes (no restart needed).
+cache = true
+
+# HTML-escape all dynamic output (<?= ?> expressions and echo() calls).
+# Literal template text is never escaped; raw() always bypasses it.
+auto_escape = true
+
+# Upper bound on loop iterations inside one render. Protects the
+# workers from runaway template loops (the sandbox throws when a
+# template exceeds it). Must be greater than zero.
+loop_iteration_limit = 10000000
+
 [database]
 # SQLite persistence layer (user storage for authentication).
 # Both [database] and [auth] are opt-in per phase: flip to false to get

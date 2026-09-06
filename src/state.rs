@@ -29,6 +29,7 @@ use crate::db::UserRepository;
 use crate::metrics::Metrics;
 use crate::proxy::{self, Cidr};
 use crate::rate_limit::RateLimiter;
+use crate::template_engine::{JhsEngine, JhsOptions};
 
 /// Authentication services shared by handlers when `[auth]` is enabled.
 ///
@@ -51,6 +52,79 @@ pub struct AuthContext {
     pub refresh_token_ttl_secs: u64,
 }
 
+/// Dynamic template rendering services shared by the template
+/// middleware when `[templates]` is enabled.
+///
+/// Built once at startup from the configuration and immutable
+/// afterwards; every render runs in a fresh sandbox, so sharing the
+/// engine across workers is safe by construction.
+pub struct TemplateEngine {
+    /// The sandboxed `.jhs` engine.
+    engine: std::sync::Arc<JhsEngine>,
+    /// Directory view templates are auto-routed from, resolved to an
+    /// absolute path at construction (relative paths resolve against
+    /// the working directory, exactly like `[static] root_dir`, and the
+    /// resolution is frozen so the sandbox never re-joins a candidate
+    /// onto the views path).
+    views_dir: std::path::PathBuf,
+    /// Static root from `[static]`, present only while static serving is
+    /// enabled (`.jhs` files there are rendered on the fly). Absolute,
+    /// resolved exactly like `views_dir`.
+    static_root: Option<std::path::PathBuf>,
+}
+
+impl TemplateEngine {
+    /// Builds the engine from the `[templates]` and `[static]`
+    /// configuration.
+    fn new(templates: &crate::config::TemplatesConfig, static_root: Option<&str>) -> Self {
+        let views_dir = absolutize(&templates.views_dir);
+        let options = JhsOptions {
+            views_path: views_dir.clone(),
+            cache: templates.cache,
+            auto_escape: templates.auto_escape,
+            tags: Default::default(),
+            loop_iteration_limit: templates.loop_iteration_limit,
+        };
+        Self {
+            engine: std::sync::Arc::new(JhsEngine::new(options)),
+            views_dir,
+            static_root: static_root.map(absolutize),
+        }
+    }
+
+    /// A cloneable handle to the sandboxed engine (for
+    /// `spawn_blocking` renders).
+    pub fn engine(&self) -> std::sync::Arc<JhsEngine> {
+        std::sync::Arc::clone(&self.engine)
+    }
+
+    /// The configured views directory.
+    pub fn views_dir(&self) -> &std::path::Path {
+        &self.views_dir
+    }
+
+    /// The static root while `[static]` is enabled.
+    pub fn static_root(&self) -> Option<&std::path::Path> {
+        self.static_root.as_deref()
+    }
+}
+
+/// Resolves a configured path into an absolute one: absolute paths pass
+/// through unchanged, relative paths resolve against the current
+/// working directory (the documented convention for `[static] root_dir`
+/// and `[templates] views_dir`). Freezing the resolution at construction
+/// keeps template candidate paths stable regardless of later CWD
+/// changes and prevents the sandbox from re-joining an already-resolved
+/// candidate onto the views path.
+fn absolutize(path: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(path);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    }
+}
+
 /// Cheap-to-clone shared application state.
 #[derive(Clone)]
 pub struct AppState {
@@ -67,6 +141,7 @@ struct StateInner {
     trusted_proxies: Vec<Cidr>,
     auth: Option<AuthContext>,
     metrics: Option<Metrics>,
+    templates: Option<TemplateEngine>,
 }
 
 impl AppState {
@@ -113,6 +188,16 @@ impl AppState {
             None
         };
 
+        let templates = if config.templates.enabled {
+            let static_root = config
+                .static_files
+                .enabled
+                .then_some(config.static_files.root_dir.as_str());
+            Some(TemplateEngine::new(&config.templates, static_root))
+        } else {
+            None
+        };
+
         Self {
             inner: Arc::new(StateInner {
                 config,
@@ -124,6 +209,7 @@ impl AppState {
                 trusted_proxies,
                 auth,
                 metrics,
+                templates,
             }),
         }
     }
@@ -172,6 +258,17 @@ impl AppState {
     /// feature is enabled (and the registry could be built).
     pub fn metrics(&self) -> Option<&Metrics> {
         self.inner.metrics.as_ref()
+    }
+
+    /// Returns the template rendering services when the `[templates]`
+    /// feature is enabled.
+    pub fn templates(&self) -> Option<&TemplateEngine> {
+        self.inner.templates.as_ref()
+    }
+
+    /// Whether dynamic template rendering is enabled.
+    pub fn templates_enabled(&self) -> bool {
+        self.inner.templates.is_some()
     }
 
     /// Records that a request has been served.
