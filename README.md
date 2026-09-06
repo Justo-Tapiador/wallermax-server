@@ -3,16 +3,20 @@
 [![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![Built with Axum](https://img.shields.io/badge/Built%20with-Axum%200.8-blueviolet)](https://github.com/tokio-rs/axum)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
-[![Roadmap](https://img.shields.io/badge/Roadmap-All%204%20phases%20done-green)](#roadmap)
+[![Roadmap](https://img.shields.io/badge/Roadmap-All%205%20phases%20done-green)](#roadmap)
+
+<div align="left">
+<p><img src="ws.png" width="482" alt="IA-SO BROODER"></p>
+</div>
 
 > A modular, secure and high-performance web server written in Rust.
 
-**Status: v0.4.0 — all four roadmap phases complete.** Phase 4 added
-rotating refresh tokens with family revocation, a Prometheus `/metrics`
-endpoint, HTTPS via rustls (plus an HTTP-to-HTTPS redirect listener),
-trusted-proxy `X-Forwarded-For` parsing, a multi-stage Docker image with a
-compose example and a GitHub Actions CI pipeline. See the
-[roadmap](#roadmap).
+**Status: v0.5.0 — the four roadmap phases plus a dynamic template engine.** Phase 4 added rotating
+refresh tokens with family revocation, a Prometheus `/metrics` endpoint, HTTPS via
+rustls (plus an HTTP-to-HTTPS redirect listener), trusted-proxy `X-Forwarded-For`
+parsing, a multi-stage Docker image with a compose example and a GitHub Actions CI
+pipeline. v0.5.0 added the sandboxed `.jhs` template engine — see
+[README-jhs-engine.md](README-jhs-engine.md) and the [roadmap](#roadmap).
 
 ## Table of contents
 
@@ -21,6 +25,7 @@ compose example and a GitHub Actions CI pipeline. See the
 - [Getting started](#getting-started)
 - [Configuration](#configuration)
 - [HTTP API](#http-api)
+- [Dynamic templates (.jhs)](#dynamic-templates-jhs)
 - [Refresh tokens](#refresh-tokens)
 - [Prometheus metrics](#prometheus-metrics)
 - [TLS (HTTPS)](#tls-https)
@@ -67,6 +72,13 @@ compose example and a GitHub Actions CI pipeline. See the
   `public/index.html`); conditional requests (`304`), range requests
   (`206`), correct content types, path-traversal rejection and the JSON
   404 envelope for missing files.
+- **Dynamic `.jhs` templates** — a PHP-style JavaScript template engine
+  (a faithful port of [node-jhs2](https://github.com/Justo-Tapiador/node-jhs2))
+  running in a [boa_engine](https://github.com/boa-dev/boa) sandbox:
+  no `require`, no file system, no network; escaped output by default,
+  loop-iteration bounds, mtime-based recompilation, view auto-routing
+  and `console.*` routed to the structured logs. See
+  [README-jhs-engine.md](README-jhs-engine.md).
 - **Refresh tokens** — long-lived opaque sessions (256-bit, stored only as
   SHA-256 hashes) with rotation on every refresh and automatic family
   revocation when a retired token is replayed; `POST /api/auth/logout`
@@ -108,16 +120,17 @@ compose example and a GitHub Actions CI pipeline. See the
 
 ```console
 $ cargo run
-   Compiling wallermax-server v0.4.0
+   Compiling wallermax-server v0.5.0
     Finished dev [unoptimized + debuginfo] target(s)
      Running `target/debug/wallermax-server`
 
 INFO wallermax_server::server: static file serving enabled root_dir=public index_file=index.html
+INFO wallermax_server::server: dynamic template rendering enabled views_dir=views auto_escape=true cache=true
 INFO wallermax_server::server: sqlite pool ready (migrations applied) url=sqlite://wallermax.db?mode=rwc max_connections=5
 INFO wallermax_server::server: authentication enabled (the first registered user becomes the admin) registration_enabled=true token_ttl_secs=3600 refresh_tokens_enabled=true refresh_token_ttl_secs=2592000
 INFO wallermax_server::server: prometheus metrics enabled path=/metrics
-INFO wallermax_server::server: wallermax-server listening address=127.0.0.1:8080 version=0.4.0
-INFO wallermax_server::server: route map ready routes="GET / (static) | GET /api | GET /health | GET /api/stats | POST /api/echo | GET /metrics | POST /api/auth/register | POST /api/auth/login | GET /api/auth/me | POST /api/auth/refresh | POST /api/auth/logout | POST /api/auth/logout_all | GET /api/admin/users | + static files"
+INFO wallermax_server::server: wallermax-server listening address=127.0.0.1:8080 version=0.5.0
+INFO wallermax_server::server: route map ready routes="GET / (static) | GET /api | GET /health | GET /api/stats | POST /api/echo | GET /metrics | POST /api/auth/register | POST /api/auth/login | GET /api/auth/me | POST /api/auth/refresh | POST /api/auth/logout | POST /api/auth/logout_all | GET /api/admin/users | + static files | + .jhs templates"
 ```
 
 The default `wallermax.toml` ships with static files, the database and
@@ -137,7 +150,11 @@ $ curl http://127.0.0.1:8080/api
 {"service":"wallermax-server",...,"endpoints":["GET / (static index + files)","GET /api","GET /health","GET /api/stats","POST /api/echo","GET /metrics","POST /api/auth/register","POST /api/auth/login","GET /api/auth/me","GET /api/admin/users","POST /api/auth/refresh","POST /api/auth/logout","POST /api/auth/logout_all"]}
 
 $ curl http://127.0.0.1:8080/health
-{"status":"ok","version":"0.4.0"}
+{"status":"ok","version":"0.5.0"}
+
+$ curl http://127.0.0.1:8080/hello.jhs     # .jhs template, rendered on the fly
+<h1>Hola desde una plantilla .jhs</h1>
+...                                       # demo; see README-jhs-engine.md
 
 $ curl http://127.0.0.1:8080/metrics | head -4
 # HELP wallermax_requests_total Requests served, by HTTP method and response status code.
@@ -302,13 +319,13 @@ Example responses:
 
 ```json
 // GET /api
-{"service":"wallermax-server","version":"0.4.0","description":"...","endpoints":["GET / (static index + files)","GET /api","GET /health","GET /api/stats","POST /api/echo","GET /metrics","POST /api/auth/register","POST /api/auth/login","GET /api/auth/me","GET /api/admin/users","POST /api/auth/refresh","POST /api/auth/logout","POST /api/auth/logout_all"]}
+{"service":"wallermax-server","version":"0.5.0","description":"...","endpoints":["GET / (static index + files)","GET /api","GET /health","GET /api/stats","POST /api/echo","GET /metrics","POST /api/auth/register","POST /api/auth/login","GET /api/auth/me","GET /api/admin/users","POST /api/auth/refresh","POST /api/auth/logout","POST /api/auth/logout_all"]}
 
 // GET /health
-{"status":"ok","version":"0.4.0"}
+{"status":"ok","version":"0.5.0"}
 
 // GET /api/stats
-{"service":"wallermax-server","version":"0.4.0","uptime_seconds":10.244,"total_requests":12,"requests_per_second":1.171,"rate_limited_requests":0,"registered_users":2}
+{"service":"wallermax-server","version":"0.5.0","uptime_seconds":10.244,"total_requests":12,"requests_per_second":1.171,"rate_limited_requests":0,"registered_users":2}
 
 // POST /api/echo  (Content-Type: text/plain, body "hello wallermax")
 {"received_bytes":15,"content_type":"text/plain","body":"hello wallermax"}
@@ -358,6 +375,24 @@ including the correlation id:
 // POST /api/auth/refresh with an oversized value -> 400
 {"error":{"code":"BAD_REQUEST","message":"`refresh_token` must be at most 512 characters","request_id":"..."}}
 ```
+
+## Dynamic templates (.jhs)
+
+While `[templates] enabled = true` the server renders `.jhs` templates
+(PHP-style JavaScript, ported from
+[node-jhs2](https://github.com/Justo-Tapiador/node-jhs2)) inside a
+[boa_engine](https://github.com/boa-dev/boa) sandbox with no host
+access at all: `GET /hello.jhs` renders `public/hello.jhs` on the fly
+(the template source is never served raw) and otherwise-unmatched
+paths auto-route to the views directory (`GET /contacto` →
+`views/contacto.jhs`, `GET /blog` → `views/blog/index.jhs`). API
+routes keep their precedence, unresolved paths answer the JSON 404
+envelope, template errors answer the JSON 500 envelope, and
+`console.*` calls inside templates are routed to the structured logs.
+
+The syntax, escaping rules, sandbox contract, configuration keys and
+a template-writing guide live in
+**[README-jhs-engine.md](README-jhs-engine.md)**.
 
 ## Refresh tokens
 
@@ -458,7 +493,7 @@ $ openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
     -keyout certs/key.pem -out certs/cert.pem -subj "/CN=localhost"
 ```
 
-(or use [mkcert](https://github.com/FiloSottine/mkcert) for
+(or use [mkcert](https://github.com/FiloSottile/mkcert) for
 locally-trusted certificates). `certs/` is git-ignored and excluded from
 Docker build contexts on purpose — mount certificate material at runtime
 instead of baking it into images.
@@ -706,9 +741,14 @@ wallermax-server/
 │   ├── 0001_create_users.sql
 │   └── 0002_create_refresh_tokens.sql
 ├── public/               # static site root ([static] root_dir)
-│   └── index.html        #   the page served at GET / ("Hello, world!")
+│   ├── index.html        #   the page served at GET / ("Hello, world!")
+│   └── hello.jhs         #   demo template, rendered at GET /hello.jhs
+├── views/                # view templates ([templates] views_dir)
+│   ├── index.jhs         #   root fallback when public/index.html is absent
+│   └── contacto.jhs      #   auto-routed at GET /contacto
 ├── LICENSE               # MIT
 ├── README.md
+├── README-jhs-engine.md  # the .jhs template engine guide
 ├── src/
 │   ├── main.rs           # thin binary entry point
 │   ├── lib.rs            # module map + run()
@@ -724,9 +764,10 @@ wallermax-server/
 │   ├── logging.rs        # tracing setup
 │   ├── server.rs         # bootstrap, TLS, graceful shutdown
 │   ├── util.rs           # tiny shared helpers
+│   ├── template_engine/  # .jhs engine: parser + boa sandbox + cache
 │   ├── routes/           # one file per feature area (index, health, stats,
 │   │                     #   echo, auth, admin, static_files, metrics)
-│   └── middleware/       # one file per middleware
+│   └── middleware/       # one file per middleware (incl. templates.rs)
 └── tests/
     ├── common/mod.rs     # shared TestServer scaffolding (+ temp DB + TLS
     │                     #   test server with generated certificates)
@@ -738,6 +779,8 @@ wallermax-server/
     ├── metrics.rs        # Prometheus exposition integration tests
     ├── proxy.rs          # X-Forwarded-For + rate-limit interaction tests
     ├── tls.rs            # HTTPS serving + redirect listener tests
+    ├── templates.rs       # .jhs HTTP contract integration tests
+    ├── template_fidelity.rs  # engine fidelity vs the original node-jhs2
     └── config_env.rs     # environment override semantics
 ```
 
@@ -745,10 +788,11 @@ wallermax-server/
 
 ```console
 $ cargo test
-running 108 tests ... ok       # unit tests (config, state, error, limiter,
+running 165 tests ... ok       # unit tests (config, state, error, limiter,
                                #   proxy CIDRs, auth + refresh primitives,
                                #   repository incl. refresh token store,
-                               #   metrics registry, server helpers, middleware)
+                               #   metrics registry, server helpers,
+                               #   middleware, template engine + parser)
 running 4 tests ... ok          # config_env: environment override semantics
 running 17 tests ... ok         # auth: register/login/profile/admin flows
 running 12 tests ... ok         # refresh_tokens: rotation, reuse detection,
@@ -764,9 +808,14 @@ running 16 tests ... ok         # static_files: index, assets, 404/405,
                                #   traversal, conditional + range requests
 running 6 tests ... ok          # tls: HTTPS serving, auth over TLS,
                                #   strict-client rejection, 308 redirects
+running 1 test ... ok           # template_fidelity: 20-case battery vs the
+                               #   original node-jhs2 engine
+running 20 tests ... ok         # templates: rendering, view auto-routing,
+                               #   precedence, error envelopes, mtime
+                               #   reload, loop bounds, disabled mode
 ```
 
-**202 tests total**, all of them plain `cargo test` (no docker, no
+**280 tests total**, all of them plain `cargo test` (no docker, no
 network). The integration tests boot the exact same application the
 binary serves (`server::build_state` + `server::build_app`, with
 `build_app_with_routes` available for injecting custom routes) on an
@@ -895,6 +944,20 @@ fresh temporary asset directory, cleaned up afterwards.
       example + `.dockerignore`.
 - [x] GitHub Actions CI (fmt, clippy, Linux + Windows test matrix, Docker
       build with in-container smoke test).
+
+### Phase 5 — Dynamic templates (done)
+
+- [x] `.jhs` template engine: a faithful port of
+      [node-jhs2](https://github.com/Justo-Tapiador/node-jhs2) to Rust
+      on top of [boa_engine](https://github.com/boa-dev/boa) — see
+      [README-jhs-engine.md](README-jhs-engine.md).
+- [x] Sandbox hardening: no `require`/fs/network, fresh context per
+      render, loop iteration limits, captured `console.*` → tracing.
+- [x] HTTP integration: on-the-fly rendering under `[static]`, views
+      auto-routing with API precedence, JSON error envelopes, mtime
+      cache invalidation, `spawn_blocking` renders.
+- [x] 20-case fidelity battery against the original engine plus 20
+      HTTP integration tests (280 total across the suite).
 
 ### Beyond the roadmap (ideas)
 
