@@ -73,7 +73,7 @@ WORKDIR /app
 COPY --from=builder /wallermax-server /usr/local/bin/wallermax-server
 COPY wallermax.toml /app/wallermax.toml
 COPY public/ /app/public/
-
+COPY views/ /app/views/
 # Container-friendly defaults; each can be overridden with `docker run -e`.
 #   * bind all interfaces so published ports work
 #   * keep the SQLite database on the /data volume
