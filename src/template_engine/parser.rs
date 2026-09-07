@@ -147,7 +147,13 @@ fn wrap(code: &str) -> String {
     program.push_str("  let __output = \"\";\n\n");
     program.push_str("  // echo() — writes escaped output directly from code blocks\n");
     program.push_str("  function echo(...args) {\n");
-    program.push_str("    __output += args.map(arg => __escape(String(arg))).join('');\n");
+    // v0.8.0: arguments go through the prelude's `__jhsEchoPart`, which
+    // keeps the original's String()-before-escaping semantics
+    // (`echo(null)` prints `null`) while letting `raw()` sentinel values
+    // through untouched — `echo(raw(markup))` prints trusted markup
+    // exactly like the `<?= raw(markup) ?>` form, and the sentinel
+    // itself stays hidden inside the prelude's closure.
+    program.push_str("    __output += args.map(__jhsEchoPart).join('');\n");
     program.push_str("  }\n\n");
     program.push_str(code);
     program.push_str("\n  return __output;\n");

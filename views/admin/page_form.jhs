@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><?= form.is_new ? "Nueva página" : "Editar página" ?> — CMS wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+    <div class="panel-barra">
+      <h1><?= form.is_new ? "Nueva página" : "Editar página" ?></h1>
+      <a class="btn btn-fantasma" href="/admin/pages">Volver al listado</a>
+<?jhs if (!form.is_new) { ?>
+      <a class="btn btn-fantasma" href="/p/<?= form.slug ?>">Ver la página</a>
+<?jhs } ?>
+    </div>
+
+<?jhs if (query.ok == "creada" || query.ok == "guardada" || query.ok == "importada") { ?>
+    <p class="aviso aviso-ok">
+<?jhs if (query.ok == "creada") { ?>Página creada como borrador: revisa el contenido y marca «Publicada» cuando esté lista.
+<?jhs } else if (query.ok == "importada") { ?>Contenido importado como borrador: revísalo y publícalo cuando quieras.
+<?jhs } else { ?>Cambios guardados.<?jhs } ?>
+    </p>
+<?jhs } ?>
+<?jhs if (form_error) { ?>
+    <p class="aviso aviso-error"><?= form_error ?></p>
+<?jhs } ?>
+
+    <form method="post" action="<?= form.is_new ? "/admin/pages" : "/admin/pages/" + form.id ?>">
+      <section class="tarjeta">
+        <div class="campo">
+          <label for="titulo">Título</label>
+          <input id="titulo" type="text" name="title" required maxlength="200"
+                 value="<?= form.title ?>">
+        </div>
+        <div class="campo">
+          <label for="slug">Slug (la URL será /p/slug)</label>
+          <input id="slug" type="text" name="slug" required maxlength="64"
+                 value="<?= form.slug ?>">
+          <p class="ayuda">Minúsculas, números y guiones: <code>sobre-nosotros</code>.
+             Cambiarlo mueve la URL pública de la página.</p>
+        </div>
+        <div class="campo">
+          <label for="contenido">Contenido — plantilla <code>.jhs</code></label>
+          <textarea id="contenido" name="content" spellcheck="false"
+                    placeholder="&lt;h2&gt;Hola&lt;/h2&gt;&#10;&lt;p&gt;HTML con etiquetas &lt;?= user ?&gt; disponibles…&lt;/p&gt;"><?=
+            form.content
+          ?></textarea>
+          <p class="ayuda">Es HTML con etiquetas <code>&lt;?= expresión ?&gt;</code> y
+             <code>&lt;?jhs código ?&gt;</code> (el mismo motor de las vistas). Los
+             globales <code>user</code>, <code>path</code>, <code>query</code> y
+             <code>pages</code> están disponibles, y también
+             <code>&lt;?jhs include("partials/header") ?&gt;</code> para reutilizar la
+             cabecera del sitio. El <em>auto-escape</em> está activo: usa
+             <code>raw()</code> solo para HTML de confianza.</p>
+        </div>
+        <div class="campo campo-check">
+          <input id="publicada" type="checkbox" name="is_published" value="on"<?= form.is_published ? " checked" : "" ?>>
+          <label for="publicada">Publicada (visible en /p y en el listado público)</label>
+        </div>
+        <button class="btn btn-primario" type="submit">
+          <?= form.is_new ? "Crear página" : "Guardar cambios" ?>
+        </button>
+      </section>
+    </form>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

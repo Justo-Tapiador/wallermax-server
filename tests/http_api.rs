@@ -169,7 +169,11 @@ async fn security_headers_are_present_on_every_response() {
             ("referrer-policy", "no-referrer"),
             (
                 "content-security-policy",
-                "default-src 'none'; frame-ancestors 'none'",
+                // v0.8.0: styles and same-origin images are allowed for
+                // the CMS UI; scripts stay blocked and forms are pinned
+                // to this origin.
+                "default-src 'none'; style-src 'self'; img-src 'self' data:; \
+                 form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
             ),
         ] {
             let actual = headers

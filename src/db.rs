@@ -34,8 +34,12 @@ use crate::config::DatabaseConfig;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UserRole {
-    /// Full administrative access (first registered account).
+    /// Full administrative access (first registered account): CMS pages,
+    /// CMS users, own password.
     Admin,
+    /// CMS content access: create, edit, delete and publish pages, but
+    /// no user administration (v0.8.0).
+    Editor,
     /// Standard authenticated access.
     User,
 }
@@ -46,6 +50,7 @@ impl UserRole {
     pub fn as_str(self) -> &'static str {
         match self {
             UserRole::Admin => "admin",
+            UserRole::Editor => "editor",
             UserRole::User => "user",
         }
     }
@@ -54,9 +59,16 @@ impl UserRole {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "admin" => Some(UserRole::Admin),
+            "editor" => Some(UserRole::Editor),
             "user" => Some(UserRole::User),
             _ => None,
         }
+    }
+
+    /// Whether this role may manage CMS pages (create, edit, delete,
+    /// publish) — the `admin` and `editor` roles.
+    pub fn is_editor(self) -> bool {
+        matches!(self, UserRole::Admin | UserRole::Editor)
     }
 }
 
@@ -252,8 +264,22 @@ pub trait UserRepository: Send + Sync + 'static {
     /// Counts registered users.
     async fn count(&self) -> Result<i64, RepositoryError>;
 
+    /// Counts users holding a specific role (used by the last-admin
+    /// guard of the CMS user management).
+    async fn count_with_role(&self, role: UserRole) -> Result<i64, RepositoryError>;
+
     /// Lists users, newest first, up to `limit` rows.
     async fn list(&self, limit: i64) -> Result<Vec<User>, RepositoryError>;
+
+    /// Replaces the password hash of `id` (the CMS "reset password"
+    /// and the self-service change on `/perfil`).
+    async fn update_password(&self, id: i64, password_hash: &str) -> Result<(), RepositoryError>;
+
+    /// Grants `role` to `id` (admin-only CMS action).
+    async fn update_role(&self, id: i64, role: UserRole) -> Result<(), RepositoryError>;
+
+    /// Deletes the account (refresh tokens cascade in SQL).
+    async fn delete(&self, id: i64) -> Result<(), RepositoryError>;
 
     /// Stamps `last_login_at` for a successful login.
     async fn record_login(&self, id: i64) -> Result<(), RepositoryError>;
@@ -379,6 +405,14 @@ impl UserRepository for SqliteUserRepository {
             .map_err(RepositoryError::from_sqlx)
     }
 
+    async fn count_with_role(&self, role: UserRole) -> Result<i64, RepositoryError> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role = ?1")
+            .bind(role.as_str())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)
+    }
+
     async fn list(&self, limit: i64) -> Result<Vec<User>, RepositoryError> {
         sqlx::query_as(&format!(
             "SELECT {USER_COLUMNS} FROM users ORDER BY id DESC LIMIT ?1"
@@ -387,6 +421,35 @@ impl UserRepository for SqliteUserRepository {
         .fetch_all(&self.pool)
         .await
         .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn update_password(&self, id: i64, password_hash: &str) -> Result<(), RepositoryError> {
+        sqlx::query("UPDATE users SET password_hash = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(password_hash)
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn update_role(&self, id: i64, role: UserRole) -> Result<(), RepositoryError> {
+        sqlx::query("UPDATE users SET role = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(role.as_str())
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn delete(&self, id: i64) -> Result<(), RepositoryError> {
+        sqlx::query("DELETE FROM users WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(RepositoryError::from_sqlx)
     }
 
     async fn record_login(&self, id: i64) -> Result<(), RepositoryError> {
@@ -530,6 +593,293 @@ impl UserRepository for SqliteUserRepository {
         .map_err(RepositoryError::from_sqlx)?;
 
         Ok(result.rows_affected())
+    }
+}
+
+// ─── CMS pages (v0.8.0) ───────────────────────────────────────────────
+
+/// Values needed to insert a CMS page.
+#[derive(Debug, Clone)]
+pub struct NewPage {
+    /// Public URL identifier (`/p/<slug>`); uniqueness anchor.
+    pub slug: String,
+    /// Human title (rendered as the page heading and in listings).
+    pub title: String,
+    /// `.jhs` template source rendered on the fly.
+    pub content: String,
+    /// Whether the page is publicly visible (drafts are editors-only).
+    pub is_published: bool,
+    /// Author id (soft audit link; `NULL` keeps the page after deletion).
+    pub created_by: Option<i64>,
+}
+
+/// Field updates for an existing CMS page, addressed by id. A `None`
+/// slug keeps the current one.
+#[derive(Debug, Clone)]
+pub struct PageUpdate {
+    /// New slug, or `None` to keep the current one.
+    pub slug: Option<String>,
+    pub title: String,
+    pub content: String,
+    pub is_published: bool,
+}
+
+/// A persisted CMS page row (see `migrations/0003_*`).
+#[derive(Debug, Clone)]
+pub struct PageRecord {
+    pub id: i64,
+    pub slug: String,
+    pub title: String,
+    pub content: String,
+    pub is_published: bool,
+    pub created_by: Option<i64>,
+    /// Creation time, unix seconds.
+    pub created_at: i64,
+    /// Last edit time, unix seconds.
+    pub updated_at: i64,
+}
+
+/// Listing projection of a page (no `content`: listings stay small).
+#[derive(Debug, Clone)]
+pub struct PageSummary {
+    pub id: i64,
+    pub slug: String,
+    pub title: String,
+    pub is_published: bool,
+    pub updated_at: i64,
+}
+
+impl PageRecord {
+    /// The listing projection of the record.
+    pub fn summary(&self) -> PageSummary {
+        PageSummary {
+            id: self.id,
+            slug: self.slug.clone(),
+            title: self.title.clone(),
+            is_published: self.is_published,
+            updated_at: self.updated_at,
+        }
+    }
+}
+
+impl<'r> FromRow<'r, SqliteRow> for PageRecord {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, SqlxError> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            slug: row.try_get("slug")?,
+            title: row.try_get("title")?,
+            content: row.try_get("content")?,
+            is_published: row.try_get::<i64, _>("is_published")? != 0,
+            created_by: row.try_get("created_by")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+}
+
+impl<'r> FromRow<'r, SqliteRow> for PageSummary {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, SqlxError> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            slug: row.try_get("slug")?,
+            title: row.try_get("title")?,
+            is_published: row.try_get::<i64, _>("is_published")? != 0,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+}
+
+/// Storage abstraction for CMS pages.
+///
+/// Same shape as [`UserRepository`]: handlers depend on the trait, not
+/// on SQLite, so the storage can be swapped in tests or future phases.
+#[async_trait]
+pub trait PageRepository: Send + Sync + 'static {
+    /// Inserts a new page. Fails with [`RepositoryError::Duplicate`] when
+    /// the slug is already taken.
+    async fn create(&self, page: &NewPage) -> Result<PageRecord, RepositoryError>;
+
+    /// Looks up a page by id.
+    async fn find_by_id(&self, id: i64) -> Result<Option<PageRecord>, RepositoryError>;
+
+    /// Looks up a page by slug.
+    async fn find_by_slug(&self, slug: &str) -> Result<Option<PageRecord>, RepositoryError>;
+
+    /// Lists pages, newest first, up to `limit` rows. Drafts are only
+    /// included while `include_drafts` (the admin listing); the public
+    /// listing and the `pages` template global see published pages only.
+    async fn list(
+        &self,
+        include_drafts: bool,
+        limit: i64,
+    ) -> Result<Vec<PageSummary>, RepositoryError>;
+
+    /// Applies `update` to the page with `id`. Returns `None` when the
+    /// page does not exist, and fails with
+    /// [`RepositoryError::Duplicate`] when the new slug is taken.
+    async fn update(
+        &self,
+        id: i64,
+        update: &PageUpdate,
+    ) -> Result<Option<PageRecord>, RepositoryError>;
+
+    /// Deletes the page with `id`. Returns whether a row was removed.
+    async fn delete(&self, id: i64) -> Result<bool, RepositoryError>;
+
+    /// Counts all pages.
+    async fn count(&self) -> Result<i64, RepositoryError>;
+
+    /// Counts published pages.
+    async fn count_published(&self) -> Result<i64, RepositoryError>;
+}
+
+/// Column list shared by every `SELECT` on the `pages` table.
+const PAGE_COLUMNS: &str = "id, slug, title, content, is_published, created_by, \
+                           created_at, updated_at";
+
+/// Column list of the listing projection (no `content`).
+const PAGE_SUMMARY_COLUMNS: &str = "id, slug, title, is_published, updated_at";
+
+/// SQLite-backed [`PageRepository`] over a shared pool.
+#[derive(Clone)]
+pub struct SqlitePageRepository {
+    pool: SqlitePool,
+}
+
+impl SqlitePageRepository {
+    /// Wraps an already-migrated pool into a repository.
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl PageRepository for SqlitePageRepository {
+    async fn create(&self, page: &NewPage) -> Result<PageRecord, RepositoryError> {
+        let created_at = unix_now();
+        let updated_at = created_at;
+
+        let result = sqlx::query(
+            "INSERT INTO pages (slug, title, content, is_published, created_by, \
+             created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
+        .bind(&page.slug)
+        .bind(&page.title)
+        .bind(&page.content)
+        .bind(page.is_published)
+        .bind(page.created_by)
+        .bind(created_at)
+        .bind(updated_at)
+        .execute(&self.pool)
+        .await;
+
+        match result {
+            Ok(done) => Ok(PageRecord {
+                id: done.last_insert_rowid(),
+                slug: page.slug.clone(),
+                title: page.title.clone(),
+                content: page.content.clone(),
+                is_published: page.is_published,
+                created_by: page.created_by,
+                created_at,
+                updated_at,
+            }),
+            Err(error) => Err(RepositoryError::from_sqlx(error)),
+        }
+    }
+
+    async fn find_by_id(&self, id: i64) -> Result<Option<PageRecord>, RepositoryError> {
+        sqlx::query_as(&format!("SELECT {PAGE_COLUMNS} FROM pages WHERE id = ?1"))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn find_by_slug(&self, slug: &str) -> Result<Option<PageRecord>, RepositoryError> {
+        sqlx::query_as(&format!("SELECT {PAGE_COLUMNS} FROM pages WHERE slug = ?1"))
+            .bind(slug)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn list(
+        &self,
+        include_drafts: bool,
+        limit: i64,
+    ) -> Result<Vec<PageSummary>, RepositoryError> {
+        let sql = if include_drafts {
+            format!(
+                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages \
+                 ORDER BY updated_at DESC, id DESC LIMIT ?1"
+            )
+        } else {
+            format!(
+                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE is_published = 1 \
+                 ORDER BY updated_at DESC, id DESC LIMIT ?1"
+            )
+        };
+
+        sqlx::query_as(&sql)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn update(
+        &self,
+        id: i64,
+        update: &PageUpdate,
+    ) -> Result<Option<PageRecord>, RepositoryError> {
+        let updated_at = unix_now();
+
+        // `COALESCE` keeps the current slug when the update carries none
+        // (a `None` binding is SQL `NULL`).
+        let result = sqlx::query(
+            "UPDATE pages SET slug = COALESCE(?2, slug), title = ?3, content = ?4, \
+             is_published = ?5, updated_at = ?6 WHERE id = ?1",
+        )
+        .bind(id)
+        .bind(update.slug.as_deref())
+        .bind(&update.title)
+        .bind(&update.content)
+        .bind(update.is_published)
+        .bind(updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+
+        self.find_by_id(id).await
+    }
+
+    async fn delete(&self, id: i64) -> Result<bool, RepositoryError> {
+        let result = sqlx::query("DELETE FROM pages WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn count(&self) -> Result<i64, RepositoryError> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM pages")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn count_published(&self) -> Result<i64, RepositoryError> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM pages WHERE is_published = 1")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)
     }
 }
 

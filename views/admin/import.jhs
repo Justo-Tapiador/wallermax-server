@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Importar desde public/ — CMS wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+    <div class="panel-barra">
+      <h1>Importar desde public/</h1>
+      <a class="btn btn-fantasma" href="/admin/pages">Volver al listado</a>
+    </div>
+
+<?jhs if (form_error) { ?>
+    <p class="aviso aviso-error"><?= form_error ?></p>
+<?jhs } ?>
+
+    <section class="tarjeta">
+      <p>Elige un archivo del árbol estático para copiar su contenido a un
+         <strong>borrador</strong> nuevo. La importación <em>lee</em> de
+         <code>public/</code> pero nunca escribe en él: a partir de aquí la
+         página vive en SQLite y se edita desde el panel.</p>
+<?jhs if (files && files.length) { ?>
+      <form method="post" action="/admin/pages/import">
+        <ul class="lista">
+<?jhs files.forEach(function (archivo) { ?>
+          <li>
+            <div class="campo-check">
+              <input type="radio" id="archivo-<?= archivo.path.replace(/[^a-zA-Z0-9-]/g, "-") ?>"
+                     name="file" value="<?= archivo.path ?>" required>
+              <label for="archivo-<?= archivo.path.replace(/[^a-zA-Z0-9-]/g, "-") ?>">
+                <code><?= archivo.path ?></code>
+                <span class="secundario"><?= Math.round(archivo.bytes / 1024) ?> KB ·
+                  <?= archivo.kind == "jhs" ? "plantilla .jhs (se sigue renderizando)" : "HTML estático" ?>
+                </span>
+              </label>
+            </div>
+          </li>
+<?jhs }); ?>
+        </ul>
+        <button class="btn btn-primario" type="submit">Importar como borrador</button>
+      </form>
+<?jhs } else { ?>
+      <p class="vacio">No hay archivos <code>.html</code> o <code>.jhs</code>
+         importables en <code>public/</code> (se listan hasta 200, de 600 KB o
+         menos, y tres niveles de profundidad).</p>
+<?jhs } ?>
+    </section>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

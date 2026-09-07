@@ -54,6 +54,7 @@ impl FixtureDir {
         std::fs::write(views.join("boom.jhs"), BOOM_JHS).expect("boom write");
         std::fs::write(views.join("health.jhs"), VIEW_HEALTH).expect("health view write");
         std::fs::write(views.join("profile.jhs"), VIEW_PROFILE).expect("profile view write");
+        std::fs::write(views.join("login.jhs"), VIEW_LOGIN).expect("login view write");
         Self { path }
     }
 
@@ -117,6 +118,16 @@ const VIEW_PROFILE: &str = "\
 <?jhs } else { ?>\
 <h1>por favor, inicia sesión</h1>\
 <?jhs } ?>";
+
+const VIEW_LOGIN: &str = r#"<?jhs if (user) { ?>
+<p>Ya has iniciado sesión como <strong><?= user.username ?></strong>.</p>
+<form method="post" action="/api/auth/logout_all"><button>Cerrar sesión</button></form>
+<?jhs } else { ?>
+<form method="post" action="/api/auth/login">
+<input name="username"><input type="password" name="password">
+<input type="hidden" name="redirect" value="/profile">
+<button>Entrar</button></form>
+<?jhs } ?>"#;
 
 async fn body_json(response: reqwest::Response) -> Value {
     let bytes = response.bytes().await.expect("body bytes");
@@ -612,4 +623,144 @@ async fn user_is_null_when_auth_is_disabled() {
     assert_eq!(response.status(), 200);
     let body = response.text().await.expect("body text");
     assert_eq!(body, "<h1>por favor, inicia sesión</h1>");
+}
+
+// ── The session cookie personalises templates (v0.7.0) ──────────────
+
+#[tokio::test]
+async fn templates_personalise_from_the_session_cookie() {
+    let fixture = FixtureDir::create("cookie-profile");
+    let (config, _db) = fixture.config_with_auth(|_| {});
+    let server = TestServer::start_full(config).await;
+
+    let token = register_and_login(&server, "root-admin", "sup3r-secret!").await;
+
+    // No Authorization header: the cookie alone personalises the render,
+    // which is the whole point of the browser session.
+    let response = reqwest::Client::new()
+        .get(server.url("/profile"))
+        .header("Cookie", format!("wallermax_session={token}"))
+        .send()
+        .await
+        .expect("request ok");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("body text");
+    assert_eq!(body, "<h1>Bienvenido, administrador root-admin</h1>");
+}
+
+#[tokio::test]
+async fn templates_render_anonymous_for_invalid_session_cookies() {
+    let fixture = FixtureDir::create("cookie-garbage");
+    let (config, _db) = fixture.config_with_auth(|_| {});
+    let server = TestServer::start_full(config).await;
+
+    let response = reqwest::Client::new()
+        .get(server.url("/profile"))
+        .header("Cookie", "theme=dark; wallermax_session=not.a.jwt")
+        .send()
+        .await
+        .expect("request ok");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("body text");
+    assert_eq!(body, "<h1>por favor, inicia sesión</h1>");
+}
+
+// ── The `/login` view ────────────────────────────────────────────────
+
+#[tokio::test]
+async fn the_login_view_renders_a_plain_form_for_anonymous_visitors() {
+    let fixture = FixtureDir::create("login-anon");
+    let (config, _db) = fixture.config_with_auth(|_| {});
+    let server = TestServer::start_full(config).await;
+
+    let response = reqwest::get(server.url("/login"))
+        .await
+        .expect("request ok");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("body text");
+
+    // A real HTML form, POSTing to the API endpoint, no JavaScript.
+    assert!(
+        body.contains("action=\"/api/auth/login\""),
+        "form action: {body}"
+    );
+    assert!(body.contains("method=\"post\""), "form method: {body}");
+    assert!(body.contains("name=\"username\""), "username field: {body}");
+    assert!(body.contains("name=\"password\""), "password field: {body}");
+    assert!(
+        body.contains("name=\"redirect\" value=\"/profile\""),
+        "redirect field: {body}"
+    );
+    assert!(!body.contains("Ya has iniciado sesión"), "body: {body}");
+}
+
+#[tokio::test]
+async fn the_login_view_greets_cookie_authenticated_visitors() {
+    let fixture = FixtureDir::create("login-known");
+    let (config, _db) = fixture.config_with_auth(|_| {});
+    let server = TestServer::start_full(config).await;
+
+    let token = register_and_login(&server, "root-admin", "sup3r-secret!").await;
+    let response = reqwest::Client::new()
+        .get(server.url("/login"))
+        .header("Cookie", format!("wallermax_session={token}"))
+        .send()
+        .await
+        .expect("request ok");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("body text");
+
+    assert!(
+        body.contains("Ya has iniciado sesión como <strong>root-admin</strong>"),
+        "greeting: {body}"
+    );
+    assert!(
+        body.contains("action=\"/api/auth/logout_all\""),
+        "logout form: {body}"
+    );
+    assert!(!body.contains("name=\"password\""), "no login form: {body}");
+}
+
+#[tokio::test]
+async fn the_full_browser_flow_form_login_then_personalised_page() {
+    // The circle the session cookie closes: form login (as a browser
+    // would post it) → 303 → the personalised view with the cookie.
+    let fixture = FixtureDir::create("login-circle");
+    let (config, _db) = fixture.config_with_auth(|_| {});
+    let server = TestServer::start_full(config).await;
+    register_and_login(&server, "root-admin", "sup3r-secret!").await;
+
+    let browser = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("client builds");
+
+    let response = browser
+        .post(server.url("/api/auth/login"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("username=root-admin&password=sup3r-secret!&redirect=/profile")
+        .send()
+        .await
+        .expect("form login ok");
+    assert_eq!(response.status(), 303);
+    assert_eq!(response.headers()["location"], "/profile");
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .and_then(|value| value.to_str().ok())
+        .expect("session cookie set");
+    let token = cookie
+        .strip_prefix("wallermax_session=")
+        .and_then(|rest| rest.split(';').next())
+        .expect("cookie value");
+
+    let response = reqwest::Client::new()
+        .get(server.url("/profile"))
+        .header("Cookie", format!("wallermax_session={token}"))
+        .send()
+        .await
+        .expect("redirected page ok");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("body text");
+    assert_eq!(body, "<h1>Bienvenido, administrador root-admin</h1>");
 }

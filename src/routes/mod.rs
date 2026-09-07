@@ -13,6 +13,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod cms;
 pub mod echo;
 pub mod health;
 pub mod index;
@@ -39,6 +40,10 @@ use crate::state::AppState;
 /// `metrics` mounts the Prometheus exposition endpoint at its configured
 /// path while enabled.
 ///
+/// `cms_enabled` mounts the CMS family (`/p/{slug}`, `/admin/*` and
+/// `/perfil/password`), which additionally requires the template
+/// rendering services in the application state.
+///
 /// `static_files` mounts the static file family (see
 /// [`static_files`]): while enabled, `GET /` serves the index file and
 /// unmatched paths resolve against the static root instead of the JSON
@@ -48,6 +53,7 @@ pub fn routes(
     refresh_enabled: bool,
     static_files: &StaticConfig,
     metrics: &MetricsConfig,
+    cms_enabled: bool,
 ) -> Router<AppState> {
     let mut router = Router::new()
         .merge(index::routes())
@@ -59,6 +65,10 @@ pub fn routes(
         router = router
             .merge(auth::routes(refresh_enabled))
             .merge(admin::routes());
+    }
+
+    if cms_enabled {
+        router = router.merge(cms::routes());
     }
 
     if metrics.enabled {

@@ -65,6 +65,8 @@ pub struct AppConfig {
     pub database: DatabaseConfig,
     /// JWT authentication and user accounts.
     pub auth: AuthConfig,
+    /// The small built-in CMS (the `[cms]` section).
+    pub cms: CmsConfig,
     /// Static file serving (the `[static]` section).
     #[serde(rename = "static")]
     pub static_files: StaticConfig,
@@ -279,7 +281,14 @@ impl Default for SecurityHeadersConfig {
             x_content_type_options: String::from("nosniff"),
             x_frame_options: String::from("DENY"),
             referrer_policy: String::from("no-referrer"),
-            content_security_policy: String::from("default-src 'none'; frame-ancestors 'none'"),
+            // v0.8.0: styles and same-origin images are allowed for the
+            // CMS UI (stylesheet under `public/assets/`); scripts stay
+            // blocked — the whole site works without JavaScript.
+            // `form-action 'self'` pins form posts to this origin.
+            content_security_policy: String::from(
+                "default-src 'none'; style-src 'self'; img-src 'self' data:; \
+                 form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            ),
             strict_transport_security: String::from("max-age=31536000; includeSubDomains"),
         }
     }
@@ -340,6 +349,43 @@ pub struct AuthConfig {
     pub refresh_tokens_enabled: bool,
     /// Refresh token lifetime, in seconds (default: 30 days).
     pub refresh_token_ttl_secs: u64,
+    /// When the `wallermax_session` cookie carries the `Secure`
+    /// attribute (v0.8.0).
+    ///
+    /// `auto` (the default) sets `Secure` only while `[tls]` is enabled:
+    /// browsers refuse to store `Secure` cookies on plain-HTTP origins, so
+    /// an unconditional `Secure` broke browser logins on HTTP-only dev
+    /// servers (curl and PowerShell were lax about it, which made the
+    /// failure look mysterious). `always` and `never` pin the attribute
+    /// explicitly — `always` for TLS-terminating reverse proxies where the
+    /// server itself speaks HTTP.
+    pub secure_cookies: SecureCookieMode,
+}
+
+/// Policy for the `Secure` attribute of the session cookie.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SecureCookieMode {
+    /// `Secure` while `[tls] enabled = true` (the default).
+    #[default]
+    Auto,
+    /// Always `Secure`, even when the server itself speaks HTTP (for
+    /// TLS-terminating reverse proxies).
+    Always,
+    /// Never `Secure` (local-only HTTP testing).
+    Never,
+}
+
+impl SecureCookieMode {
+    /// Resolves the effective `Secure` flag for a server whose TLS state
+    /// is `tls_enabled`.
+    pub fn resolve(self, tls_enabled: bool) -> bool {
+        match self {
+            SecureCookieMode::Auto => tls_enabled,
+            SecureCookieMode::Always => true,
+            SecureCookieMode::Never => false,
+        }
+    }
 }
 
 impl Default for AuthConfig {
@@ -354,8 +400,39 @@ impl Default for AuthConfig {
             refresh_tokens_enabled: true,
             // 30 days, the common default for web sessions.
             refresh_token_ttl_secs: 2_592_000,
+            secure_cookies: SecureCookieMode::default(),
         }
     }
+}
+
+/// The small built-in CMS (the `[cms]` section).
+///
+/// While enabled — and it additionally requires `[database]`, `[auth]`
+/// and `[templates]` to be enabled — the server mounts a database-backed
+/// content layer on top of the v0.7.0 session groundwork:
+///
+/// - **Public site**: `GET /p` lists published pages; `GET /p/<slug>`
+///   renders one (page bodies are `.jhs` template source, so they see
+///   the `user` global and can embed the shared partials through
+///   `<?jhs include("partials/header") ?>`);
+/// - **Admin panel**: `/admin` (pages, import-from-`public/`, users) for
+///   the `admin` and `editor` roles — pure HTML forms, no JavaScript,
+///   everything audited on the server side.
+///
+/// The panel manages **content and CMS users only**: server configuration
+/// (ports, TLS, secrets, middleware) stays in `wallermax.toml`, which is
+/// only writable with local repository access — the deliberate
+/// privilege split between the CMS administrator and the server
+/// operator.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CmsConfig {
+    /// Enables the CMS routes and services.
+    ///
+    /// The `Default` is `false` — opt-in like `[database]`, `[auth]` and
+    /// `[templates]`: the lean server keeps the section off until the
+    /// configuration file (the shipped `wallermax.toml`) turns it on.
+    pub enabled: bool,
 }
 
 /// Static file serving settings.
@@ -595,6 +672,7 @@ impl AppConfig {
         self.validate_security_headers()?;
         self.validate_database()?;
         self.validate_auth()?;
+        self.validate_cms()?;
         self.validate_static()?;
         self.validate_templates()?;
         self.validate_metrics()?;
@@ -708,6 +786,30 @@ impl AppConfig {
         if self.auth.refresh_token_ttl_secs == 0 {
             return Err(ConfigError::Message(
                 "`auth.refresh_token_ttl_secs` must be greater than zero".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validates the `[cms]` section.
+    ///
+    /// The cross-feature requirements (`database`, `auth`, `templates`)
+    /// are enforced here as hard errors when `cms.enabled` is set: a
+    /// silently degraded CMS would be far more confusing than a clear
+    /// startup failure.
+    fn validate_cms(&self) -> Result<(), ConfigError> {
+        if !self.cms.enabled {
+            return Ok(());
+        }
+        if !self.database.enabled || !self.auth.enabled {
+            return Err(ConfigError::Message(
+                "`cms.enabled` requires both `database.enabled` and `auth.enabled`".to_owned(),
+            ));
+        }
+        if !self.templates.enabled {
+            return Err(ConfigError::Message(
+                "`cms.enabled` requires `templates.enabled` (CMS pages are `.jhs` content)"
+                    .to_owned(),
             ));
         }
         Ok(())

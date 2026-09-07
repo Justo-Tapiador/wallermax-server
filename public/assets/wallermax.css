@@ -1,0 +1,402 @@
+/* wallermax — hoja de estilos del sitio y del CMS (v0.8.0).
+ *
+ * Sin JavaScript: los modales de login/registro usan el truco CSS
+ * :target (el enlace abre, "cerrar" navega a #modal-cerrada), y todo lo
+ * demás son formularios y enlaces normales. La CSP por defecto
+ * (`default-src 'none'; style-src 'self' …`) la permite tal cual.
+ */
+
+:root {
+  --tinta: #1c2733;
+  --tinta-suave: #51606f;
+  --tinta-flojo: #7d8a97;
+  --papel: #f7f5f1;
+  --papel-tarjeta: #ffffff;
+  --borde: #e2ddd4;
+  --acento: #b3541e;
+  --acento-oscuro: #8f4014;
+  --acento-suave: #f6e8dd;
+  --ok: #1e6b40;
+  --ok-suave: #e2f2e8;
+  --error: #a02c2c;
+  --error-suave: #f8e7e7;
+  --radio: 10px;
+  --sombra: 0 1px 2px rgba(28, 39, 51, 0.06), 0 8px 24px rgba(28, 39, 51, 0.08);
+  --mono: ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--tinta);
+  background: var(--papel);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.wrap {
+  width: 100%;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 20px;
+}
+
+a { color: var(--acento); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:hover { color: var(--acento-oscuro); }
+
+code, kbd { font-family: var(--mono); font-size: 0.9em; background: var(--acento-suave); padding: 1px 5px; border-radius: 4px; }
+
+/* ── Cabecera ─────────────────────────────────────────────── */
+
+.cab {
+  background: var(--papel-tarjeta);
+  border-bottom: 1px solid var(--borde);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.cab-fila {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-height: 60px;
+  flex-wrap: wrap;
+  padding: 6px 0;
+}
+
+.marca {
+  font-weight: 800;
+  font-size: 1.12rem;
+  letter-spacing: 0.2px;
+  color: var(--tinta);
+  text-decoration: none;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.marca span {
+  color: var(--acento);
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+}
+
+.nav { display: flex; gap: 4px; flex-wrap: wrap; }
+
+.nav a {
+  color: var(--tinta-suave);
+  text-decoration: none;
+  padding: 7px 12px;
+  border-radius: 8px;
+  font-weight: 500;
+}
+
+.nav a:hover { color: var(--tinta); background: var(--papel); }
+
+.sesion {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--tinta-suave);
+  background: var(--papel);
+  border: 1px solid var(--borde);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+
+.chip-acento { color: var(--acento-oscuro); background: var(--acento-suave); border-color: #ecd9c8; }
+
+/* ── Botones y formularios ────────────────────────────────── */
+
+.btn {
+  display: inline-block;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 8px 16px;
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.92rem;
+  text-decoration: none;
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.btn-primario { background: var(--acento); color: #fff; }
+.btn-primario:hover { background: var(--acento-oscuro); color: #fff; }
+
+.btn-fantasma {
+  background: transparent;
+  color: var(--tinta-suave);
+  border-color: var(--borde);
+}
+
+.btn-fantasma:hover { color: var(--tinta); background: var(--papel); }
+
+.btn-peligro { background: #fff; color: var(--error); border-color: #e8c9c9; }
+.btn-peligro:hover { background: var(--error-suave); color: var(--error); }
+
+.btn-apariencia-enlace {
+  background: none;
+  border: none;
+  padding: 8px 10px;
+  color: var(--tinta-flojo);
+  font: inherit;
+  font-size: 0.92rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.btn-apariencia-enlace:hover { color: var(--acento); text-decoration: underline; }
+
+.campo { margin: 0 0 16px; }
+
+.campo label {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--tinta-suave);
+  margin-bottom: 5px;
+}
+
+.campo input[type="text"],
+.campo input[type="password"],
+.campo select,
+.campo textarea {
+  width: 100%;
+  border: 1px solid var(--borde);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--tinta);
+  font: inherit;
+  padding: 9px 12px;
+}
+
+.campo textarea {
+  font-family: var(--mono);
+  font-size: 0.88rem;
+  line-height: 1.5;
+  min-height: 420px;
+  resize: vertical;
+}
+
+.campo input:focus,
+.campo select:focus,
+.campo textarea:focus,
+.btn:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--acento);
+  outline-offset: 1px;
+}
+
+.campo .ayuda { font-size: 0.8rem; color: var(--tinta-flojo); margin-top: 4px; }
+
+.campo-check { display: flex; align-items: center; gap: 8px; }
+.campo-check input { width: 18px; height: 18px; accent-color: var(--acento); }
+.campo-check label { margin: 0; font-weight: 500; color: var(--tinta); }
+
+/* ── Avisos (flash) ───────────────────────────────────────── */
+
+.aviso {
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 0.92rem;
+  margin: 0 0 16px;
+  border: 1px solid transparent;
+}
+
+.aviso-ok { background: var(--ok-suave); color: var(--ok); border-color: #cfe6d8; }
+.aviso-error { background: var(--error-suave); color: var(--error); border-color: #eed3d3; }
+.aviso-info { background: var(--acento-suave); color: var(--acento-oscuro); border-color: #ecd9c8; }
+
+/* ── Contenido ────────────────────────────────────────────── */
+
+main { flex: 1; padding: 34px 0 46px; }
+
+.hero { margin-bottom: 30px; }
+
+.hero h1 {
+  margin: 0 0 10px;
+  font-size: clamp(1.7rem, 4vw, 2.4rem);
+  line-height: 1.2;
+  letter-spacing: -0.5px;
+}
+
+.hero p { color: var(--tinta-suave); max-width: 62ch; margin: 0; }
+
+.tarjeta {
+  background: var(--papel-tarjeta);
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+  box-shadow: var(--sombra);
+  padding: 26px;
+}
+
+.tarjeta + .tarjeta { margin-top: 18px; }
+
+.tarjeta h1, .tarjeta h2 { margin-top: 0; }
+
+.tarjeta-angosta { max-width: 460px; margin-inline: auto; }
+
+.pagina-meta {
+  color: var(--tinta-flojo);
+  font-size: 0.85rem;
+  border-bottom: 1px solid var(--borde);
+  padding-bottom: 12px;
+  margin-bottom: 18px;
+}
+
+.pagina-cuerpo { line-height: 1.7; }
+.pagina-cuerpo h2 { margin-top: 1.6em; }
+.pagina-cuerpo table { border-collapse: collapse; }
+.pagina-cuerpo th, .pagina-cuerpo td { border: 1px solid var(--borde); padding: 6px 10px; }
+.pagina-cuerpo img { max-width: 100%; }
+.pagina-cuerpo pre { overflow-x: auto; padding: 12px; background: var(--papel); border-radius: 8px; }
+
+/* ── Listas de páginas / usuarios ─────────────────────────── */
+
+.lista { list-style: none; margin: 0; padding: 0; }
+
+.lista li {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--borde);
+  flex-wrap: wrap;
+}
+
+.lista li:last-child { border-bottom: none; }
+
+.lista .principal { flex: 1; min-width: 200px; }
+.lista .principal a { font-weight: 600; text-decoration: none; }
+.lista .principal a:hover { text-decoration: underline; }
+.lista .secundario { color: var(--tinta-flojo); font-size: 0.82rem; }
+.lista .acciones { display: flex; gap: 6px; align-items: center; }
+
+.borrador { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: #8a6116; background: #f7edd6; border-radius: 999px; padding: 2px 8px; }
+.publicado { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--ok); background: var(--ok-suave); border-radius: 999px; padding: 2px 8px; }
+
+.vacio { color: var(--tinta-flojo); padding: 26px 0; text-align: center; }
+
+/* ── Panel de administración ──────────────────────────────── */
+
+.panel-barra {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+
+.panel-barra h1, .panel-barra h2 { margin: 0; font-size: 1.35rem; flex: 1; }
+
+.rejilla-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+  margin-bottom: 22px;
+}
+
+.stat {
+  background: var(--papel-tarjeta);
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+  padding: 16px 18px;
+}
+
+.stat .valor { font-size: 1.9rem; font-weight: 800; line-height: 1.1; }
+.stat .etiqueta { color: var(--tinta-suave); font-size: 0.85rem; margin-top: 2px; }
+
+.accion-peligro { margin-top: 22px; border-top: 1px dashed var(--borde); padding-top: 16px; }
+
+.accion-peligro legend, .accion-peligro p { font-size: 0.85rem; color: var(--tinta-flojo); margin: 0 0 8px; }
+
+/* ── Modales (:target, sin JavaScript) ────────────────────── */
+
+#modal-cerrada { position: absolute; }
+
+.modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  padding: 24px;
+  overflow-y: auto;
+}
+
+.modal:target { display: flex; align-items: flex-start; justify-content: center; }
+
+.modal-fondo {
+  position: fixed;
+  inset: 0;
+  background: rgba(28, 39, 51, 0.55);
+}
+
+.modal-tarjeta {
+  position: relative;
+  background: var(--papel-tarjeta);
+  border-radius: var(--radio);
+  box-shadow: var(--sombra);
+  width: 100%;
+  max-width: 400px;
+  margin-top: 8vh;
+  padding: 26px;
+}
+
+.modal-tarjeta h2 { margin: 0 0 8px; font-size: 1.25rem; }
+
+.modal-cierre {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  text-decoration: none;
+  color: var(--tinta-flojo);
+  font-size: 1.15rem;
+  line-height: 1;
+  padding: 6px;
+}
+
+.modal-cierre:hover { color: var(--error); }
+
+.modal-pie { font-size: 0.85rem; color: var(--tinta-flojo); margin: 14px 0 0; }
+
+/* ── Pie ──────────────────────────────────────────────────── */
+
+.pie {
+  border-top: 1px solid var(--borde);
+  color: var(--tinta-flojo);
+  font-size: 0.85rem;
+  padding: 18px 0;
+  margin-top: auto;
+  background: var(--papel-tarjeta);
+}
+
+.pie .wrap { display: flex; gap: 14px; flex-wrap: wrap; justify-content: space-between; }
+
+/* ── Responsivo ───────────────────────────────────────────── */
+
+@media (max-width: 640px) {
+  .cab-fila { gap: 10px; }
+  .sesion { margin-left: 0; width: 100%; }
+  .tarjeta { padding: 18px; }
+  .modal { padding: 12px; }
+  .modal-tarjeta { margin-top: 4vh; }
+  .lista li { gap: 8px; }
+}

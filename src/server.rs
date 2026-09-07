@@ -24,9 +24,9 @@ use tokio::sync::watch;
 
 use crate::auth::JwtService;
 use crate::config::AppConfig;
-use crate::db::{self, SqliteUserRepository};
+use crate::db::{self, SqlitePageRepository, SqliteUserRepository};
 use crate::routes;
-use crate::state::{AppState, AuthContext};
+use crate::state::{AppState, AuthContext, CmsContext};
 
 /// Startup/serving error type (kept simple on purpose; a dedicated error
 /// enum can be introduced in a later phase if the surface grows).
@@ -47,6 +47,7 @@ pub fn build_app(config: &AppConfig, state: AppState) -> Router {
         refresh_enabled,
         &config.static_files,
         &config.metrics,
+        state.cms_enabled(),
     );
     build_app_with_routes(config, state, router)
 }
@@ -128,7 +129,7 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
     let auth = if config.auth.enabled {
         let registration_enabled = config.auth.registration_enabled;
         Some(AuthContext {
-            repository: Arc::new(SqliteUserRepository::new(pool)),
+            repository: Arc::new(SqliteUserRepository::new(pool.clone())),
             jwt: JwtService::new(
                 &config.auth.jwt_secret,
                 &config.auth.issuer,
@@ -143,6 +144,22 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
         None
     };
 
+    // The CMS mounts when enabled AND its prerequisites (database,
+    // auth, templates) are on — `validate_cms` enforces the same rule
+    // at load time, so the silent skip here only guards embedders that
+    // build states directly.
+    let cms = match (auth.is_some(), config.cms.enabled, config.templates.enabled) {
+        (true, true, true) => Some(CmsContext {
+            pages: Arc::new(SqlitePageRepository::new(pool)),
+        }),
+        _ => None,
+    };
+    if config.cms.enabled && cms.is_none() {
+        tracing::warn!(
+            "cms.enabled is set but database/auth/templates are off; the CMS stays unmounted"
+        );
+    }
+
     if config.auth.enabled {
         tracing::info!(
             registration_enabled = config.auth.registration_enabled,
@@ -153,6 +170,13 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
         );
     }
 
+    if cms.is_some() {
+        tracing::info!(
+            "cms enabled (public pages at /p, admin panel at /admin; content and users — \
+             server configuration stays in wallermax.toml)"
+        );
+    }
+
     if config.metrics.enabled {
         tracing::info!(
             path = %config.metrics.path,
@@ -160,9 +184,10 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
         );
     }
 
-    let state = match auth {
-        Some(auth) => AppState::with_auth(config.clone(), auth),
-        None => AppState::new(config.clone()),
+    let state = match (auth, cms) {
+        (Some(auth), Some(cms)) => AppState::with_cms(config.clone(), auth, cms),
+        (Some(auth), None) => AppState::with_auth(config.clone(), auth),
+        (None, _) => AppState::new(config.clone()),
     };
 
     Ok(state)

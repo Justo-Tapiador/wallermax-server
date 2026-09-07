@@ -2,7 +2,7 @@
 //!
 //! A modular, secure and high-performance web server written in Rust.
 //!
-//! This is the **Phase 5 release**: on top of the Phase 4
+//! This is the **v0.8.0 release**: on top of the Phase 4
 //! production-readiness stack — layered configuration (built-in
 //! defaults, `TOML` files and environment variables), a composable
 //! middleware pipeline (security headers, CORS, request-id, logging,
@@ -10,28 +10,30 @@
 //! user storage behind the [`UserRepository`](db::UserRepository)
 //! abstraction, JWT authentication with roles and rotating refresh
 //! tokens, static file serving, a Prometheus metrics endpoint,
-//! proxy-aware client IPs and optional TLS (rustls) — it adds the
-//! **dynamic `.jhs` template engine** ([`template_engine`]): PHP-style
-//! JavaScript templates rendered in a hardened sandbox, served on the
-//! fly from `[static]` and auto-routed from `[templates] views_dir`.
-//! See `README.md` for the full feature list and the phase-by-phase
-//! roadmap.
+//! proxy-aware client IPs and optional TLS (rustls) — and the Phase 5
+//! **dynamic `.jhs` template engine** ([`template_engine`]) — it adds
+//! the **small built-in CMS** ([`routes::cms`]): database-backed pages
+//! rendered as sandboxed templates at `/p/{slug}`, a JavaScript-free
+//! admin panel for content and accounts, login/registration modals and
+//! the browser session layer of v0.7.0. See `README.md` for the full
+//! feature list and the phase-by-phase roadmap.
 //!
 //! ## Module map
 //!
 //! | Module               | Responsibility                                            |
 //! |----------------------|-----------------------------------------------------------|
 //! | [`config`]           | Layered configuration (defaults, `TOML`, environment)     |
-//! | [`state`]            | Shared application state, config, limiter, auth, metrics  |
+//! | [`state`]            | Shared application state, config, limiter, auth, CMS      |
 //! | [`error`]            | Application-wide error model with JSON responses           |
 //! | [`rate_limit`]       | Token-bucket rate limiter (per client IP)                  |
 //! | [`proxy`]            | Trusted proxies, CIDR matching, client IP resolution       |
 //! | [`auth`]             | Argon2id hashing, JWT access tokens, refresh tokens        |
-//! | [`db`]               | SQLite pool, migrations, `UserRepository` trait            |
+//! | [`db`]               | SQLite pool, migrations, user and page repositories        |
+//! | [`session`]          | Browser session cookie (`wallermax_session`)               |
 //! | [`metrics`]          | Prometheus registry and exposition                        |
 //! | [`extractors`]       | `AuthUser` / `AdminUser` / `JsonBody` extractors           |
 //! | [`template_engine`]  | Sandboxed `.jhs` template rendering (`[templates]`)         |
-//! | [`routes`]           | Route modules (`/`, `/api`, `/health`, auth, admin, static) |
+//! | [`routes`]           | Route modules (`/`, `/api`, `/health`, auth, admin, CMS)   |
 //! | [`middleware`]       | Composable request/response middleware                     |
 //! | [`logging`]          | `tracing` subscriber setup                                 |
 //! | [`server`]           | Server bootstrap, TLS, graceful shutdown                   |
@@ -53,6 +55,7 @@ pub mod proxy;
 pub mod rate_limit;
 pub mod routes;
 pub mod server;
+pub mod session;
 pub mod state;
 pub mod template_engine;
 

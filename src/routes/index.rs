@@ -66,6 +66,15 @@ async fn index(State(state): State<AppState>) -> Json<IndexResponse> {
         }
     }
 
+    if state.cms_enabled() {
+        endpoints.extend([
+            "GET /p (public pages index)",
+            "GET /p/{slug} (CMS page)",
+            "GET /admin (CMS panel)",
+            "POST /perfil/password (self password change)",
+        ]);
+    }
+
     Json(IndexResponse {
         service: env!("CARGO_PKG_NAME"),
         version: env!("CARGO_PKG_VERSION"),

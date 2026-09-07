@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Página no encontrada — wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+    <section class="tarjeta tarjeta-angosta">
+      <h1>404 — Página no encontrada</h1>
+      <p>No hay nada en <code><?= path ?></code>. Si esperabas una página del
+         CMS, puede que sea un borrador o que la hayan movido.</p>
+      <p><a class="btn btn-primario" href="/p">Ver las páginas publicadas</a></p>
+    </section>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

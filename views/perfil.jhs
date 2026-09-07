@@ -1,7 +1,72 @@
-<?jhs if (user && user.role == 'admin') { ?>
-<h1>Bienvenido, administrador <?= user.username ?></h1>
-<?jhs } else if (user) { ?>
-<h1>Hola <?= user.username ?> (<?= user.role ?>)</h1>
-<?jhs } else { ?>
-<h1>por favor, inicia sesión</h1>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tu perfil — wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+<?jhs
+  var mensajesPw = {
+    actual: "La contraseña actual no coincide.",
+    nueva: "La contraseña nueva no cumple los requisitos (longitud mínima 8).",
+    forma: "El formulario no llegó bien; inténtalo de nuevo.",
+    sesion: "Tu sesión ya no es válida; inicia sesión de nuevo.",
+    error: "No se pudo cambiar la contraseña (error interno)."
+  };
+  var errorPw = query.pw_error ? (mensajesPw[query.pw_error] || "No se pudo cambiar la contraseña.") : null;
+?>
+<?jhs if (user) { ?>
+<?jhs if (query.ok == "contrasena") { ?>
+    <p class="aviso aviso-ok">Contraseña actualizada.</p>
 <?jhs } ?>
+<?jhs if (errorPw) { ?>
+    <p class="aviso aviso-error"><?= errorPw ?></p>
+<?jhs } ?>
+    <section class="tarjeta tarjeta-angosta">
+      <h1>Tu perfil</h1>
+      <p>Sesión iniciada como <strong><?= user.username ?></strong> con rol
+         <span class="chip chip-acento"><?= user.role ?></span>.</p>
+      <p>La sesión se mantiene en una cookie <code>wallermax_session</code>
+         gestionada por el servidor: <code>HttpOnly</code> (ningún script puede
+         leerla), <code>SameSite=Strict</code> y caducidad ligada al token.</p>
+<?jhs if (user.role == "admin" || user.role == "editor") { ?>
+      <p><a class="btn btn-fantasma" href="/admin">Abrir el panel del CMS</a></p>
+<?jhs } ?>
+    </section>
+
+    <section class="tarjeta tarjeta-angosta" aria-labelledby="pw-titulo">
+      <h2 id="pw-titulo">Cambiar tu contraseña</h2>
+      <form method="post" action="/perfil/password">
+        <input type="hidden" name="redirect" value="/perfil">
+        <div class="campo">
+          <label for="pw-actual">Contraseña actual</label>
+          <input id="pw-actual" type="password" name="current_password" required
+                 autocomplete="current-password">
+        </div>
+        <div class="campo">
+          <label for="pw-nueva">Contraseña nueva</label>
+          <input id="pw-nueva" type="password" name="new_password" required
+                 minlength="8" autocomplete="new-password">
+          <p class="ayuda">Al menos 8 caracteres.</p>
+        </div>
+        <button class="btn btn-primario" type="submit">Guardar la nueva contraseña</button>
+      </form>
+    </section>
+<?jhs } else { ?>
+    <section class="tarjeta tarjeta-angosta">
+      <h1>Perfil</h1>
+      <p>Esta página es solo para sesiones iniciadas. Entra con tu cuenta
+         desde la cabecera o ve al <a href="/login">formulario de
+         acceso</a>.</p>
+    </section>
+<?jhs } ?>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

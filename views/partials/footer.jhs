@@ -1,0 +1,6 @@
+<footer class="pie">
+  <div class="wrap">
+    <span>wallermax-server — servido sin una línea de JavaScript.</span>
+    <span><a href="/api">API</a> · <a href="/health">Estado</a> · <a href="/p">Páginas</a></span>
+  </div>
+</footer>

@@ -39,6 +39,17 @@ use serde_json::{Map, Value};
 
 use super::parser::{self, TagOptions};
 
+/// Maximum nesting depth of the compile-time `include()` resolution
+/// (a partial including a partial including ...).
+const INCLUDE_MAX_DEPTH: usize = 8;
+
+/// Maximum total bytes of embedded partial sources during one
+/// resolution pass — the include-bomb guard.
+const INCLUDE_MAX_BYTES: usize = 1_048_576;
+
+/// Maximum length of an `include()` name.
+const INCLUDE_MAX_NAME_LEN: usize = 64;
+
 /// Sandbox and caching options (mirrors the original constructor).
 #[derive(Debug, Clone)]
 pub struct JhsOptions {
@@ -71,13 +82,15 @@ impl Default for JhsOptions {
 }
 
 /// Data keys that may not shadow the sandbox helpers.
-const PROTECTED_GLOBALS: [&str; 6] = [
+const PROTECTED_GLOBALS: [&str; 8] = [
     "__escape",
     "escapeHtml",
     "raw",
     "console",
     "JSON",
     "__jhsConsoleLines",
+    "include",
+    "__jhsEchoPart",
 ];
 
 /// Error produced while rendering a template.
@@ -85,6 +98,10 @@ const PROTECTED_GLOBALS: [&str; 6] = [
 pub enum JhsError {
     /// The template file could not be read.
     Io(std::io::Error),
+    /// A `<?jhs include("name") ?>` block could not be resolved: the
+    /// name is invalid, the partial is missing, or the resolution
+    /// exceeded its depth/size budget. The message is author-facing.
+    Include(String),
     /// The template threw while executing; the message carries the
     /// original engine's wording, `Template execution error (<path>): …`.
     Execution {
@@ -99,6 +116,7 @@ impl std::fmt::Display for JhsError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             JhsError::Io(error) => write!(formatter, "template file error: {error}"),
+            JhsError::Include(message) => write!(formatter, "template include error: {message}"),
             JhsError::Execution { message, .. } => write!(formatter, "{message}"),
         }
     }
@@ -108,7 +126,7 @@ impl std::error::Error for JhsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             JhsError::Io(error) => Some(error),
-            JhsError::Execution { .. } => None,
+            JhsError::Include(_) | JhsError::Execution { .. } => None,
         }
     }
 }
@@ -145,6 +163,11 @@ pub struct JhsEngine {
 struct CachedTemplate {
     program: String,
     mtime: Option<SystemTime>,
+    /// Partial files embedded by the compile-time `include()`
+    /// resolution, with their mtimes at compile time — a change in any
+    /// of them invalidates the cached program exactly like a change in
+    /// the main file does.
+    includes: Vec<(PathBuf, Option<SystemTime>)>,
 }
 
 impl JhsEngine {
@@ -164,10 +187,14 @@ impl JhsEngine {
     /// Renders the template at `template_path` (absolute, or relative to
     /// the configured views path) with the given data.
     ///
+    /// Standalone `<?jhs include("name") ?>` blocks are resolved against
+    /// the views directory at compile time.
+    ///
     /// # Errors
     ///
-    /// Returns [`JhsError::Io`] when the file cannot be read and
-    /// [`JhsError::Execution`] when the template throws.
+    /// Returns [`JhsError::Io`] when the file cannot be read,
+    /// [`JhsError::Include`] when an embedded partial cannot be resolved
+    /// and [`JhsError::Execution`] when the template throws.
     pub fn render(
         &self,
         template_path: &str,
@@ -183,17 +210,25 @@ impl JhsEngine {
         self.execute(&program, data, &label)
     }
 
-    /// Renders a template from a raw string (labelled `<string>`).
+    /// Renders a template from a raw string (labelled `<string>`),
+    /// resolving standalone `<?jhs include("name") ?>` blocks against
+    /// the views directory first.
+    ///
+    /// This is the CMS seam: page content stored in the database is
+    /// ordinary `.jhs` source, so CMS pages can embed the same shared
+    /// partials (header, footer) as the built-in views.
     ///
     /// # Errors
     ///
-    /// Returns [`JhsError::Execution`] when the template throws.
+    /// Returns [`JhsError::Include`] when an embedded partial cannot be
+    /// resolved and [`JhsError::Execution`] when the template throws.
     pub fn render_string(
         &self,
         template: &str,
         data: &Map<String, Value>,
     ) -> Result<RenderOutput, JhsError> {
-        let program = parser::compile(template, &self.options.tags);
+        let resolved = self.resolve_includes(template, 0, &mut 0, &mut Vec::new())?;
+        let program = parser::compile(&resolved, &self.options.tags);
         self.execute(&program, data, "<string>")
     }
 
@@ -203,6 +238,10 @@ impl JhsEngine {
     }
 
     /// Loads (and caches) the compiled program for `path`.
+    ///
+    /// A cache hit requires the main file's mtime **and** every embedded
+    /// partial's mtime to be unchanged; editing a partial recompiles the
+    /// templates that embed it.
     fn load_program(&self, path: &Path) -> Result<String, JhsError> {
         let mtime = std::fs::metadata(path)
             .and_then(|metadata| metadata.modified())
@@ -210,14 +249,21 @@ impl JhsEngine {
 
         if self.options.cache {
             if let Some(hit) = self.cache.lock().expect("template cache mutex").get(path) {
-                if hit.mtime == mtime {
+                if hit.mtime == mtime
+                    && hit
+                        .includes
+                        .iter()
+                        .all(|(partial, at)| include_mtime(partial) == *at)
+                {
                     return Ok(hit.program.clone());
                 }
             }
         }
 
         let source = std::fs::read_to_string(path).map_err(JhsError::Io)?;
-        let program = parser::compile(&source, &self.options.tags);
+        let mut includes = Vec::new();
+        let resolved = self.resolve_includes(&source, 0, &mut 0, &mut includes)?;
+        let program = parser::compile(&resolved, &self.options.tags);
 
         if self.options.cache {
             self.cache.lock().expect("template cache mutex").insert(
@@ -225,11 +271,112 @@ impl JhsEngine {
                 CachedTemplate {
                     program: program.clone(),
                     mtime,
+                    includes,
                 },
             );
         }
 
         Ok(program)
+    }
+
+    /// Resolves standalone include blocks in `source` by embedding the
+    /// referenced partials (read from the views directory) in their
+    /// place, recursively.
+    ///
+    /// Only a code block whose whole body is a single `include("name")`
+    /// call is resolved — the include must stand alone:
+    ///
+    /// ```text
+    /// <?jhs include("partials/header") ?>
+    /// ```
+    ///
+    /// Any other use (inside an expression, with extra statements) is
+    /// left untouched and fails at execution time on the sandbox's
+    /// descriptive `include` stub. The embedded partial shares the
+    /// render's data — it is compiled into the same program — so
+    /// `user`, `path`, `query`, `pages` … are available inside it.
+    ///
+    /// `budget` caps the total bytes of embedded sources and `tracked`
+    /// collects the partial paths (for cache invalidation).
+    fn resolve_includes(
+        &self,
+        source: &str,
+        depth: usize,
+        budget: &mut usize,
+        tracked: &mut Vec<(PathBuf, Option<SystemTime>)>,
+    ) -> Result<String, JhsError> {
+        let tags = &self.options.tags;
+        let mut out = String::with_capacity(source.len());
+        let mut cursor = 0;
+
+        while let Some(open_offset) = source[cursor..].find(tags.open_tag.as_str()) {
+            let open_at = cursor + open_offset;
+            let body_start = open_at + tags.open_tag.len();
+
+            let Some(close_offset) = source[body_start..].find(tags.close_tag.as_str()) else {
+                // Unclosed code tag: keep the remainder verbatim, exactly
+                // like the parser would.
+                out.push_str(&source[cursor..]);
+                return Ok(out);
+            };
+            let close_at = body_start + close_offset;
+            let body = &source[body_start..close_at];
+
+            // Literal text between the previous tag and this one is kept,
+            // exactly like the parser's own pass two.
+            if open_at > cursor {
+                out.push_str(&source[cursor..open_at]);
+            }
+
+            if let Some(name) = standalone_include(body) {
+                let partial = self.read_include(name, depth, budget, tracked)?;
+                out.push_str(&partial);
+            } else {
+                out.push_str(&source[open_at..close_at + tags.close_tag.len()]);
+            }
+
+            cursor = close_at + tags.close_tag.len();
+        }
+
+        out.push_str(&source[cursor..]);
+        Ok(out)
+    }
+
+    /// Reads the partial named `name` from the views directory,
+    /// resolving its own includes one level deeper.
+    fn read_include(
+        &self,
+        name: &str,
+        depth: usize,
+        budget: &mut usize,
+        tracked: &mut Vec<(PathBuf, Option<SystemTime>)>,
+    ) -> Result<String, JhsError> {
+        if depth >= INCLUDE_MAX_DEPTH {
+            return Err(JhsError::Include(format!(
+                "`{name}` exceeds the maximum include nesting depth ({INCLUDE_MAX_DEPTH})"
+            )));
+        }
+
+        let path = include_path(&self.options.views_path, name)?;
+        let mtime = std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        let source = std::fs::read_to_string(&path).map_err(|error| {
+            JhsError::Include(format!(
+                "`{name}` could not be read from the views directory ({error})"
+            ))
+        })?;
+
+        *budget += source.len();
+        if *budget > INCLUDE_MAX_BYTES {
+            return Err(JhsError::Include(format!(
+                "embedding `{name}` exceeds the total include size budget \
+                 ({INCLUDE_MAX_BYTES} bytes)"
+            )));
+        }
+
+        tracked.push((path, mtime));
+        self.resolve_includes(&source, depth + 1, budget, tracked)
     }
 
     /// Runs `program` in a fresh sandbox with `data` injected.
@@ -273,6 +420,79 @@ fn execution_error(path: &str, message: &str) -> JhsError {
     }
 }
 
+/// Parses the include target of a **standalone** code block: the whole
+/// body must be a single `include("name")` (or single-quoted) call,
+/// optionally surrounded by whitespace.
+///
+/// Returns the raw name; validation happens in [`include_path`].
+fn standalone_include(body: &str) -> Option<&str> {
+    let body = body.trim();
+    let rest = body.strip_prefix("include")?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix('(')?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix('"').or_else(|| rest.strip_prefix('\''))?;
+    let end = rest.find(['"', '\''])?;
+    let name = &rest[..end];
+    // Everything after the closing quote must be `)` (with whitespace).
+    let tail = rest[end + 1..].trim();
+    if tail != ")" || name.is_empty() {
+        return None;
+    }
+    Some(name)
+}
+
+/// Builds the path of the partial `name` inside `views_dir`, rejecting
+/// every shape that could escape it.
+///
+/// Valid names are relative paths made of `[A-Za-z0-9_-]` segments
+/// joined by `/`, without a leading or trailing slash, with at most
+/// [`INCLUDE_MAX_NAME_LEN`] characters; a `.jhs` extension is optional
+/// and always normalised onto the resolved path.
+fn include_path(views_dir: &Path, name: &str) -> Result<PathBuf, JhsError> {
+    // The `.jhs` extension is optional and normalised away before the
+    // name is validated.
+    let base = name.strip_suffix(".jhs").unwrap_or(name);
+
+    let invalid = |reason: &str| {
+        JhsError::Include(format!("`{name}` is not a valid include name ({reason})"))
+    };
+
+    if base.len() > INCLUDE_MAX_NAME_LEN {
+        return Err(invalid("too long"));
+    }
+    if base.is_empty() {
+        return Err(invalid("empty name"));
+    }
+    if base.contains('\\')
+        || base.starts_with('/')
+        || base.ends_with('/')
+        || base.contains("//")
+        || base
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '/'))
+    {
+        return Err(invalid(
+            "expected relative `[A-Za-z0-9_-]` segments joined by `/`",
+        ));
+    }
+    if base
+        .split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return Err(invalid("`..` and `.` segments are not allowed"));
+    }
+
+    Ok(views_dir.join(format!("{base}.jhs")))
+}
+
+/// The current mtime of a partial, when it can be read.
+fn include_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+}
+
 /// Builds the sandbox prelude: hidden sentinel, escapers, captured console.
 fn prelude(auto_escape: bool) -> String {
     let auto = if auto_escape { "true" } else { "false" };
@@ -304,6 +524,12 @@ fn prelude(auto_escape: bool) -> String {
      \x20   : function(str) { return str instanceof RawString ? str.value : str; };\n\
      \x20 globalThis.escapeHtml = escapeHtml;\n\
      \x20 globalThis.raw = function(str) { return new RawString(str); };\n\
+     \x20 globalThis.__jhsEchoPart = function(arg) {\n\
+     \x20   return arg instanceof RawString ? arg.value : __escape(String(arg));\n\
+     \x20 };\n\
+     \x20 globalThis.include = function(name) {\n\
+     \x20   throw new Error('include() is resolved at compile time and must stand alone in its own tag: <?jhs include(\"name\") ?>');\n\
+     \x20 };\n\
      \x20 globalThis.console = {\n\
      \x20   log: capture('log'),\n\
      \x20   info: capture('info'),\n\
@@ -425,6 +651,179 @@ mod tests {
             .html
     }
 
+    // ── Compile-time include() ─────────────────────────────────────────
+
+    /// A fixture views tree with a partial, rebuilt per test.
+    struct IncludeFixture {
+        dir: PathBuf,
+    }
+
+    impl IncludeFixture {
+        fn create(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "wallermax-jhs-include-{}-{tag}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("partials")).expect("fixture dirs");
+            std::fs::write(dir.join("partials/header.jhs"), "[hola <?= user ?>]")
+                .expect("partial write");
+            Self { dir }
+        }
+
+        fn engine(&self) -> JhsEngine {
+            JhsEngine::new(JhsOptions {
+                views_path: self.dir.clone(),
+                cache: false,
+                ..JhsOptions::default()
+            })
+        }
+
+        fn write(&self, path: &str, source: &str) {
+            std::fs::write(self.dir.join(path), source).expect("fixture write");
+        }
+    }
+
+    impl Drop for IncludeFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn standalone_include_blocks_embed_the_partial() {
+        let fixture = IncludeFixture::create("embed");
+        fixture.write("main.jhs", "A<?jhs include(\"partials/header\") ?>B");
+        let output = fixture
+            .engine()
+            .render("main.jhs", &data(json!({ "user": "ana" })))
+            .expect("renders");
+        assert_eq!(output.html, "A[hola ana]B");
+    }
+
+    #[test]
+    fn includes_resolve_from_raw_strings_too() {
+        let fixture = IncludeFixture::create("string");
+        let output = fixture
+            .engine()
+            .render_string(
+                "<?jhs include(\"partials/header.jhs\") ?>!",
+                &data(json!({ "user": "ana" })),
+            )
+            .expect("renders");
+        assert_eq!(output.html, "[hola ana]!");
+    }
+
+    #[test]
+    fn nested_includes_resolve_recursively() {
+        // Include names always resolve from the views root, regardless
+        // of the partial that embeds them.
+        let fixture = IncludeFixture::create("nested");
+        fixture.write(
+            "partials/outer.jhs",
+            "<out><?jhs include(\"partials/header\") ?></out>",
+        );
+        fixture.write("main.jhs", "X<?jhs include(\"partials/outer\") ?>Y");
+        let output = fixture
+            .engine()
+            .render("main.jhs", &data(json!({ "user": "bo" })))
+            .expect("renders");
+        assert_eq!(output.html, "X<out>[hola bo]</out>Y");
+    }
+
+    #[test]
+    fn include_needs_its_own_tag() {
+        // `echo(include(...))` is not standalone: the sandbox stub throws
+        // with the descriptive message.
+        let fixture = IncludeFixture::create("nonstandalone");
+        let error = fixture
+            .engine()
+            .render_string("<?jhs echo(include(\"partials/header\")); ?>", &Map::new())
+            .expect_err("must fail");
+        assert!(error.to_string().contains("must stand alone"), "{error}");
+    }
+
+    #[test]
+    fn missing_partials_report_include_errors() {
+        let fixture = IncludeFixture::create("missing");
+        let error = fixture
+            .engine()
+            .render_string("<?jhs include(\"nope\") ?>", &Map::new())
+            .expect_err("must fail");
+        assert!(
+            error.to_string().contains("template include error"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn traversal_names_are_rejected() {
+        let fixture = IncludeFixture::create("traversal");
+        for name in [
+            "../secret",
+            "partials/../../x",
+            "/abs",
+            "a\\b",
+            "a//b",
+            "a/./b",
+        ] {
+            let error = fixture
+                .engine()
+                .render_string(&format!("<?jhs include(\"{name}\") ?>"), &Map::new())
+                .expect_err("must fail");
+            assert!(
+                error.to_string().contains("not a valid include name"),
+                "{name}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn include_depth_is_bounded() {
+        let fixture = IncludeFixture::create("depth");
+        // A partial that includes itself: 8 levels deep, then the error.
+        fixture.write("loop.jhs", "L<?jhs include(\"loop\") ?>");
+        let error = fixture
+            .engine()
+            .render_string("<?jhs include(\"loop\") ?>", &Map::new())
+            .expect_err("must fail");
+        assert!(error.to_string().contains("nesting depth"), "{error}");
+    }
+
+    #[test]
+    fn editing_a_partial_recompiles_its_includers() {
+        let fixture = IncludeFixture::create("reload");
+        fixture.write("main.jhs", "A<?jhs include(\"partials/header\") ?>B");
+
+        let engine = JhsEngine::new(JhsOptions {
+            views_path: fixture.dir.clone(),
+            cache: true,
+            ..JhsOptions::default()
+        });
+
+        let first = engine
+            .render("main.jhs", &data(json!({ "user": "bo" })))
+            .expect("renders");
+        assert_eq!(first.html, "A[hola bo]B");
+
+        // Ensure a distinct mtime so the invalidation triggers.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fixture.write("partials/header.jhs", "[cambiado]");
+
+        let second = engine.render("main.jhs", &Map::new()).expect("renders");
+        assert_eq!(second.html, "A[cambiado]B");
+    }
+
+    #[test]
+    fn echo_raw_prints_trusted_markup() {
+        // v0.8.0: the function form matches the documented `<?= raw() ?>`
+        // semantics (the sentinel survives `echo`'s stringification).
+        let out = engine()
+            .render_string("<?jhs echo(raw(\"<b>negrita</b>\")); ?>", &Map::new())
+            .expect("renders");
+        assert_eq!(out.html, "<b>negrita</b>");
+    }
+
     // ── Ported 1:1 from node-jhs2's test suite ──────────────────────────
 
     #[test]
@@ -519,6 +918,7 @@ mod tests {
             CachedTemplate {
                 program: String::from("compiled"),
                 mtime: None,
+                includes: Vec::new(),
             },
         );
         assert_eq!(cached.cache.lock().expect("mutex").len(), 1);

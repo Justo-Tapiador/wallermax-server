@@ -164,6 +164,39 @@ impl AppError {
         }
     }
 
+    /// The HTTP status this error renders as (browsers get the same
+    /// status the JSON envelope would answer with).
+    pub fn status_code(&self) -> StatusCode {
+        match self {
+            AppError::NotFound { .. } => StatusCode::NOT_FOUND,
+            AppError::BadRequest { .. } => StatusCode::BAD_REQUEST,
+            AppError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
+            AppError::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+            AppError::RequestTimeout { .. } => StatusCode::REQUEST_TIMEOUT,
+            AppError::MethodNotAllowed { .. } => StatusCode::METHOD_NOT_ALLOWED,
+            AppError::Unauthorized { .. } => StatusCode::UNAUTHORIZED,
+            AppError::Forbidden { .. } => StatusCode::FORBIDDEN,
+            AppError::Conflict { .. } => StatusCode::CONFLICT,
+            AppError::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+
+    /// The human-readable message (safe to show to clients).
+    pub fn message(&self) -> &str {
+        match self {
+            AppError::NotFound { message }
+            | AppError::BadRequest { message }
+            | AppError::RateLimited { message, .. }
+            | AppError::PayloadTooLarge { message }
+            | AppError::RequestTimeout { message }
+            | AppError::MethodNotAllowed { message }
+            | AppError::Unauthorized { message }
+            | AppError::Forbidden { message }
+            | AppError::Conflict { message }
+            | AppError::Internal { message } => message,
+        }
+    }
+
     /// Converts the error into a response, attaching the request id
     /// (when known) to the body to ease log correlation.
     pub fn into_response_with_request_id(self, request_id: Option<&str>) -> Response {

@@ -4,7 +4,8 @@
 //! corresponding extractor before the handler body:
 //!
 //! - [`AuthUser`] — any request carrying a valid `Authorization: Bearer`
-//!   token; yields the id, username and role.
+//!   token **or session cookie** (`wallermax_session`); yields the id,
+//!   username and role.
 //! - [`AdminUser`] — like [`AuthUser`], additionally requiring the `admin`
 //!   role (403 otherwise).
 //! - [`JsonBody`] — a JSON request body decoded with the application's
@@ -27,6 +28,7 @@ use crate::auth::Claims;
 use crate::db::UserRole;
 use crate::error::AppError;
 use crate::middleware::request_id::RequestId;
+use crate::session;
 use crate::state::AppState;
 
 /// Extractor rejection that embeds the request's correlation id.
@@ -41,6 +43,12 @@ impl Rejection {
     fn new(error: AppError, extensions: &Extensions) -> Self {
         let request_id = extensions.get::<RequestId>().map(|id| id.0.clone());
         Self { error, request_id }
+    }
+
+    /// The wrapped error (cms browser guards read the status code to
+    /// decide between a login redirect and a privilege page).
+    pub(crate) fn error(&self) -> &AppError {
+        &self.error
     }
 }
 
@@ -98,9 +106,15 @@ impl FromRequestParts<AppState> for AuthUser {
             ));
         };
 
-        let Some(token) = bearer_token(&parts.headers) else {
+        // The Bearer header, when present, always wins; the session
+        // cookie is the browser-side fallback.
+        let Some(token) =
+            bearer_token(&parts.headers).or_else(|| session::session_token(&parts.headers))
+        else {
             return Err(Rejection::new(
-                AppError::unauthorized("missing `Authorization: Bearer <token>` header"),
+                AppError::unauthorized(
+                    "missing `Authorization: Bearer <token>` header or session cookie",
+                ),
                 &parts.extensions,
             ));
         };

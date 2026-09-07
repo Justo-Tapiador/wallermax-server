@@ -11,12 +11,16 @@
 
 > A modular, secure and high-performance web server written in Rust.
 
-**Status: v0.6.0 — the four roadmap phases plus a dynamic template engine.** Phase 4 added rotating
+**Status: v0.8.0 — the four roadmap phases, a dynamic template engine, browser sessions, and a small built-in CMS.** Phase 4 added rotating
 refresh tokens with family revocation, a Prometheus `/metrics` endpoint, HTTPS via
 rustls (plus an HTTP-to-HTTPS redirect listener), trusted-proxy `X-Forwarded-For`
 parsing, a multi-stage Docker image with a compose example and a GitHub Actions CI
-pipeline. v0.5.0 added the sandboxed `.jhs` template engine, and v0.6.0 injects the
-authenticated identity into every render as the `user` global — see
+pipeline. v0.5.0 added the sandboxed `.jhs` template engine, v0.6.0 injects the
+authenticated identity into every render as the `user` global, v0.7.0 keeps
+browsers logged in with the `wallermax_session` cookie and the no-JavaScript
+`/login` page, and v0.8.0 adds the CMS: database-backed pages at `/p/<slug>`,
+login/registration modals, a JavaScript-free admin panel for content and accounts
+— see
 [README-jhs-engine.md](README-jhs-engine.md) and the [roadmap](#roadmap).
 
 ## Table of contents
@@ -28,6 +32,8 @@ authenticated identity into every render as the `user` global — see
 - [HTTP API](#http-api)
 - [Dynamic templates (.jhs)](#dynamic-templates-jhs)
 - [Refresh tokens](#refresh-tokens)
+- [Browser sessions (v0.7.0)](#browser-sessions-v070)
+- [The CMS (v0.8.0)](#the-cms-v080)
 - [Prometheus metrics](#prometheus-metrics)
 - [TLS (HTTPS)](#tls-https)
 - [Trusted proxies and client IPs](#trusted-proxies-and-client-ips)
@@ -68,7 +74,8 @@ authenticated identity into every render as the `user` global — see
 - **Persistent** — SQLite storage (WAL mode) with migrations **embedded in
   the binary** (single-file deployment); user accounts survive restarts.
 - **Authenticated** — JWT access tokens (HS256) with Argon2id password
-  hashing; role-based access (`admin` / `user`) enforced by typed extractors.
+  hashing; role-based access (`admin` / `editor` / `user`) enforced by typed
+  extractors.
 - **Static files** — serve a website from a directory (`GET /` answers
   `public/index.html`); conditional requests (`304`), range requests
   (`206`), correct content types, path-traversal rejection and the JSON
@@ -84,6 +91,21 @@ authenticated identity into every render as the `user` global — see
   SHA-256 hashes) with rotation on every refresh and automatic family
   revocation when a retired token is replayed; `POST /api/auth/logout`
   and `logout_all` end one or all sessions.
+- **Browser sessions** — login also sets the access token as an
+  `HttpOnly` + `SameSite=Strict` cookie (`Secure` follows `[auth]`
+  `secure_cookies`, `auto` by default), so plain page navigation stays
+  authenticated and `.jhs` templates personalise; the shipped `/login`
+  view and the site-wide login/registration modals are JavaScript-free
+  HTML forms (form posts get a `303` redirect, JSON clients keep the
+  exact same API).
+- **Built-in CMS** — pages live in SQLite and render as `.jhs` templates
+  at `/p/<slug>` (with the `user`/`path`/`query`/`pages` globals and the
+  shared partials via `include()`); a `/admin` panel manages pages
+  (create, edit, publish, import from `public/`) and accounts (admin
+  only), plus a self-service password change — every bit of it plain
+  HTML forms, no JavaScript, CSP keeps scripts blocked. The panel
+  manages content and accounts only: server configuration stays in
+  `wallermax.toml`.
 - **Prometheus metrics** — `GET /metrics` (configurable path) exposing
   request counters, latency histograms, rate-limit rejections, uptime and
   registered users in the text exposition format; scrapes are exempt
@@ -100,9 +122,9 @@ authenticated identity into every render as the `user` global — see
   matrix, Docker build with in-container smoke test).
 - **Storage-agnostic** — handlers depend on the `UserRepository` trait, not
   on SQLite; the engine can be swapped without touching HTTP code.
-- **Tested** — 202 tests: unit tests per module plus end-to-end integration
+- **Tested** — 354 tests: unit tests per module plus end-to-end integration
   tests that boot the *real* server (plain HTTP and HTTPS) and speak HTTP
-  to it.
+  to it — including a cookie-jar "browser" battery for the CMS.
 
 ## Requirements
 
@@ -121,7 +143,7 @@ authenticated identity into every render as the `user` global — see
 
 ```console
 $ cargo run
-   Compiling wallermax-server v0.6.0
+   Compiling wallermax-server v0.8.0
     Finished dev [unoptimized + debuginfo] target(s)
      Running `target/debug/wallermax-server`
 
@@ -129,29 +151,37 @@ INFO wallermax_server::server: static file serving enabled root_dir=public index
 INFO wallermax_server::server: dynamic template rendering enabled views_dir=views auto_escape=true cache=true
 INFO wallermax_server::server: sqlite pool ready (migrations applied) url=sqlite://wallermax.db?mode=rwc max_connections=5
 INFO wallermax_server::server: authentication enabled (the first registered user becomes the admin) registration_enabled=true token_ttl_secs=3600 refresh_tokens_enabled=true refresh_token_ttl_secs=2592000
+INFO wallermax_server::server: cms enabled (public pages at /p, admin panel at /admin; content and users — server configuration stays in wallermax.toml)
 INFO wallermax_server::server: prometheus metrics enabled path=/metrics
-INFO wallermax_server::server: wallermax-server listening address=127.0.0.1:8080 version=0.5.0
-INFO wallermax_server::server: route map ready routes="GET / (static) | GET /api | GET /health | GET /api/stats | POST /api/echo | GET /metrics | POST /api/auth/register | POST /api/auth/login | GET /api/auth/me | POST /api/auth/refresh | POST /api/auth/logout | POST /api/auth/logout_all | GET /api/admin/users | + static files | + .jhs templates"
+INFO wallermax_server::server: wallermax-server listening address=127.0.0.1:8080 version=0.8.0
+INFO wallermax_server::server: route map ready routes="GET / (static) | GET /api | GET /health | GET /api/stats | POST /api/echo | GET /metrics | POST /api/auth/register | POST /api/auth/login | GET /api/auth/me | POST /api/auth/refresh | POST /api/auth/logout | POST /api/auth/logout_all | GET /api/admin/users | GET /p/{slug} | GET /admin | POST /perfil/password | + static files | + .jhs templates"
 ```
 
-The default `wallermax.toml` ships with static files, the database and
-authentication enabled, so the very first registration becomes the admin.
-Open `http://127.0.0.1:8080/` in a browser to see the served page
-(`public/index.html` — edit or replace it freely):
+The default `wallermax.toml` ships with static files, the database,
+authentication and the CMS enabled, so the very first registration becomes
+the admin. Open `http://127.0.0.1:8080/` in a browser: the site home is the
+dynamic `views/index.jhs` (the stock `public/index.html` was removed in
+v0.8.0 — drop your own back in to pin a static home), with login/registration
+modals in the header and the published CMS pages listed:
 
 ```console
 $ curl http://127.0.0.1:8080/
 <!DOCTYPE html>
-<html lang="en">
+<html lang="es">
 ...
-<h1>Hello, world!</h1>
+<h1>Un sitio que administra su contenido a sí mismo</h1>
+...
+<a class="btn btn-primario" href="#registrar">Registrarse</a>   # the modals
+...
+
+$ curl http://127.0.0.1:8080/p                # the published CMS pages
 ...
 
 $ curl http://127.0.0.1:8080/api
-{"service":"wallermax-server",...,"endpoints":["GET / (static index + files)","GET /api","GET /health","GET /api/stats","POST /api/echo","GET /metrics","POST /api/auth/register","POST /api/auth/login","GET /api/auth/me","GET /api/admin/users","POST /api/auth/refresh","POST /api/auth/logout","POST /api/auth/logout_all"]}
+{"service":"wallermax-server",...}
 
 $ curl http://127.0.0.1:8080/health
-{"status":"ok","version":"0.5.0"}
+{"status":"ok","version":"0.8.0"}
 
 $ curl http://127.0.0.1:8080/hello.jhs     # .jhs template, rendered on the fly
 <h1>Hola desde una plantilla .jhs</h1>
@@ -172,6 +202,14 @@ $ curl -X POST http://127.0.0.1:8080/api/auth/login \
     -H "Content-Type: application/json" \
     -d '{"username":"admin","password":"correct-horse-battery"}'
 {"access_token":"eyJhbGciOi...","token_type":"Bearer","expires_in":3600,"user":{...},"refresh_token":"cU9tY1...","refresh_expires_in":2592000}
+
+# The same login also sets the session cookie (see "Browser sessions");
+# curl keeps it in a jar with -c/-b:
+$ curl -c cookies.txt -X POST http://127.0.0.1:8080/api/auth/login \
+    -H "Content-Type: application/json" \
+    -d '{"username":"admin","password":"correct-horse-battery"}' > /dev/null
+$ curl -b cookies.txt http://127.0.0.1:8080/perfil
+<h1>Bienvenido, administrador admin</h1>  # the user global, via cookie
 
 $ curl http://127.0.0.1:8080/api/auth/me \
     -H "Authorization: Bearer eyJhbGciOi..."
@@ -301,18 +339,24 @@ recommended production setup.
 | `GET` | `/health` | — | Liveness probe. |
 | `GET` | `/api/stats` | — | Runtime metrics (+ `registered_users` while auth is on). |
 | `POST` | `/api/echo` | — | Debug utility: reads and describes the request body. |
-| `POST` | `/api/auth/register` | — | Create an account; the **first** one becomes the admin. |
-| `POST` | `/api/auth/login` | — | Exchange credentials for a Bearer token (+ refresh token while enabled). |
-| `GET` | `/api/auth/me` | Bearer | The caller's profile (fresh from the repository). |
-| `POST` | `/api/auth/refresh` | — | Rotate a refresh token: new access + refresh token, same session. |
-| `POST` | `/api/auth/logout` | Bearer | Revoke one refresh token's family (`204`, idempotent). |
-| `POST` | `/api/auth/logout_all` | Bearer | Revoke every refresh token of the caller (`204`). |
+| `POST` | `/api/auth/register` | — | Create an account; the **first** one becomes the admin. JSON **and** form bodies: JSON answers `201`, the form path logs the fresh account in (cookie + `303`). |
+| `POST` | `/api/auth/login` | — | Exchange credentials for a Bearer token (+ refresh token while enabled). JSON **and** `x-www-form-urlencoded` bodies; both set the session cookie (form posts answer `303`). |
+| `GET` | `/api/auth/me` | Bearer / cookie | The caller's profile (fresh from the repository). |
+| `POST` | `/api/auth/refresh` | — | Rotate a refresh token: new access + refresh token, same session (refreshes the cookie). |
+| `POST` | `/api/auth/logout` | Bearer / cookie | Revoke one refresh token's family (`204` for JSON clients, idempotent); browser forms get a lenient `303` back to the site. Both clear the session cookie. |
+| `POST` | `/api/auth/logout_all` | Bearer / cookie | Revoke every refresh token of the caller (`204`); clears the session cookie. |
 | `GET` | `/api/admin/users` | Bearer (admin) | List accounts, newest first. |
+| `GET` | `/p` | — | The published CMS pages index (auto-routed view). |
+| `GET` | `/p/{slug}` | — | One CMS page, rendered as `.jhs` (drafts answer `404` for the public). |
+| `GET` | `/admin` (+ `/admin/pages`, `/admin/users`, forms) | cookie (editor / admin) | The CMS panel: pages CRUD, import from `public/`, account management (admin only). |
+| `POST` | `/perfil/password` | Bearer / cookie | Self-service password change (requires the current one). |
 | `GET` | `/metrics` | — | Prometheus text exposition (while `[metrics]` is on; path configurable). |
 | `GET`/`HEAD` | `/<file>` | — | While `[static]` is on: files under `static.root_dir` (conditional + range requests supported). |
 
 The auth and admin families are mounted only while `[auth]` is enabled;
-otherwise those paths answer with the standard JSON `404`. The same applies
+the CMS family additionally requires `[database]`, `[auth]` and
+`[templates]`; otherwise those paths answer with the standard JSON `404`.
+The same applies
 to the static family (`[static]`), the metrics endpoint (`[metrics]`) and
 the refresh/logout endpoints (`auth.refresh_tokens_enabled`).
 
@@ -352,7 +396,7 @@ including the correlation id:
 {"error":{"code":"METHOD_NOT_ALLOWED","message":"Method POST is not allowed on /health","request_id":"..."}}
 
 // GET /api/auth/me without a token -> 401
-{"error":{"code":"UNAUTHORIZED","message":"missing `Authorization: Bearer <token>` header","request_id":"..."}}
+{"error":{"code":"UNAUTHORIZED","message":"missing `Authorization: Bearer <token>` header or session cookie","request_id":"..."}}
 
 // GET /api/admin/users as a regular user -> 403
 {"error":{"code":"FORBIDDEN","message":"this endpoint requires the admin role","request_id":"..."}}
@@ -396,12 +440,16 @@ a template-writing guide live in
 **[README-jhs-engine.md](README-jhs-engine.md)**.
 
 Since v0.6.0 every render also receives the authenticated identity as
-the `user` global: a valid `Authorization: Bearer` token (verified —
-signature, expiry, issuer) injects `user = { id, username, role }`,
-while anonymous visitors and failed verifications render with
-`user = null`, so role-gated markup is a plain `<?jhs if (user &&
-user.role == 'admin') { ?>` block. `[templates] expose_user = false`
-turns the injection off.
+the `user` global: a valid `Authorization: Bearer` token **or
+`wallermax_session` cookie** (verified — signature, expiry, issuer)
+injects `user = { id, username, role }`, while anonymous visitors and
+failed verifications render with `user = null`, so role-gated markup is
+a plain `<?jhs if (user && user.role == 'admin') { ?>` block.
+`[templates] expose_user = false` turns the injection off. Since v0.8.0
+renders additionally receive `path` (the request path), `query` (the
+query parameters) and `pages` (the published CMS pages), and templates
+embed shared partials with `<?jhs include("partials/header") ?>` —
+see [README-jhs-engine.md](README-jhs-engine.md).
 
 ## Refresh tokens
 
@@ -446,6 +494,149 @@ generic `401 invalid refresh token` (no detail leaks); only values longer
 than 512 characters are rejected as `400` before touching the database.
 Disable the whole mechanism with `refresh_tokens_enabled = false` to get
 the access-token-only behaviour of earlier phases.
+
+## Browser sessions (v0.7.0)
+
+The Bearer header is perfect for API clients and impossible for a
+browser: links, address bars and reloads cannot attach
+`Authorization` headers. The session cookie closes that gap without
+adding a second credential:
+
+- **`POST /api/auth/login` and `/api/auth/refresh` also set the cookie.**
+  `Set-Cookie: wallermax_session=<access_token>; Path=/;
+  Max-Age=token_ttl_secs; HttpOnly; SameSite=Strict`. The cookie
+  is a *mirror* of the access token, verified by the exact same
+  `verify_token` path (signature, expiry, issuer).
+- **`Secure` follows `[auth] secure_cookies` (v0.8.0).** `auto` (the
+  default) attaches it only while `[tls]` is enabled: browsers refuse
+  to store `Secure` cookies on plain-HTTP origins, so an unconditional
+  `Secure` silently broke browser logins on HTTP-only dev servers
+  (curl and PowerShell were lax about it, which made the failure look
+  like a server bug — that was the v0.7.0 gotcha). `always` pins it for
+  TLS-terminating proxies; `never` for HTTP-only local testing.
+- **The cookie is accepted wherever the header is** — the
+  `AuthUser`/`AdminUser` extractors, `/api/auth/me` and the `user`
+  template global. When both are present the **Bearer header wins**, so
+  existing clients are unaffected. Bad cookies degrade exactly like bad
+  headers: `401` on API routes, anonymous render on templates.
+- **`logout` / `logout_all` clear it** (`Max-Age=0`). Like every JWT
+  logout, this ends the *browser's* session; an already-issued access
+  token stays mathematically valid until `exp` — the reason
+  `token_ttl_secs` should stay modest and refresh tokens carry the
+  session length.
+
+### The `/login` view, the modals and the browser forms
+
+`GET /login` renders the shipped `views/login.jhs`: a plain HTML form
+posting `username` / `password` / `redirect` to `/api/auth/login` as
+`application/x-www-form-urlencoded` — **no JavaScript**, so the default
+CSP (scripts stay blocked) allows it untouched. Since v0.8.0 every page
+embedding the shared `views/partials/header.jhs` carries the same
+forms inside CSS-only modals (`#login` / `#registrar`, opened with the
+`:target` trick) plus the logout button. Form posts answer:
+
+- **login success** → `303 See Other` + the session cookie, landing on
+  the `redirect` field when it is a local path (`/…`, never `//host` or
+  an absolute URL — off-site values fall back to `/`);
+- **login failure** → `303` back to the same page with
+  `?login_error=credenciales#login`, which re-opens the modal and shows
+  the message (server-rendered; the code is fixed, never reflected);
+- **registration (form)** → the account is created **and logged in
+  directly** (cookie attached, `303`); failures bounce back with
+  `?register_error=<code>#registrar`;
+- **logout (form)** → lenient and idempotent: the cookie is cleared and
+  the browser lands on a `303` — an absent or expired session clears
+  the cookie without erroring, because a `Salir` click must never show
+  a blank `204` page or a JSON envelope.
+
+Cookie-authenticated visitors see the logged-in state instead: who they
+are, links to their pages and the logout form in the header.
+
+```text
+browser                          server
+   │ GET /                         │  renders views/index.jhs (user = null)
+   │        [abre #registrar]      │  CSS :target modal, no JS
+   │ POST /api/auth/register ────▶│  creates the account + logs it in
+   │ ◀──── 303 / + Set-Cookie      │
+   │ GET /  (cookie) ─────────────▶│  user = { id, username, role }
+   │ ◀──── «admin · Salir»         │
+   │ POST /api/auth/logout ──────▶│  clears the cookie
+   │ ◀──── 303 /                   │
+```
+
+### CSRF posture
+
+The cookie authenticates requests, so state-changing endpoints
+(`logout`, `logout_all`, the admin API) become reachable from browsers —
+and therefore CSRF-relevant. `SameSite=Strict` is the defence: modern
+browsers never attach the cookie to **cross-site** requests, so a
+hostile page cannot logout or act as the visitor. Remaining caveats,
+deliberately accepted for this scope: a cross-site form can still
+*login* the victim as the attacker (login-CSRF — nuisance-level here,
+no sensitive actions exist), and `Secure`/`HttpOnly` protect the value
+from scripts and plain-text networks. If you build browser-facing
+mutations beyond logout, add per-request CSRF tokens rather than
+relying on `SameSite` alone.
+
+## The CMS (v0.8.0)
+
+A small, deliberately boring content layer on top of the sessions:
+the browser speaks plain HTML forms, the server is the only party that
+touches SQLite, and the session cookie stays server-managed
+(`HttpOnly`) — the "server as proxy" model.
+
+### Roles
+
+| Role | Sees | Manages |
+|------|------|---------|
+| `user` | published pages | nothing (own password via `/perfil`) |
+| `editor` | + drafts (preview) | pages: create, edit, publish, delete, import |
+| `admin` | everything | pages **and** accounts: create, roles, password resets, delete |
+
+The **first** registered account bootstraps as `admin` (unchanged since
+v0.4); registration forms always create plain `user` accounts.
+
+### The public site
+
+- `GET /p` — published pages index (auto-routed `views/p.jhs`, rendering
+  the `pages` global);
+- `GET /p/{slug}` — one page. The stored body is `.jhs` template source
+  rendered through the same sandbox with the standard globals, so a page
+  can personalise (`Hola <?= user ? user.username : "visitante" ?>`) and
+  reuse the shared partials (`<?jhs include("partials/header") ?>`).
+  Drafts answer `404` for the public and render with a preview banner
+  for editors.
+
+### The admin panel (`/admin`)
+
+Pure HTML forms — **no JavaScript anywhere**, the CSP keeps scripts
+blocked. Guards are browser-friendly: anonymous visitors get a `303` to
+`/login?redirect=<panel path>`; privileged failures re-render the form
+**with the submitted values and the error**, so nothing typed is ever
+lost. Successes follow the post/redirect/get pattern.
+
+- `/admin` — dashboard (counters and quick links);
+- `/admin/pages` — every page, drafts included; create, edit
+  (title/slug/body/publish), delete;
+- `/admin/pages/import` — copy a `.html`/`.jhs` file from `public/` into
+  a new **draft** (read-only on the static tree: the CMS never writes to
+  `public/`; the original file keeps being served at its own path);
+- `/admin/users` (admin only) — create accounts with a role, change
+  roles, reset passwords, delete. Two guards keep the panel safe from
+  itself: you cannot edit your **own** account there (use `/perfil`),
+  and the **last admin** can never be demoted or deleted — even by a
+  stale admin token whose role claim predates the demotion;
+- `/perfil` — any session changes its own password (the current one
+  must be presented).
+
+### The privilege split
+
+The panel manages **content and CMS accounts, nothing else**. Server
+configuration (ports, TLS, secrets, middleware, the `[cms]` switch
+itself) lives in `wallermax.toml` + environment variables, writable only
+with local repository access to the machine that runs the server. That
+is the deliberate separation between the *CMS administrator* and the
+*server operator*.
 
 ## Prometheus metrics
 
@@ -666,9 +857,10 @@ envelope like any other known route. There is no directory listing:
 ### Request authentication flow
 
 ```text
-Authorization: Bearer <token>
-        │
-        ▼
+Authorization: Bearer <token>   ── or (browsers) ──  Cookie: wallermax_session=<token>
+        │                                              │
+        └────────────────────┬─────────────────────────┘
+                             ▼
 AuthUser extractor: verify signature (HS256) → check exp (+30s leeway)
         → check issuer → parse sub/role → typed identity
         │                                       │
@@ -680,7 +872,8 @@ AuthUser extractor: verify signature (HS256) → check exp (+30s leeway)
 
 Tokens are stateless: any worker verifies them without a database round
 trip. Handlers that must react to deleted accounts (like `/api/auth/me`)
-re-query the repository.
+re-query the repository. The header takes precedence when both it and
+the session cookie are present.
 
 ### Adding a route module
 
@@ -754,7 +947,9 @@ wallermax-server/
 │   └── hello.jhs         #   demo template, rendered at GET /hello.jhs
 ├── views/                # view templates ([templates] views_dir)
 │   ├── index.jhs         #   root fallback when public/index.html is absent
-│   └── contacto.jhs      #   auto-routed at GET /contacto
+│   ├── contacto.jhs      #   auto-routed at GET /contacto
+│   ├── perfil.jhs        #   GET /perfil — the `user` global demo
+│   └── login.jhs         #   GET /login — the no-JavaScript login form
 ├── LICENSE               # MIT
 ├── README.md
 ├── README-jhs-engine.md  # the .jhs template engine guide
@@ -768,6 +963,7 @@ wallermax-server/
 │   ├── proxy.rs          # trusted proxies + X-Forwarded-For resolution
 │   ├── auth.rs           # Argon2id + JWT + refresh token primitives
 │   ├── db.rs             # SQLite pool, migrations, UserRepository
+│   ├── session.rs        # the wallermax_session cookie helpers
 │   ├── metrics.rs        # Prometheus registry + exposition rendering
 │   ├── extractors.rs     # AuthUser / AdminUser / JsonBody
 │   ├── logging.rs        # tracing setup
@@ -797,13 +993,27 @@ wallermax-server/
 
 ```console
 $ cargo test
-running 165 tests ... ok       # unit tests (config, state, error, limiter,
+running 191 tests ... ok      # unit tests (config, state, error, limiter,
                                #   proxy CIDRs, auth + refresh primitives,
-                               #   repository incl. refresh token store,
-                               #   metrics registry, server helpers,
-                               #   middleware, template engine + parser)
+                               #   repository incl. refresh token store and
+                               #   the page repository, metrics registry,
+                               #   server helpers, middleware, template
+                               #   engine + parser + include() + session
+                               #   cookie helpers, login helpers, CMS
+                               #   validation helpers)
 running 4 tests ... ok          # config_env: environment override semantics
-running 17 tests ... ok         # auth: register/login/profile/admin flows
+running 30 tests ... ok         # auth: register/login/profile/admin flows,
+                               #   the session cookie (set/authenticate/
+                               #   rotate/clear, Bearer precedence) and the
+                               #   browser form flows (303, open-redirect
+                               #   rejection, error redirects, idempotent
+                               #   form logout)
+running 25 tests ... ok         # cms: the cookie-jar "browser" battery —
+                               #   guards (anon/user/editor/admin), page
+                               #   lifecycle over forms, drafts, imports,
+                               #   .jhs page bodies (globals + include),
+                               #   account management, last-admin lockout,
+                               #   modals, password change, cookie flags
 running 12 tests ... ok         # refresh_tokens: rotation, reuse detection,
                                #   family revocation, logout/logout_all,
                                #   expiry, disabled mode, multi-rotation
@@ -819,12 +1029,13 @@ running 6 tests ... ok          # tls: HTTPS serving, auth over TLS,
                                #   strict-client rejection, 308 redirects
 running 1 test ... ok           # template_fidelity: 20-case battery vs the
                                #   original node-jhs2 engine
-running 20 tests ... ok         # templates: rendering, view auto-routing,
+running 30 tests ... ok         # templates: rendering, view auto-routing,
                                #   precedence, error envelopes, mtime
-                               #   reload, loop bounds, disabled mode
+                               #   reload, loop bounds, disabled mode,
+                               #   cookie personalisation + /login view
 ```
 
-**286 tests total**, all of them plain `cargo test` (no docker, no
+**354 tests total**, all of them plain `cargo test` (no docker, no
 network). The integration tests boot the exact same application the
 binary serves (`server::build_state` + `server::build_app`, with
 `build_app_with_routes` available for injecting custom routes) on an
@@ -835,7 +1046,10 @@ profile/admin flows, token forgery/expiry rejections, refresh rotation
 and reuse detection, static file serving (index, nested assets, directory
 indexes, conditional and range requests, traversal rejection), Prometheus
 exposition semantics, trusted-proxy resolution and persistence across
-restarts. The TLS tests generate a fresh self-signed certificate per run
+restarts. The CMS battery drives a cookie-storing `reqwest` client
+(Set-Cookie in, Cookie out — the closest thing to a browser a test can
+get) through the whole panel. The TLS tests generate a fresh self-signed
+certificate per run
 (rcgen) and boot the production `axum-server` + rustls path over HTTPS.
 Each auth test gets a fresh temporary SQLite file, and each static test a
 fresh temporary asset directory, cleaned up afterwards.
@@ -852,6 +1066,15 @@ fresh temporary asset directory, cleaned up afterwards.
   passwords produce the same error code and message, and the
   unknown-username path burns a comparable Argon2 verification so timing
   cannot enumerate users either.
+- **The session cookie is defence-in-depth wrapped.** It is `HttpOnly`
+  (invisible to `document.cookie`), `Secure` (HTTPS-only storage —
+  browsers reject it from plain HTTP, and the project serves TLS by
+  design), `SameSite=Strict` (never attached to cross-site requests,
+  which is the CSRF posture for cookie-authenticated `POST`s) and
+  short-lived (`Max-Age = token_ttl_secs`). It mirrors the access token
+  and is verified identically; the Bearer header always wins when both
+  are present. See [Browser sessions](#browser-sessions-v070) for the
+  remaining caveats (login-CSRF, logout vs unexpired tokens).
 - **Token lifecycle is deliberate and layered.** Access tokens are HS256,
   carry `sub`/`username`/`role`/`iat`/`exp`/`iss`, are verified with a 30
   second expiry leeway, and are rejected with the wrong issuer or a bad
@@ -966,15 +1189,46 @@ fresh temporary asset directory, cleaned up afterwards.
       auto-routing with API precedence, JSON error envelopes, mtime
       cache invalidation, `spawn_blocking` renders.
 - [x] 20-case fidelity battery against the original engine plus 25
-      HTTP integration tests (286 total across the suite).
+      HTTP integration tests (354 total across the suite).
 - [x] v0.6.0: template data — the verified identity injected as the
       `user` global (`{ id, username, role }`, `null` for anonymous),
       `expose_user` switch, bad tokens degrade to anonymous renders.
+- [x] v0.7.0: browser sessions — the `wallermax_session` cookie
+      (`HttpOnly`, `SameSite=Strict`, `Secure` per `secure_cookies`)
+      set by login/refresh,
+      accepted by the extractors and the `user` global, cleared by
+      logout; the JavaScript-free `/login` view (form posts → `303`
+      with open-redirect validation); the shipped `hello.jhs` demo
+      fixed (`req` → the real `user` global).
+
+### Phase 6 — The CMS (done, v0.8.0)
+
+- [x] Content in SQLite behind the `PageRepository` trait (migration
+      0003: slug/title/body/published/author/audit timestamps).
+- [x] Public site: `GET /p` (published index) and `GET /p/{slug}` —
+      page bodies are `.jhs` templates rendered with the standard
+      globals, drafts are editors-only.
+- [x] Admin panel (`/admin`) as plain HTML forms — pages CRUD,
+      import-from-`public/` (read-only on the static tree), account
+      management with the self-edit and last-admin guards.
+- [x] Roles: `editor` (content) and `admin` (content + accounts) on top
+      of `user`.
+- [x] Self-service password change (`/perfil/password`, requires the
+      current one).
+- [x] Engine additions: compile-time `include()` for shared partials
+      (path-validated, depth/size-bounded, mtime-invalidated), the
+      `path`/`query`/`pages` template globals, `echo(raw())` fixed to
+      honour the sentinel.
+- [x] Browser UX: login/registration modals (CSS `:target`, zero
+      JavaScript), form registration with auto-login, error redirects
+      that re-open the modal, idempotent form logout, `secure_cookies`
+      (auto/always/never) fixing the plain-HTTP `Secure` gotcha.
 
 ### Beyond the roadmap (ideas)
 
-- [ ] Role administration endpoints (promote/demote, disable accounts).
-- [ ] POST `application/x-www-form-urlencoded` login for OAuth2 flows.
+- [ ] CMS page revisions (history + restore) and scheduled publishing.
+- [ ] Account deactivation (soft disable) next to deletion.
+- [ ] CSRF tokens for the admin forms on top of `SameSite=Strict`.
 - [ ] Request tracing spans and OpenTelemetry export.
 - [ ] Graceful config reload (SIGHUP) and admin API.
 - [ ] Alternative repositories (Postgres) behind `UserRepository`.

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><?= user ? "Tu sesión" : "Iniciar sesión" ?> — wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+<?jhs
+  var destino = query.redirect || "/perfil";
+  var erroresLogin = {
+    credenciales: "Usuario o contraseña incorrectos.",
+    postregistro: "La cuenta se creó, pero no se pudo iniciar sesión: prueba a entrar de nuevo."
+  };
+  var errorLogin = query.login_error
+    ? (erroresLogin[query.login_error] || "No se pudo iniciar sesión.")
+    : null;
+?>
+<?jhs if (user) { ?>
+    <section class="tarjeta tarjeta-angosta">
+      <h1>Ya has iniciado sesión</h1>
+      <p>Sesión activa como <strong><?= user.username ?></strong>
+         (<?= user.role ?>).</p>
+      <p><a class="btn btn-primario" href="/perfil">Ir a tu perfil</a></p>
+      <form method="post" action="/api/auth/logout">
+        <input type="hidden" name="redirect" value="/">
+        <button class="btn btn-fantasma" type="submit">Cerrar sesión</button>
+      </form>
+    </section>
+<?jhs } else { ?>
+    <section class="tarjeta tarjeta-angosta">
+      <h1>Iniciar sesión</h1>
+<?jhs if (errorLogin) { ?>
+      <p class="aviso aviso-error"><?= errorLogin ?></p>
+<?jhs } ?>
+      <p>El servidor dejará una cookie de sesión <code>HttpOnly</code> en tu
+         navegador y las páginas se personalizarán solas.</p>
+      <form method="post" action="/api/auth/login">
+        <input type="hidden" name="redirect" value="<?= destino ?>">
+        <div class="campo">
+          <label for="usuario">Usuario</label>
+          <input id="usuario" type="text" name="username" required
+                 minlength="3" maxlength="32" autocomplete="username">
+        </div>
+        <div class="campo">
+          <label for="clave">Contraseña</label>
+          <input id="clave" type="password" name="password" required
+                 autocomplete="current-password">
+        </div>
+        <button class="btn btn-primario" type="submit">Entrar</button>
+      </form>
+      <p>¿Aún no tienes cuenta? <a href="/registro">Regístrate</a>.</p>
+    </section>
+<?jhs } ?>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

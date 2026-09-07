@@ -1,0 +1,114 @@
+<?jhs
+  // Cabecera compartida del sitio y del CMS (v0.8.0).
+  //
+  // Globales disponibles: user, path, query, pages.
+  //
+  // Sin JavaScript: los modales de login y registro se abren con el
+  // truco CSS :target (el enlace apunta a #login / #registrar y la CSS
+  // muestra el diálogo cuando es el :target), y se cierran navegando
+  // a #modal-cerrada. Los formularios se envían por POST normal y el
+  // servidor responde con 303.
+  var esEditor = user && (user.role == "admin" || user.role == "editor");
+
+  var erroresLogin = {
+    credenciales: "Usuario o contraseña incorrectos.",
+    postregistro: "La cuenta se creó, pero no se pudo iniciar sesión: prueba a entrar de nuevo."
+  };
+  var errorLogin = query.login_error
+    ? (erroresLogin[query.login_error] || "No se pudo iniciar sesión.")
+    : null;
+
+  var erroresRegistro = {
+    tomado: "Ese nombre de usuario ya está en uso.",
+    usuario: "El nombre de usuario no es válido (3-32 caracteres: letras, números, guion y guion bajo).",
+    contrasena: "La contraseña no cumple los requisitos (longitud mínima 8).",
+    cerrado: "El registro de nuevas cuentas está desactivado en este servidor.",
+    error: "No se pudo crear la cuenta; inténtalo de nuevo."
+  };
+  var errorRegistro = query.register_error
+    ? (erroresRegistro[query.register_error] || "No se pudo crear la cuenta.")
+    : null;
+?>
+<div id="modal-cerrada"></div>
+<header class="cab">
+  <div class="wrap cab-fila">
+    <a class="marca" href="/">wallermax<span>cms</span></a>
+    <nav class="nav" aria-label="Principal">
+      <a href="/">Inicio</a>
+      <a href="/p">Páginas</a>
+<?jhs if (esEditor) { ?>
+      <a href="/admin">CMS</a>
+<?jhs } ?>
+    </nav>
+    <div class="sesion">
+<?jhs if (user) { ?>
+      <span class="chip chip-acento"><?= user.username ?></span>
+      <span class="chip"><?= user.role ?></span>
+      <a class="btn btn-fantasma" href="/perfil">Perfil</a>
+      <form method="post" action="/api/auth/logout">
+        <input type="hidden" name="redirect" value="<?= path ?>">
+        <button class="btn-apariencia-enlace" type="submit">Salir</button>
+      </form>
+<?jhs } else { ?>
+      <a class="btn btn-fantasma" href="#login">Entrar</a>
+      <a class="btn btn-primario" href="#registrar">Registrarse</a>
+<?jhs } ?>
+    </div>
+  </div>
+</header>
+
+<?jhs if (!user) { ?>
+<div class="modal" id="login" role="dialog" aria-modal="true" aria-labelledby="login-titulo">
+  <a class="modal-fondo" href="#modal-cerrada" aria-label="Cerrar el diálogo"></a>
+  <div class="modal-tarjeta">
+    <a class="modal-cierre" href="#modal-cerrada" aria-label="Cerrar">&#215;</a>
+    <h2 id="login-titulo">Iniciar sesión</h2>
+<?jhs if (errorLogin) { ?>
+    <p class="aviso aviso-error"><?= errorLogin ?></p>
+<?jhs } ?>
+    <form method="post" action="/api/auth/login">
+      <input type="hidden" name="redirect" value="<?= path ?>">
+      <div class="campo">
+        <label for="login-usuario">Usuario</label>
+        <input id="login-usuario" type="text" name="username" required
+               minlength="3" maxlength="32" autocomplete="username">
+      </div>
+      <div class="campo">
+        <label for="login-clave">Contraseña</label>
+        <input id="login-clave" type="password" name="password" required
+               autocomplete="current-password">
+      </div>
+      <button class="btn btn-primario" type="submit">Entrar</button>
+    </form>
+    <p class="modal-pie">¿Sin cuenta? <a href="#registrar">Regístrate</a> desde aquí mismo.</p>
+  </div>
+</div>
+
+<div class="modal" id="registrar" role="dialog" aria-modal="true" aria-labelledby="registro-titulo">
+  <a class="modal-fondo" href="#modal-cerrada" aria-label="Cerrar el diálogo"></a>
+  <div class="modal-tarjeta">
+    <a class="modal-cierre" href="#modal-cerrada" aria-label="Cerrar">&#215;</a>
+    <h2 id="registro-titulo">Crear una cuenta</h2>
+<?jhs if (errorRegistro) { ?>
+    <p class="aviso aviso-error"><?= errorRegistro ?></p>
+<?jhs } ?>
+    <form method="post" action="/api/auth/register">
+      <input type="hidden" name="redirect" value="<?= path ?>">
+      <div class="campo">
+        <label for="registro-usuario">Usuario</label>
+        <input id="registro-usuario" type="text" name="username" required
+               minlength="3" maxlength="32" autocomplete="username">
+        <p class="ayuda">3-32 caracteres: letras, números, guion y guion bajo.</p>
+      </div>
+      <div class="campo">
+        <label for="registro-clave">Contraseña</label>
+        <input id="registro-clave" type="password" name="password" required
+               minlength="8" autocomplete="new-password">
+        <p class="ayuda">Al menos 8 caracteres.</p>
+      </div>
+      <button class="btn btn-primario" type="submit">Crear cuenta y entrar</button>
+    </form>
+    <p class="modal-pie">La primera cuenta de una base de datos nueva se convierte en el administrador.</p>
+  </div>
+</div>
+<?jhs } ?>

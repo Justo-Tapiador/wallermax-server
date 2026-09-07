@@ -467,3 +467,405 @@ async fn data_survives_restarts() {
     assert_eq!(body["user"]["username"], "persistent");
     let _ = db; // guard keeps cleanup until the end of the test
 }
+
+// ── The browser session cookie (`wallermax_session`) ─────────────────
+//
+// The cookie mirrors the access token: same verification, same
+// endpoints, browsers only.
+
+/// Logs in over JSON and returns the raw response (for `Set-Cookie`).
+async fn login_raw(server: &TestServer, username: &str, password: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(server.url("/api/auth/login"))
+        .json(&json!({ "username": username, "password": password }))
+        .send()
+        .await
+        .expect("login request succeeds")
+}
+
+#[tokio::test]
+async fn login_sets_the_session_cookie() {
+    let (config, _db) = auth_config();
+    let server = TestServer::start_full(config).await;
+    register(&server, "cookie-monster", "password-123").await;
+
+    let response = login_raw(&server, "cookie-monster", "password-123").await;
+
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .and_then(|value| value.to_str().ok())
+        .expect("login sets a session cookie")
+        .to_owned();
+
+    assert!(
+        cookie.starts_with("wallermax_session="),
+        "cookie name: {cookie}"
+    );
+    assert!(cookie.contains("Path=/"), "cookie path: {cookie}");
+    assert!(
+        cookie.contains("Max-Age=3600"),
+        "cookie mirrors token_ttl_secs: {cookie}"
+    );
+    assert!(cookie.contains("HttpOnly"), "cookie is HttpOnly: {cookie}");
+    // v0.8.0: `Secure` only while TLS is on — the test server speaks
+    // plain HTTP, and browsers refuse to store `Secure` cookies on
+    // insecure origins (the silent-login-bug of v0.7.0).
+    assert!(
+        !cookie.contains("Secure"),
+        "cookie without Secure on HTTP: {cookie}"
+    );
+    assert!(
+        cookie.contains("SameSite=Strict"),
+        "cookie is SameSite=Strict: {cookie}"
+    );
+}
+
+#[tokio::test]
+async fn the_session_cookie_authenticates_api_requests() {
+    let (config, _db) = auth_config();
+    let server = TestServer::start_full(config).await;
+    register(&server, "cookie-user", "password-123").await;
+    let body = login(&server, "cookie-user", "password-123").await;
+    let token = body["access_token"]
+        .as_str()
+        .expect("access token")
+        .to_owned();
+
+    // No Authorization header at all: the cookie alone authenticates.
+    let response = reqwest::Client::new()
+        .get(server.url("/api/auth/me"))
+        .header("Cookie", format!("wallermax_session={token}"))
+        .send()
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.expect("JSON body");
+    assert_eq!(body["username"], "cookie-user");
+}
+
+#[tokio::test]
+async fn invalid_session_cookies_are_rejected() {
+    let (config, _db) = auth_config();
+    let server = TestServer::start_full(config).await;
+
+    let response = reqwest::Client::new()
+        .get(server.url("/api/auth/me"))
+        .header("Cookie", "wallermax_session=not.a.jwt")
+        .send()
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), 401);
+    let body: Value = response.json().await.expect("JSON body");
+    assert_eq!(body["error"]["code"], "UNAUTHORIZED");
+}
+
+#[tokio::test]
+async fn the_bearer_header_wins_over_the_session_cookie() {
+    let (config, _db) = auth_config();
+    let server = TestServer::start_full(config).await;
+    register(&server, "alice", "password-123").await;
+    register(&server, "bob", "password-456").await;
+    let alice = login(&server, "alice", "password-123").await;
+    let bob = login(&server, "bob", "password-456").await;
+    let alice_token = alice["access_token"].as_str().expect("token").to_owned();
+    let bob_token = bob["access_token"].as_str().expect("token").to_owned();
+
+    let response = reqwest::Client::new()
+        .get(server.url("/api/auth/me"))
+        .header("Authorization", format!("Bearer {alice_token}"))
+        .header("Cookie", format!("wallermax_session={bob_token}"))
+        .send()
+        .await
+        .expect("request succeeds");
+
+    let body: Value = response.json().await.expect("JSON body");
+    assert_eq!(body["username"], "alice");
+}
+
+#[tokio::test]
+async fn logout_clears_the_session_cookie() {
+    let (config, _db) = auth_config();
+    let server = TestServer::start_full(config).await;
+    register(&server, "bye-user", "password-123").await;
+    let body = login(&server, "bye-user", "password-123").await;
+    let token = body["access_token"].as_str().expect("token").to_owned();
+    let refresh = body["refresh_token"].as_str().expect("refresh").to_owned();
+
+    let response = reqwest::Client::new()
+        .post(server.url("/api/auth/logout"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "refresh_token": refresh }))
+        .send()
+        .await
+        .expect("logout succeeds");
+
+    assert_eq!(response.status(), 204);
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .and_then(|value| value.to_str().ok())
+        .expect("logout clears the cookie");
+    assert!(
+        cookie.starts_with("wallermax_session=;"),
+        "cookie: {cookie}"
+    );
+    assert!(cookie.contains("Max-Age=0"), "cookie: {cookie}");
+}
+
+#[tokio::test]
+async fn logout_all_clears_the_session_cookie() {
+    let (config, _db) = auth_config();
+    let server = TestServer::start_full(config).await;
+    register(&server, "bye-all", "password-123").await;
+    let body = login(&server, "bye-all", "password-123").await;
+    let token = body["access_token"].as_str().expect("token").to_owned();
+
+    let response = reqwest::Client::new()
+        .post(server.url("/api/auth/logout_all"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("logout_all succeeds");
+
+    assert_eq!(response.status(), 204);
+    assert!(response
+        .headers()
+        .get("set-cookie")
+        .and_then(|value| value.to_str().ok())
+        .expect("logout_all clears the cookie")
+        .contains("Max-Age=0"));
+}
+
+#[tokio::test]
+async fn refresh_rotates_the_session_cookie() {
+    let (config, _db) = auth_config();
+    let server = TestServer::start_full(config).await;
+    register(&server, "rotating", "password-123").await;
+    let body = login(&server, "rotating", "password-123").await;
+    let refresh = body["refresh_token"].as_str().expect("refresh").to_owned();
+
+    let response = reqwest::Client::new()
+        .post(server.url("/api/auth/refresh"))
+        .json(&json!({ "refresh_token": refresh }))
+        .send()
+        .await
+        .expect("refresh succeeds");
+
+    assert_eq!(response.status(), 200);
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .and_then(|value| value.to_str().ok())
+        .expect("refresh rotates the session cookie")
+        .to_owned();
+    let new_body: Value = response.json().await.expect("JSON body");
+    let new_token = new_body["access_token"]
+        .as_str()
+        .expect("new token")
+        .to_owned();
+    // Tokens issued within the same second can be byte-identical, so
+    // the meaningful invariant is the cookie tracking the freshly
+    // issued access token (plus its TTL and flags).
+    assert!(
+        cookie.contains(&format!("wallermax_session={new_token}")),
+        "the cookie carries the new token: {cookie}"
+    );
+    assert!(cookie.contains("Max-Age=3600"), "cookie: {cookie}");
+    assert!(cookie.contains("SameSite=Strict"), "cookie: {cookie}");
+}
+
+// ── Browser form login (the `/login` view's POST) ────────────────────
+
+/// A client that does NOT follow redirects, so tests observe the `303`
+/// itself.
+fn no_redirect_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("client builds")
+}
+
+#[tokio::test]
+async fn form_login_redirects_with_the_session_cookie() {
+    let (config, _db) = auth_config();
+    let server = TestServer::start_full(config).await;
+    register(&server, "browser-user", "password-123").await;
+
+    let response = no_redirect_client()
+        .post(server.url("/api/auth/login"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("username=browser-user&password=password-123&redirect=/perfil")
+        .send()
+        .await
+        .expect("form login succeeds");
+
+    assert_eq!(response.status(), 303);
+    assert_eq!(
+        response.headers()["location"],
+        "/perfil",
+        "the form's redirect field is honoured"
+    );
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .and_then(|value| value.to_str().ok())
+        .expect("form login sets the cookie");
+    assert!(cookie.starts_with("wallermax_session="), "cookie: {cookie}");
+    assert!(cookie.contains("SameSite=Strict"), "cookie: {cookie}");
+}
+
+#[tokio::test]
+async fn form_login_without_a_redirect_field_lands_on_the_site_root() {
+    let (config, _db) = auth_config();
+    let server = TestServer::start_full(config).await;
+    register(&server, "root-user", "password-123").await;
+
+    let response = no_redirect_client()
+        .post(server.url("/api/auth/login"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("username=root-user&password=password-123")
+        .send()
+        .await
+        .expect("form login succeeds");
+
+    assert_eq!(response.status(), 303);
+    assert_eq!(response.headers()["location"], "/");
+}
+
+#[tokio::test]
+async fn form_login_rejects_off_site_redirect_targets() {
+    let (config, _db) = auth_config();
+    let server = TestServer::start_full(config).await;
+    register(&server, "safe-user", "password-123").await;
+
+    for evil in [
+        "https://evil.example",
+        "//evil.example",
+        "evil.example",
+        "/\\evil",
+    ] {
+        let response = no_redirect_client()
+            .post(server.url("/api/auth/login"))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(format!(
+                "username=safe-user&password=password-123&redirect={evil}"
+            ))
+            .send()
+            .await
+            .expect("form login succeeds");
+
+        assert_eq!(response.status(), 303, "redirect target: {evil}");
+        assert_eq!(
+            response.headers()["location"],
+            "/",
+            "off-site target {evil:?} must fall back to /"
+        );
+    }
+}
+
+#[tokio::test]
+async fn form_login_failures_bounce_back_to_the_page() {
+    let (config, _db) = auth_config();
+    let server = TestServer::start_full(config).await;
+    register(&server, "real-user", "password-123").await;
+
+    let response = no_redirect_client()
+        .post(server.url("/api/auth/login"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("username=real-user&password=wrong-password&redirect=/p/inicio")
+        .send()
+        .await
+        .expect("form login attempt succeeds");
+
+    // v0.8.0: browsers bounce back to the page they came from with
+    // `?login_error=credenciales#login`, which re-opens the modal and
+    // shows the message. No cookie is set on failure.
+    assert_eq!(response.status(), 303);
+    let location = response
+        .headers()
+        .get("location")
+        .and_then(|value| value.to_str().ok())
+        .expect("redirect location");
+    assert_eq!(location, "/p/inicio?login_error=credenciales#login");
+    assert!(
+        response.headers().get("set-cookie").is_some(),
+        "cookie cleared"
+    );
+
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .and_then(|value| value.to_str().ok())
+        .expect("cleared cookie");
+    assert!(cookie.contains("Max-Age=0"), "cookie: {cookie}");
+}
+
+#[tokio::test]
+async fn form_logout_clears_the_session_cookie_without_a_refresh_token() {
+    let (config, _db) = auth_config();
+    let server = TestServer::start_full(config).await;
+    register(&server, "form-logout", "password-123").await;
+    let body = login(&server, "form-logout", "password-123").await;
+    let token = body["access_token"].as_str().expect("token").to_owned();
+
+    // A browser form posts no refresh token; the cookie authenticates.
+    // v0.8.0: the answer is a 303 back to the redirect field (a browser
+    // must never land on a blank 204 page), the cookie is cleared, and
+    // an already-gone session clears it just the same. The client keeps
+    // redirects manual so the 303 itself is what gets asserted.
+    let response = no_redirect_client()
+        .post(server.url("/api/auth/logout"))
+        .header("Cookie", format!("wallermax_session={token}"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("redirect=/p")
+        .send()
+        .await
+        .expect("form logout succeeds");
+
+    assert_eq!(response.status(), 303);
+    let location = response
+        .headers()
+        .get("location")
+        .and_then(|value| value.to_str().ok())
+        .expect("redirect location");
+    assert_eq!(location, "/p");
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .and_then(|value| value.to_str().ok())
+        .expect("form logout clears the cookie");
+    assert!(cookie.contains("Max-Age=0"), "cookie: {cookie}");
+}
+
+#[tokio::test]
+async fn form_logout_is_idempotent_without_any_session() {
+    let (config, _db) = auth_config();
+    let server = TestServer::start_full(config).await;
+
+    let response = no_redirect_client()
+        .post(server.url("/api/auth/logout"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("")
+        .send()
+        .await
+        .expect("anonymous form logout succeeds");
+
+    // No session, no error: the cookie is cleared and the browser lands
+    // on the site root.
+    assert_eq!(response.status(), 303);
+    let location = response
+        .headers()
+        .get("location")
+        .and_then(|value| value.to_str().ok())
+        .expect("redirect location");
+    assert_eq!(location, "/");
+    let cookie = response
+        .headers()
+        .get("set-cookie")
+        .and_then(|value| value.to_str().ok())
+        .expect("anonymous logout still clears the cookie");
+    assert!(cookie.contains("Max-Age=0"), "cookie: {cookie}");
+}

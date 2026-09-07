@@ -17,8 +17,9 @@
   <p>Sin escape (contenido de confianza): <?= raw("<b>sí en negrita</b>") ?></p>
   <p>Año actual: <?= new Date().getFullYear() ?></p>
 <?jhs console.log("línea de depuración desde la plantilla"); ?>
+  <p>El global <code>user</code> (null para visitantes anónimos):</p>
 <pre>
-<?jhs echo(JSON.stringify(req,null,4))  ?>
+<?jhs echo(JSON.stringify(user, null, 4)) ?>
 </pre>
 
 </body>

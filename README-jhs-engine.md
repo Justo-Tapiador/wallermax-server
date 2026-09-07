@@ -19,6 +19,7 @@ see the [main README](README.md).
 - [Where template files live](#where-template-files-live)
 - [Configuration](#configuration)
 - [Writing `.jhs` templates](#writing-jhs-templates)
+- [Shared partials: `include()`](#shared-partials-include)
 - [Escaping: `<?= ?>`, `echo()` and `raw()`](#escaping--echo-and-raw)
 - [The sandbox](#the-sandbox)
 - [Caching and hot reload](#caching-and-hot-reload)
@@ -45,7 +46,7 @@ The engine compiles the template into a single JavaScript program,
 executes it, and returns the produced HTML. In this port the JavaScript
 runs inside [boa_engine](https://github.com/boa-dev/boa) — a JavaScript
 engine written entirely in Rust — wrapped in a strict sandbox: no
-`require`, no `Buffer`, no `include`, no file system, no network, no
+`require`, no `Buffer`, no file system, no network, no
 process access. Templates can compute, format and loop; they cannot
 touch the host.
 
@@ -262,20 +263,29 @@ expressions, `try/catch`, functions:
 There are no implicit globals: `<?= title ?>` with no `title` in scope
 throws a `ReferenceError` and the request answers a 500 envelope with
 the engine's message. This matches the original engine (and JavaScript
-proper) — declare what you print. The one exception is `user`, which
-the server always defines (`null` for anonymous visitors) — see below.
+proper) — declare what you print. The server-injected globals (`user`,
+`path`, `query`, `pages`) are always defined (`user` is `null` for
+anonymous visitors) — see below.
 
-## Template data: the `user` object
+## Template data: the globals
 
 The original node-jhs2 accepted an extra data object next to the file
 path (`render(templatePath, data)`), whose keys became template
-globals. The HTTP middleware now uses that seam: every render receives
-one injected global, `user`, carrying the authenticated identity.
+globals. The HTTP middleware uses that seam; since v0.8.0 every render
+receives **four** globals:
+
+| Global | Value |
+|---|---|
+| `user` | `{ id, username, role }` with a valid `Authorization: Bearer` token or `wallermax_session` cookie (verified), `null` otherwise |
+| `path` | The request path — the login/register modals post it back as their `redirect` field so users land where they were |
+| `query` | The query parameters as an object of first-value strings (`?login_error=credenciales` → `query.login_error`), how the flash-style error codes reach the templates |
+| `pages` | The published CMS pages (`[{ id, slug, title, updated_at, updated_at_h }]`, newest first, capped at 50) while the CMS is enabled; an empty array otherwise |
 
 | Request | `user` value |
 |---|---|
 | Valid `Authorization: Bearer <token>` (verified signature, expiry and issuer) | `{ id: 1, username: "justo", role: "admin" }` |
-| No header, `[auth]` disabled, or `expose_user = false` | `null` |
+| Valid `wallermax_session` cookie (v0.7.0; the login page sets it) | `{ id: 1, username: "justo", role: "admin" }` |
+| No header and no cookie, `[auth]` disabled, or `expose_user = false` | `null` |
 | Malformed, expired or foreign-signed token | `null` (the page renders anonymously — a public page never becomes an error because of a bad token) |
 
 A role-gated fragment looks exactly like you would expect:
@@ -303,7 +313,8 @@ Properties and guarantees:
   the escaper — use it for trusted markup, never for identity fields.
 - **`user` is always *defined*** (unlike undeclared variables): null
   for anonymous visitors. Guard with `if (user && ...)` — a truthiness
-  check is the portable form.
+  check is the portable form. `pages` is always an array; `query` and
+  `path` are always defined too.
 - Turn the injection off with `[templates] expose_user = false` — for
   example when rendered pages must stay identity-free so a CDN can
   cache them.
@@ -312,6 +323,43 @@ The injection mechanism is generic (a JSON map whose keys become
 globals, with `__proto__`-style keys blocked and sandbox helper names
 non-shadowable), so future server-side data can ride the same seam
 without engine changes.
+
+## Shared partials: `include()`
+
+Since v0.8.0 a code block whose **entire** body is a single
+`include("name")` call is resolved at **compile time** into the
+referenced partial, read from the views directory:
+
+```html
+<body>
+<?jhs include("partials/header") ?>
+  <main>…</main>
+<?jhs include("partials/footer") ?>
+</body>
+```
+
+The rules:
+
+- **Names are views-root-relative** (`partials/header` →
+  `views/partials/header.jhs`), regardless of the file that embeds
+  them; the `.jhs` extension is optional and normalised.
+- **Valid names are relative paths of `[A-Za-z0-9_-]` segments joined
+  by `/`** — `..`, `.`, backslashes, absolute paths and non-ASCII are
+  rejected (a 500 envelope with the author-facing message).
+- **Nesting is bounded** (8 levels) and the total embedded size is
+  capped (1 MiB) — the include-bomb guard.
+- **Editing a partial recompiles its includers**: the cache tracks the
+  partials' mtimes exactly like the main file's.
+- The embedded partial is compiled into the **same program**, so it
+  sees the same globals (`user`, `pages`, `query`, `path` …) and shares
+  the same loop-iteration budget.
+- Any other use — `echo(include("x"))`, `var h = include("x")` — is
+  **not** resolved and fails at execution time on a sandbox stub whose
+  message explains the standalone-tag rule.
+
+The shipped `views/partials/header.jhs` (site header + login/register
+modals) and `views/partials/footer.jhs` are the reference example, and
+CMS page bodies may embed them too.
 
 ## Escaping: `<?= ?>`, `echo()` and `raw()`
 
@@ -337,13 +385,17 @@ Every render builds a **fresh JavaScript context** — no state leaks
 between requests, workers or templates. Inside it:
 
 **Available**: the ECMAScript language core plus `echo`, `raw`,
-`escapeHtml`, `console` and `JSON`.
+`escapeHtml`, `console` and `JSON`. `include("name")` works only as a
+standalone tag — it is resolved at compile time by the host, never
+executed inside the sandbox.
 
 **Not available, by construction**:
 
 - `require` / module loading (there is no module system at all)
-- `include` (the original engine's file-embedding helper — see
-  [divergences](#deliberate-divergences-from-node-jhs2))
+- `include` **at execution time** (the original engine's runtime
+  file-embedding helper — see
+  [divergences](#deliberate-divergences-from-node-jhs2): here include
+  is a compile-time, host-side, path-validated tag)
 - `Buffer`, `process`, timers, `fetch`, any network or file I/O
 - The host: Rust objects, configuration, secrets, request internals
 
@@ -378,6 +430,7 @@ server:
 |---|---|
 | Template throws (`throw`, `ReferenceError`, ...) | `500` JSON envelope, `code: "INTERNAL_ERROR"`, message = `Template execution error (<file>): <engine message>` |
 | Template file unreadable | `500` JSON envelope with the I/O error text |
+| An `include()` name is invalid or the partial is missing | `500` JSON envelope, message = `Template include error: …` (author-facing) |
 | Loop limit exceeded | `500` JSON envelope (the sandbox throws) |
 | No template matches, no route, no file | Standard JSON 404 envelope |
 
@@ -405,13 +458,17 @@ The port is behaviour-faithful (a 20-case fidelity battery asserts
 identical output against the original engine's semantics) with four
 deliberate exceptions, all in the security direction:
 
-1. **No `include`, no `require`, no `Buffer`** — the sandbox exposes no
-   host I/O at all, so template code cannot read the file system, spawn
-   processes or load modules.
+1. **No `require`, no `Buffer`** — the sandbox exposes no host I/O at
+   all, so template code cannot read the file system, spawn processes
+   or load modules. `include()` exists but is resolved **by the host at
+   compile time** against validated views-tree paths — the sandbox
+   itself never reads a file (a misuse stub explains this at
+   execution time).
 2. **Loop iteration limit** replaces the original's ineffective 5-second
    `vm` timeout: runaway loops throw deterministically.
 3. **mtime cache invalidation** — the original caches compiled templates
-   forever; this engine recompiles when the file changes.
+   forever; this engine recompiles when the file (or an embedded
+   partial) changes.
 4. **`console.*` is captured** and routed to `tracing` instead of the
    process stdout.
 
@@ -424,7 +481,7 @@ defaults; the HTTP layer always uses the standard tags.
 ```console
 $ cargo test --test template_fidelity   # 20-case battery vs the original engine
 $ cargo test --test templates           # 20 HTTP integration tests (real server)
-$ cargo test                            # full suite: 280 tests
+$ cargo test                            # full suite: 354 tests
 ```
 
 The HTTP battery covers the whole contract: on-the-fly rendering under

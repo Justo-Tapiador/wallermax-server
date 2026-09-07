@@ -29,19 +29,20 @@
 //! which is template-author-facing diagnostics rather than a leak:
 //! template code never sees server internals.
 //!
-//! ## Template data: the `user` global
+//! ## Template data: the `user`, `path`, `query` and `pages` globals
 //!
-//! Every render receives one data key, `user`, mirroring node-jhs2's
-//! extra-data argument. While `[auth]` is enabled and
-//! `[templates] expose_user = true`, the request's `Authorization:
-//! Bearer <token>` header is **verified** (signature, expiry, issuer)
-//! and the identity is injected as `user = { id, username, role }`.
-//! Anonymous visitors — no header, auth disabled, or a token that fails
-//! verification — render with `user = null` instead of being rejected:
-//! template pages are public pages with optional personalisation, and
-//! a bad token should not turn a page into an error. The claims come
-//! from the signed token, so `user.role` is server-issued and cannot
-//! be forged by the client.
+//! Every render receives a small set of globals (see [`base_data`]):
+//!
+//! - `user` — the verified identity (`{ id, username, role }`) or
+//!   `null` for anonymous visitors, exactly as in v0.6/v0.7;
+//! - `path` — the request path (v0.8.0): the login/register modals post
+//!   it back as their `redirect` field so users land where they were;
+//! - `query` — the request's query parameters as an object of
+//!   first-value strings (v0.8.0): how the flash-style error codes
+//!   (`?login_error=…`) reach the templates;
+//! - `pages` — the published CMS pages (`[{ id, slug, title,
+//!   updated_at }]`, newest first, capped) while the CMS is enabled:
+//!   navigation menus and the home listing render from it.
 //!
 //! `console.*` output inside templates is routed to `tracing` at the
 //! matching level instead of the process stdout.
@@ -50,7 +51,7 @@ use std::path::{Path, PathBuf};
 
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{header, HeaderMap, Method, StatusCode};
+use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::Response;
 use percent_encoding::percent_decode_str;
@@ -59,8 +60,12 @@ use serde_json::{json, Map, Value};
 use crate::error::AppError;
 use crate::extractors::{bearer_token, AuthUser};
 use crate::middleware::request_id::RequestId;
+use crate::session;
 use crate::state::AppState;
 use crate::template_engine::{JhsEngine, RenderOutput};
+
+/// How many published CMS pages the `pages` global carries.
+const PAGES_GLOBAL_LIMIT: i64 = 50;
 
 /// Template middleware entry point; see the module docs for the
 /// behaviour contract.
@@ -86,15 +91,22 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
         .get::<RequestId>()
         .map(|id| id.0.clone());
 
-    let data = template_data(&state, request.headers());
+    let data = base_data(&state, request.headers(), request.uri()).await;
 
     // On-the-fly rendering of `.jhs` files under the static root.
     if let Some(static_root) = templates.static_root() {
         if decoded.ends_with(".jhs") {
             let candidate = static_root.join(trim_leading_slash(&decoded));
             if candidate.is_file() {
-                return render_response(templates.engine(), candidate, data, request_id, &method)
-                    .await;
+                return render_response(
+                    templates.engine(),
+                    candidate,
+                    data,
+                    request_id,
+                    &method,
+                    StatusCode::OK,
+                )
+                .await;
             }
         }
     }
@@ -105,26 +117,46 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
     // Auto-route views for otherwise-unmatched paths.
     if response.status() == StatusCode::NOT_FOUND {
         if let Some(view) = view_candidate(templates.views_dir(), &decoded) {
-            return render_response(templates.engine(), view, data, request_id, &method).await;
+            return render_response(
+                templates.engine(),
+                view,
+                data,
+                request_id,
+                &method,
+                StatusCode::OK,
+            )
+            .await;
         }
     }
 
     response
 }
 
-/// Builds the per-request template data: the `user` global.
+/// Builds the per-request template data: the `user`, `path`, `query`
+/// and `pages` globals.
 ///
-/// The identity comes from the **verified** Bearer token (the same
-/// `JwtService::verify_token` path the API extractors use), so the
-/// injected `role` is server-issued. Any verification failure — no
-/// header, auth disabled, malformed, expired or foreign-signed token —
-/// degrades to `user = null`: a public page renders anonymously rather
-/// than erroring out.
-fn template_data(state: &AppState, headers: &HeaderMap) -> Map<String, Value> {
+/// The identity comes from the **verified** Bearer header or session
+/// cookie (the same `JwtService::verify_token` path the API extractors
+/// use), so the injected `role` is server-issued. Any verification
+/// failure — no header and no cookie, auth disabled, malformed,
+/// expired or foreign-signed token — degrades to `user = null`: a
+/// public page renders anonymously rather than erroring out.
+///
+/// Crate-visible so the CMS handlers render their views with the exact
+/// same globals the auto-routed pages get.
+pub(crate) async fn base_data(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> Map<String, Value> {
     let user = state
         .auth_context()
         .filter(|_| state.config().templates.expose_user)
-        .and_then(|auth| bearer_token(headers).and_then(|token| auth.jwt.verify_token(token).ok()))
+        .and_then(|auth| {
+            bearer_token(headers)
+                .or_else(|| session::session_token(headers))
+                .and_then(|token| auth.jwt.verify_token(token).ok())
+        })
         .and_then(|claims| AuthUser::from_claims(&claims).ok())
         .map(|user| {
             json!({
@@ -137,17 +169,69 @@ fn template_data(state: &AppState, headers: &HeaderMap) -> Map<String, Value> {
 
     let mut data = Map::new();
     data.insert(String::from("user"), user);
+    data.insert(String::from("path"), Value::String(uri.path().to_owned()));
+    data.insert(String::from("query"), query_global(uri));
+    data.insert(String::from("pages"), pages_global(state).await);
     data
 }
 
-/// Renders `path` with `data` and builds the response (or the JSON error
-/// envelope).
-async fn render_response(
+/// The `query` global: first-value-wins object of the query string.
+fn query_global(uri: &Uri) -> Value {
+    let Some(query) = uri.query() else {
+        return Value::Object(Map::new());
+    };
+
+    let pairs: Vec<(String, String)> = serde_urlencoded::from_str(query).unwrap_or_default();
+    let mut map = Map::new();
+    for (key, value) in pairs {
+        // First value wins, mirroring the common multi-map reading.
+        map.entry(key).or_insert(Value::String(value));
+    }
+    Value::Object(map)
+}
+
+/// The `pages` global: published CMS pages, newest first (empty while
+/// the CMS is disabled).
+async fn pages_global(state: &AppState) -> Value {
+    let Some(cms) = state.cms() else {
+        return Value::Array(Vec::new());
+    };
+
+    match cms.pages.list(false, PAGES_GLOBAL_LIMIT).await {
+        Ok(pages) => Value::Array(
+            pages
+                .into_iter()
+                .map(|page| {
+                    json!({
+                        "id": page.id,
+                        "slug": page.slug,
+                        "title": page.title,
+                        "updated_at": page.updated_at,
+                        "updated_at_h": crate::util::format_timestamp(page.updated_at),
+                    })
+                })
+                .collect(),
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "the pages template global could not be loaded");
+            Value::Array(Vec::new())
+        }
+    }
+}
+
+/// Renders `path` with `data` and builds the response with `status`
+/// (or the JSON error envelope).
+///
+/// Crate-visible so the CMS handlers render through the exact same
+/// pipeline (blocking pool, console capture, `no-store`, security
+/// headers) as the auto-routed views.
+pub(crate) async fn render_response(
     engine: std::sync::Arc<JhsEngine>,
     path: PathBuf,
     data: Map<String, Value>,
     request_id: Option<String>,
     method: &Method,
+    status: StatusCode,
 ) -> Response {
     let label = path.display().to_string();
     let render = tokio::task::spawn_blocking(move || engine.render(&label, &data)).await;
@@ -174,7 +258,7 @@ async fn render_response(
     };
 
     Response::builder()
-        .status(StatusCode::OK)
+        .status(status)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "no-store")
         .body(body)

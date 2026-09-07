@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panel del CMS — wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+    <div class="panel-barra">
+      <h1>Panel del CMS</h1>
+      <a class="btn btn-fantasma" href="/">Ver el sitio</a>
+    </div>
+
+    <div class="rejilla-stats">
+      <div class="stat">
+        <div class="valor"><?= stats.pages ?></div>
+        <div class="etiqueta">Páginas en total</div>
+      </div>
+      <div class="stat">
+        <div class="valor"><?= stats.published ?></div>
+        <div class="etiqueta">Publicadas</div>
+      </div>
+      <div class="stat">
+        <div class="valor"><?= stats.drafts ?></div>
+        <div class="etiqueta">Borradores</div>
+      </div>
+<?jhs if (user && user.role == "admin") { ?>
+      <div class="stat">
+        <div class="valor"><?= stats.users ?></div>
+        <div class="etiqueta">Cuentas</div>
+      </div>
+<?jhs } ?>
+    </div>
+
+    <section class="tarjeta" aria-labelledby="acciones-titulo">
+      <h2 id="acciones-titulo">Acciones rápidas</h2>
+      <ul class="lista">
+        <li>
+          <div class="principal">
+            <a href="/admin/pages">Páginas</a>
+            <div class="secundario">Crear, editar, publicar y borrar el contenido.</div>
+          </div>
+          <div class="acciones"><a class="btn btn-fantasma" href="/admin/pages/new">Nueva página</a></div>
+        </li>
+        <li>
+          <div class="principal">
+            <a href="/admin/pages/import">Importar desde public/</a>
+            <div class="secundario">Copia un archivo existente de <code>public/</code> como borrador editable.</div>
+          </div>
+        </li>
+<?jhs if (user && user.role == "admin") { ?>
+        <li>
+          <div class="principal">
+            <a href="/admin/users">Cuentas</a>
+            <div class="secundario">Usuarios, roles y restablecer contraseñas (solo administradores).</div>
+          </div>
+          <div class="acciones"><a class="btn btn-fantasma" href="/admin/users/new">Nueva cuenta</a></div>
+        </li>
+<?jhs } ?>
+      </ul>
+    </section>
+
+    <section class="tarjeta" aria-labelledby="limites-titulo">
+      <h2 id="limites-titulo">Qué puede hacer este panel</h2>
+      <p>Gestiona <strong>contenido y cuentas</strong>, nada más: la
+         configuración del servidor (puertos, TLS, secretos, middleware) vive
+         en <code>wallermax.toml</code>, accesible solo con acceso local al
+         repositorio. Esa es la separación deliberada entre el administrador
+         del CMS y quien opera el servidor.</p>
+    </section>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

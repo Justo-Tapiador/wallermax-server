@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cuentas — CMS wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+    <div class="panel-barra">
+      <h1>Cuentas del CMS</h1>
+      <a class="btn btn-fantasma" href="/admin">Panel</a>
+      <a class="btn btn-primario" href="/admin/users/new">Nueva cuenta</a>
+    </div>
+
+<?jhs if (query.ok == "creado") { ?>
+    <p class="aviso aviso-ok">Cuenta creada.</p>
+<?jhs } ?>
+<?jhs if (query.ok == "guardado") { ?>
+    <p class="aviso aviso-ok">Cambios guardados.</p>
+<?jhs } ?>
+<?jhs if (query.ok == "eliminado") { ?>
+    <p class="aviso aviso-ok">Cuenta eliminada (sus tokens de refresco quedan revocados; los de acceso caducan solos en menos de una hora).</p>
+<?jhs } ?>
+<?jhs if (query.error == "propia") { ?>
+    <p class="aviso aviso-error">No puedes eliminar tu propia cuenta: usa otra cuenta de administrador.</p>
+<?jhs } ?>
+<?jhs if (query.error == "ultimo-admin") { ?>
+    <p class="aviso aviso-error">Es la última cuenta con rol de administrador y no se puede eliminar.</p>
+<?jhs } ?>
+
+    <section class="tarjeta">
+<?jhs if (admin_users && admin_users.length) { ?>
+      <ul class="lista">
+<?jhs admin_users.forEach(function (cuenta) { ?>
+        <li>
+          <div class="principal">
+            <strong><?= cuenta.username ?></strong>
+<?jhs if (user && cuenta.id == user.id) { ?>
+            <span class="chip">eres tú</span>
+<?jhs } ?>
+            <div class="secundario">
+              alta <?= cuenta.created_at_h ?><?jhs if (cuenta.last_login_at_h) { ?> ·
+              último acceso <?= cuenta.last_login_at_h ?><?jhs } ?>
+            </div>
+          </div>
+          <span class="chip chip-acento"><?= cuenta.role ?></span>
+          <div class="acciones">
+            <a class="btn btn-fantasma" href="/admin/users/<?= cuenta.id ?>/edit">Editar</a>
+<?jhs if (!(user && cuenta.id == user.id)) { ?>
+            <form method="post" action="/admin/users/<?= cuenta.id ?>/delete">
+              <button class="btn btn-peligro" type="submit">Eliminar</button>
+            </form>
+<?jhs } ?>
+          </div>
+        </li>
+<?jhs }); ?>
+      </ul>
+<?jhs } else { ?>
+      <p class="vacio">No hay cuentas (algo muy raro: tú mismo estás identificado).</p>
+<?jhs } ?>
+    </section>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

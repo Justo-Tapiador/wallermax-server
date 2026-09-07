@@ -84,7 +84,11 @@ max_age_secs = 3600
 x_content_type_options = "nosniff"
 x_frame_options = "DENY"
 referrer_policy = "no-referrer"
-content_security_policy = "default-src 'none'; frame-ancestors 'none'"
+# v0.8.0 default: styles and same-origin images are allowed (the CMS UI
+# stylesheet lives at public/assets/wallermax.css) and forms may only post
+# back to this origin. SCRIPTS REMAIN BLOCKED: the whole site — CMS
+# included — works without a single line of JavaScript.
+content_security_policy = "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 strict_transport_security = "max-age=31536000; includeSubDomains"
 
 [static]
@@ -93,6 +97,11 @@ strict_transport_security = "max-age=31536000; includeSubDomains"
 # against files inside public/ (e.g. /style.css -> public/style.css),
 # missing files answer the standard JSON 404 envelope, and the JSON
 # service index moves to GET /api.
+#
+# NOTE (v0.8.0): the stock public/index.html was REMOVED so the site
+# home falls through to views/index.jhs — the dynamic CMS home that
+# lists the published pages and carries the login/logout header.
+# Drop your own index.html back in to pin a static home instead.
 enabled = true
 
 # Directory holding the static assets, relative to the working directory
@@ -137,9 +146,10 @@ auto_escape = true
 
 # Expose the authenticated identity to templates as the `user` global:
 # user = { id, username, role } with a valid Authorization: Bearer token
-# (verified: signature, expiry, issuer), user = null for anonymous
-# visitors, disabled [auth], or tokens that fail verification. Templates
-# then branch on it: <?jhs if (user && user.role == 'admin') { ?> ...
+# or wallermax_session cookie (verified: signature, expiry, issuer),
+# user = null for anonymous visitors, disabled [auth], or credentials
+# that fail verification. Templates then branch on it:
+# <?jhs if (user && user.role == 'admin') { ?> ...
 # Turn off when pages must stay identity-free (e.g. CDN caching).
 expose_user = true
 
@@ -180,11 +190,21 @@ token_ttl_secs = 3600
 # Value of the `iss` (issuer) claim embedded in tokens.
 issuer = "wallermax-server"
 
-# Whether new users may register themselves (POST /api/auth/register).
+# Whether new users may register themselves (POST /api/auth/register
+# and the registration modal).
 registration_enabled = true
 
 # Minimum accepted password length.
 min_password_len = 8
+
+# When the `wallermax_session` cookie carries the `Secure` attribute
+# (v0.8.0): "auto" (the default) sets it only while [tls] is enabled —
+# browsers refuse to store Secure cookies on plain-HTTP origins, and an
+# unconditional Secure silently broke browser logins on HTTP dev
+# servers (curl/PowerShell were lax, which made it look like a server
+# bug). "always" pins it (TLS-terminating proxies), "never" for
+# HTTP-only local testing.
+secure_cookies = "auto"
 
 # Refresh tokens: long-lived opaque tokens returned by login and rotated
 # by POST /api/auth/refresh. Presenting a rotated token (a replay,
@@ -194,6 +214,33 @@ refresh_tokens_enabled = true
 
 # Refresh token lifetime, in seconds (30 days by default).
 refresh_token_ttl_secs = 2592000
+
+# NOTE (v0.7.0): login and refresh also attach the access token as the
+# `wallermax_session` cookie (HttpOnly, SameSite=Strict, Path=/,
+# Max-Age = token_ttl_secs, and `Secure` per [auth] secure_cookies)
+# so BROWSERS stay authenticated across page navigation;
+# logout/logout_all clear it. The cookie is verified exactly
+# like the Bearer header (the header always wins when both are present).
+# The shipped `views/login.jhs` (GET /login) is a plain HTML
+# form that logs browsers in without any JavaScript, and the shared
+# header partial (views/partials/header.jhs) adds login/registration
+# modals — pure CSS, no scripts — to every page.
+
+[cms]
+# The small built-in CMS (v0.8.0). Requires [database], [auth] and
+# [templates] to be enabled (validated at startup).
+#
+# Public site: GET /p lists the published pages, GET /p/<slug> renders
+# one (the stored body is .jhs template source: it sees the `user`,
+# `path`, `query` and `pages` globals and may include the shared
+# partials). Admin panel at /admin for the `admin` and `editor` roles:
+# pages CRUD, import from public/, user management (admin only),
+# self-service password change at /perfil/password. Everything is
+# plain HTML forms — the CSP keeps scripts blocked.
+#
+# The panel manages CONTENT and CMS ACCOUNTS only: server configuration
+# stays in wallermax.toml (local repository access).
+enabled = true
 
 [metrics]
 # Prometheus exposition endpoint: scrapes return every collected metric

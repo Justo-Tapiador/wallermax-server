@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crear una cuenta — wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+<?jhs
+  var erroresRegistro = {
+    tomado: "Ese nombre de usuario ya está en uso.",
+    usuario: "El nombre de usuario no es válido (3-32 caracteres: letras, números, guion y guion bajo).",
+    contrasena: "La contraseña no cumple los requisitos (longitud mínima 8).",
+    cerrado: "El registro de nuevas cuentas está desactivado en este servidor.",
+    error: "No se pudo crear la cuenta; inténtalo de nuevo."
+  };
+  var errorRegistro = query.register_error
+    ? (erroresRegistro[query.register_error] || "No se pudo crear la cuenta.")
+    : null;
+?>
+<?jhs if (user) { ?>
+    <section class="tarjeta tarjeta-angosta">
+      <h1>Ya tienes sesión</h1>
+      <p>Estás identificado como <strong><?= user.username ?></strong>; para
+         usar otra cuenta, cierra la sesión primero desde la cabecera.</p>
+      <p><a class="btn btn-primario" href="/perfil">Ir a tu perfil</a></p>
+    </section>
+<?jhs } else { ?>
+    <section class="tarjeta tarjeta-angosta">
+      <h1>Crear una cuenta</h1>
+<?jhs if (errorRegistro) { ?>
+      <p class="aviso aviso-error"><?= errorRegistro ?></p>
+<?jhs } ?>
+      <p>Al terminar te quedas dentro: el servidor inicia la sesión
+         automáticamente con su cookie <code>HttpOnly</code>.</p>
+      <form method="post" action="/api/auth/register">
+        <input type="hidden" name="redirect" value="<?= query.redirect || "/" ?>">
+        <div class="campo">
+          <label for="usuario">Usuario</label>
+          <input id="usuario" type="text" name="username" required
+                 minlength="3" maxlength="32" autocomplete="username">
+          <p class="ayuda">3-32 caracteres: letras, números, guion y guion bajo.</p>
+        </div>
+        <div class="campo">
+          <label for="clave">Contraseña</label>
+          <input id="clave" type="password" name="password" required
+                 minlength="8" autocomplete="new-password">
+          <p class="ayuda">Al menos 8 caracteres.</p>
+        </div>
+        <button class="btn btn-primario" type="submit">Crear cuenta y entrar</button>
+      </form>
+      <p>La primera cuenta de una base de datos nueva se convierte en el
+         administrador del CMS.</p>
+    </section>
+<?jhs } ?>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

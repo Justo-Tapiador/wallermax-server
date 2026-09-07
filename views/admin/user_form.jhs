@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><?= form.is_new ? "Nueva cuenta" : "Editar cuenta" ?> — CMS wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+    <div class="panel-barra">
+      <h1><?= form.is_new ? "Nueva cuenta" : "Editar cuenta" ?></h1>
+      <a class="btn btn-fantasma" href="/admin/users">Volver al listado</a>
+    </div>
+
+<?jhs if (form_error) { ?>
+    <p class="aviso aviso-error"><?= form_error ?></p>
+<?jhs } ?>
+
+    <form method="post" action="<?= form.is_new ? "/admin/users" : "/admin/users/" + form.id ?>">
+      <section class="tarjeta tarjeta-angosta">
+<?jhs if (form.is_new) { ?>
+        <div class="campo">
+          <label for="usuario">Usuario</label>
+          <input id="usuario" type="text" name="username" required
+                 minlength="3" maxlength="32" autocomplete="off">
+          <p class="ayuda">3-32 caracteres: letras, números, guion y guion bajo.</p>
+        </div>
+        <div class="campo">
+          <label for="clave">Contraseña inicial</label>
+          <input id="clave" type="password" name="password" required
+                 minlength="8" autocomplete="new-password">
+          <p class="ayuda">Al menos 8 caracteres. La persona la puede cambiar
+             luego desde su perfil.</p>
+        </div>
+<?jhs } else { ?>
+        <div class="campo">
+          <label>Usuario</label>
+          <input type="text" value="<?= form.username ?>" disabled>
+          <p class="ayuda">El nombre de usuario no cambia.</p>
+        </div>
+        <div class="campo">
+          <label for="clave">Nueva contraseña (opcional)</label>
+          <input id="clave" type="password" name="password"
+                 minlength="8" autocomplete="new-password">
+          <p class="ayuda">Déjalo vacío para mantener la actual.</p>
+        </div>
+<?jhs } ?>
+        <div class="campo">
+          <label for="rol">Rol</label>
+          <select id="rol" name="role">
+            <option value="user"<?= form.role == "user" ? " selected" : "" ?>>Usuario — solo ve las páginas</option>
+            <option value="editor"<?= form.role == "editor" ? " selected" : "" ?>>Editor — gestiona el contenido</option>
+            <option value="admin"<?= form.role == "admin" ? " selected" : "" ?>>Administrador — contenido y cuentas</option>
+          </select>
+          <p class="ayuda">El rol viaja dentro del token firmado: la próxima
+             vez que la persona inicie sesión verá su nuevo alcance.</p>
+        </div>
+        <button class="btn btn-primario" type="submit">
+          <?= form.is_new ? "Crear cuenta" : "Guardar cambios" ?>
+        </button>
+      </section>
+    </form>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

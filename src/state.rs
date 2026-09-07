@@ -25,7 +25,7 @@ use axum::http::{HeaderName, HeaderValue};
 
 use crate::auth::JwtService;
 use crate::config::AppConfig;
-use crate::db::UserRepository;
+use crate::db::{PageRepository, UserRepository};
 use crate::metrics::Metrics;
 use crate::proxy::{self, Cidr};
 use crate::rate_limit::RateLimiter;
@@ -50,6 +50,16 @@ pub struct AuthContext {
     pub refresh_tokens_enabled: bool,
     /// Refresh token lifetime in seconds (from `[auth]`).
     pub refresh_token_ttl_secs: u64,
+}
+
+/// CMS services shared by handlers when `[cms]` (plus `[database]`,
+/// `[auth]` and `[templates]`) is enabled.
+///
+/// Built once at startup (see [`crate::server::build_state`]) and
+/// immutable afterwards.
+pub struct CmsContext {
+    /// Page storage behind the [`PageRepository`] abstraction.
+    pub pages: Arc<dyn PageRepository>,
 }
 
 /// Dynamic template rendering services shared by the template
@@ -142,23 +152,30 @@ struct StateInner {
     auth: Option<AuthContext>,
     metrics: Option<Metrics>,
     templates: Option<TemplateEngine>,
+    cms: Option<CmsContext>,
 }
 
 impl AppState {
     /// Creates a fresh application state from a validated configuration,
     /// **without** authentication services (previous-phase behaviour).
     pub fn new(config: AppConfig) -> Self {
-        Self::build(config, None)
+        Self::build(config, None, None)
     }
 
     /// Creates a fresh application state with the authentication services
     /// attached (see [`AuthContext`]).
     pub fn with_auth(config: AppConfig, auth: AuthContext) -> Self {
-        Self::build(config, Some(auth))
+        Self::build(config, Some(auth), None)
+    }
+
+    /// Creates a fresh application state with the authentication and CMS
+    /// services attached (see [`AuthContext`] and [`CmsContext`]).
+    pub fn with_cms(config: AppConfig, auth: AuthContext, cms: CmsContext) -> Self {
+        Self::build(config, Some(auth), Some(cms))
     }
 
     /// Shared constructor for the public builders.
-    fn build(config: AppConfig, auth: Option<AuthContext>) -> Self {
+    fn build(config: AppConfig, auth: Option<AuthContext>, cms: Option<CmsContext>) -> Self {
         let security_headers = config.security_headers.header_pairs();
         let rate_limiter = RateLimiter::new(
             config.rate_limit.capacity,
@@ -210,6 +227,7 @@ impl AppState {
                 auth,
                 metrics,
                 templates,
+                cms,
             }),
         }
     }
@@ -269,6 +287,18 @@ impl AppState {
     /// Whether dynamic template rendering is enabled.
     pub fn templates_enabled(&self) -> bool {
         self.inner.templates.is_some()
+    }
+
+    /// Returns the CMS services when the `[cms]` feature is enabled
+    /// (which additionally requires `[database]`, `[auth]` and
+    /// `[templates]`).
+    pub fn cms(&self) -> Option<&CmsContext> {
+        self.inner.cms.as_ref()
+    }
+
+    /// Whether the CMS routes are mounted.
+    pub fn cms_enabled(&self) -> bool {
+        self.inner.cms.is_some()
     }
 
     /// Records that a request has been served.
@@ -408,11 +438,38 @@ mod tests {
             Ok(0)
         }
 
+        async fn count_with_role(
+            &self,
+            _role: crate::db::UserRole,
+        ) -> Result<i64, crate::db::RepositoryError> {
+            Ok(0)
+        }
+
         async fn list(
             &self,
             _limit: i64,
         ) -> Result<Vec<crate::db::User>, crate::db::RepositoryError> {
             Ok(Vec::new())
+        }
+
+        async fn update_password(
+            &self,
+            _id: i64,
+            _password_hash: &str,
+        ) -> Result<(), crate::db::RepositoryError> {
+            Ok(())
+        }
+
+        async fn update_role(
+            &self,
+            _id: i64,
+            _role: crate::db::UserRole,
+        ) -> Result<(), crate::db::RepositoryError> {
+            Ok(())
+        }
+
+        async fn delete(&self, _id: i64) -> Result<(), crate::db::RepositoryError> {
+            Ok(())
         }
 
         async fn record_login(&self, _id: i64) -> Result<(), crate::db::RepositoryError> {
