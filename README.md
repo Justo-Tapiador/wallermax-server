@@ -11,11 +11,12 @@
 
 > A modular, secure and high-performance web server written in Rust.
 
-**Status: v0.5.0 — the four roadmap phases plus a dynamic template engine.** Phase 4 added rotating
+**Status: v0.6.0 — the four roadmap phases plus a dynamic template engine.** Phase 4 added rotating
 refresh tokens with family revocation, a Prometheus `/metrics` endpoint, HTTPS via
 rustls (plus an HTTP-to-HTTPS redirect listener), trusted-proxy `X-Forwarded-For`
 parsing, a multi-stage Docker image with a compose example and a GitHub Actions CI
-pipeline. v0.5.0 added the sandboxed `.jhs` template engine — see
+pipeline. v0.5.0 added the sandboxed `.jhs` template engine, and v0.6.0 injects the
+authenticated identity into every render as the `user` global — see
 [README-jhs-engine.md](README-jhs-engine.md) and the [roadmap](#roadmap).
 
 ## Table of contents
@@ -120,7 +121,7 @@ pipeline. v0.5.0 added the sandboxed `.jhs` template engine — see
 
 ```console
 $ cargo run
-   Compiling wallermax-server v0.5.0
+   Compiling wallermax-server v0.6.0
     Finished dev [unoptimized + debuginfo] target(s)
      Running `target/debug/wallermax-server`
 
@@ -393,6 +394,14 @@ envelope, template errors answer the JSON 500 envelope, and
 The syntax, escaping rules, sandbox contract, configuration keys and
 a template-writing guide live in
 **[README-jhs-engine.md](README-jhs-engine.md)**.
+
+Since v0.6.0 every render also receives the authenticated identity as
+the `user` global: a valid `Authorization: Bearer` token (verified —
+signature, expiry, issuer) injects `user = { id, username, role }`,
+while anonymous visitors and failed verifications render with
+`user = null`, so role-gated markup is a plain `<?jhs if (user &&
+user.role == 'admin') { ?>` block. `[templates] expose_user = false`
+turns the injection off.
 
 ## Refresh tokens
 
@@ -815,7 +824,7 @@ running 20 tests ... ok         # templates: rendering, view auto-routing,
                                #   reload, loop bounds, disabled mode
 ```
 
-**280 tests total**, all of them plain `cargo test` (no docker, no
+**286 tests total**, all of them plain `cargo test` (no docker, no
 network). The integration tests boot the exact same application the
 binary serves (`server::build_state` + `server::build_app`, with
 `build_app_with_routes` available for injecting custom routes) on an
@@ -956,8 +965,11 @@ fresh temporary asset directory, cleaned up afterwards.
 - [x] HTTP integration: on-the-fly rendering under `[static]`, views
       auto-routing with API precedence, JSON error envelopes, mtime
       cache invalidation, `spawn_blocking` renders.
-- [x] 20-case fidelity battery against the original engine plus 20
-      HTTP integration tests (280 total across the suite).
+- [x] 20-case fidelity battery against the original engine plus 25
+      HTTP integration tests (286 total across the suite).
+- [x] v0.6.0: template data — the verified identity injected as the
+      `user` global (`{ id, username, role }`, `null` for anonymous),
+      `expose_user` switch, bad tokens degrade to anonymous renders.
 
 ### Beyond the roadmap (ideas)
 

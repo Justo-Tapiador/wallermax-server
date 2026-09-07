@@ -157,6 +157,7 @@ enabled = true
 views_dir = "views"
 cache = true
 auto_escape = true
+expose_user = true
 loop_iteration_limit = 10000000
 ```
 
@@ -166,6 +167,7 @@ loop_iteration_limit = 10000000
 | `views_dir` | `"views"` | Views root. Must exist at startup while enabled; `..` segments rejected. |
 | `cache` | `true` | Cache compiled templates, recompiling when a file's mtime changes. |
 | `auto_escape` | `true` | HTML-escape all dynamic output (`<?= ?>` and `echo()`). `raw()` always bypasses it. |
+| `expose_user` | `true` | Inject the authenticated identity as the `user` template global (`null` when anonymous or unverifiable). |
 | `loop_iteration_limit` | `10000000` | Upper bound on loop iterations per render; exceeding it throws. Must be > 0. |
 
 Like every section it participates in the layered configuration:
@@ -212,11 +214,14 @@ block must close in a later block — classic PHP discipline applies.
 
 ```html
 <?jhs if (user) { ?>
-  <p>Hola, <?= user ?>.</p>
+  <p>Hola, <?= user.username ?>.</p>
 <?jhs } else { ?>
   <p>Hola, anónimo.</p>
 <?jhs } ?>
 ```
+
+(`user` is one of the globals the server injects into every render —
+see [the next section](#template-data-the-user-object).)
 
 ### Building output programmatically
 
@@ -257,7 +262,56 @@ expressions, `try/catch`, functions:
 There are no implicit globals: `<?= title ?>` with no `title` in scope
 throws a `ReferenceError` and the request answers a 500 envelope with
 the engine's message. This matches the original engine (and JavaScript
-proper) — declare what you print.
+proper) — declare what you print. The one exception is `user`, which
+the server always defines (`null` for anonymous visitors) — see below.
+
+## Template data: the `user` object
+
+The original node-jhs2 accepted an extra data object next to the file
+path (`render(templatePath, data)`), whose keys became template
+globals. The HTTP middleware now uses that seam: every render receives
+one injected global, `user`, carrying the authenticated identity.
+
+| Request | `user` value |
+|---|---|
+| Valid `Authorization: Bearer <token>` (verified signature, expiry and issuer) | `{ id: 1, username: "justo", role: "admin" }` |
+| No header, `[auth]` disabled, or `expose_user = false` | `null` |
+| Malformed, expired or foreign-signed token | `null` (the page renders anonymously — a public page never becomes an error because of a bad token) |
+
+A role-gated fragment looks exactly like you would expect:
+
+```html
+<?jhs if (user && user.role == 'admin') { ?>
+   <p>Bienvenido, administrador <?= user.username ?></p>
+<?jhs } else if (user) { ?>
+   <p>Hola, <?= user.username ?> (<?= user.role ?>)</p>
+<?jhs } else { ?>
+   <p>por favor, inicia sesión</p>
+<?jhs } ?>
+```
+
+Properties and guarantees:
+
+- **`user.role` is server-issued.** It comes from the signed JWT, not
+  from the request, so a client cannot forge the `admin` role by
+  editing a cookie or a header. A token that fails verification (bad
+  signature, expired, wrong issuer) degrades to `user = null`, never
+  to a partial identity.
+- **`<?= user.username ?>` is auto-escaped.** The username is
+  user-chosen input; `auto_escape` (on by default) HTML-escapes it, so
+  personalisation cannot turn into stored XSS. Only `raw()` bypasses
+  the escaper — use it for trusted markup, never for identity fields.
+- **`user` is always *defined*** (unlike undeclared variables): null
+  for anonymous visitors. Guard with `if (user && ...)` — a truthiness
+  check is the portable form.
+- Turn the injection off with `[templates] expose_user = false` — for
+  example when rendered pages must stay identity-free so a CDN can
+  cache them.
+
+The injection mechanism is generic (a JSON map whose keys become
+globals, with `__proto__`-style keys blocked and sandbox helper names
+non-shadowable), so future server-side data can ride the same seam
+without engine changes.
 
 ## Escaping: `<?= ?>`, `echo()` and `raw()`
 
@@ -302,9 +356,10 @@ The request timeout still applies on top of it as a second belt.
 **Data injection**: the engine API accepts a JSON data map injected as
 global variables (via `Object.defineProperty` with
 `CreateDataProperty` semantics — data keys cannot reach `Object.prototype`
-or shadow the sandbox helpers). The HTTP middleware currently passes an
-empty map, i.e. templates render self-contained; the injection seam
-exists for future route-to-template data flows.
+or shadow the sandbox helpers). The HTTP middleware passes the `user`
+object through this seam (see
+[Template data](#template-data-the-user-object)); the mechanism stays
+generic for future route-to-template data flows.
 
 ## Caching and hot reload
 
@@ -384,7 +439,7 @@ configuration.
 
 | Symptom | Cause / fix |
 |---|---|
-| `500 Template execution error ... ReferenceError: x is not defined` | The variable is not declared in the template — declare it or check the typo. No data is injected over HTTP today. |
+| `500 Template execution error ... ReferenceError: x is not defined` | The variable is not declared in the template — declare it or check the typo. The injected `user` global is always defined (`null` when anonymous); anything else must be declared. |
 | `GET /x` answers JSON 404 but the file exists | Is it `views/x.jhs`? The views tree only serves extensionless paths after a 404; `public/` serves `/x.jhs` directly. |
 | Template changes are not picked up | `cache = true` recompiles on mtime change; ensure the editor really changes the mtime (some tools preserve it). |
 | Escaped markup shows as text (`&lt;li&gt;`) | Expected with `auto_escape` — print trusted markup with `raw()`. |

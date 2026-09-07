@@ -428,6 +428,12 @@ pub struct TemplatesConfig {
     /// `echo()` calls); literal template text is never escaped, and
     /// `raw()` always bypasses the escaper.
     pub auto_escape: bool,
+    /// Expose the authenticated identity to templates as the `user`
+    /// global (`{ id, username, role }`, or `null` for anonymous
+    /// visitors). Requires `[auth]` to be enabled; invalid or missing
+    /// tokens degrade to the anonymous form instead of rejecting the
+    /// render.
+    pub expose_user: bool,
     /// Upper bound on loop iterations inside one render. Protects the
     /// workers from runaway template loops (the sandbox throws when a
     /// template exceeds it).
@@ -441,6 +447,7 @@ impl Default for TemplatesConfig {
             views_dir: String::from("views"),
             cache: true,
             auto_escape: true,
+            expose_user: true,
             loop_iteration_limit: 10_000_000,
         }
     }

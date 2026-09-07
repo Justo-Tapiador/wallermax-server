@@ -1,0 +1,7 @@
+<?jhs if (user && user.role == 'admin') { ?>
+<h1>Bienvenido, administrador <?= user.username ?></h1>
+<?jhs } else if (user) { ?>
+<h1>Hola <?= user.username ?> (<?= user.role ?>)</h1>
+<?jhs } else { ?>
+<h1>por favor, inicia sesión</h1>
+<?jhs } ?>

@@ -19,7 +19,7 @@
 use axum::extract::{FromRequest, FromRequestParts, Request};
 use axum::http::header;
 use axum::http::request::Parts;
-use axum::http::Extensions;
+use axum::http::{Extensions, HeaderMap};
 use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
 
@@ -64,7 +64,11 @@ pub struct AuthUser {
 
 impl AuthUser {
     /// Rebuilds the identity from verified claims.
-    fn from_claims(claims: &Claims) -> Result<Self, AppError> {
+    ///
+    /// Crate-visible so the template middleware can turn a verified
+    /// Bearer token into template data without duplicating the parsing
+    /// rules (and their failure handling) here.
+    pub(crate) fn from_claims(claims: &Claims) -> Result<Self, AppError> {
         let user_id = claims
             .sub
             .parse()
@@ -94,7 +98,7 @@ impl FromRequestParts<AppState> for AuthUser {
             ));
         };
 
-        let Some(token) = bearer_token(parts) else {
+        let Some(token) = bearer_token(&parts.headers) else {
             return Err(Rejection::new(
                 AppError::unauthorized("missing `Authorization: Bearer <token>` header"),
                 &parts.extensions,
@@ -172,9 +176,12 @@ where
 }
 
 /// Extracts the raw token from an `Authorization: Bearer <token>` header.
-fn bearer_token(parts: &Parts) -> Option<&str> {
-    parts
-        .headers
+///
+/// Crate-visible so middleware that optionally authenticates (the
+/// template renderer) shares the exact same parsing rules as the
+/// request extractors.
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
         .get(header::AUTHORIZATION)?
         .to_str()
         .ok()?

@@ -13,8 +13,8 @@ mod common;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use common::TestServer;
-use serde_json::Value;
+use common::{TempDbGuard, TestServer};
+use serde_json::{json, Value};
 use wallermax_server::config::AppConfig;
 
 /// Fixture tree: a static root (with `hello.jhs`, `raw.jhs`, `style.css`
@@ -53,6 +53,7 @@ impl FixtureDir {
         std::fs::write(views.join("onlyview.jhs"), VIEW_ONLY).expect("only view write");
         std::fs::write(views.join("boom.jhs"), BOOM_JHS).expect("boom write");
         std::fs::write(views.join("health.jhs"), VIEW_HEALTH).expect("health view write");
+        std::fs::write(views.join("profile.jhs"), VIEW_PROFILE).expect("profile view write");
         Self { path }
     }
 
@@ -71,6 +72,22 @@ impl FixtureDir {
         config.templates.loop_iteration_limit = 10_000_000;
         tune(&mut config);
         config
+    }
+
+    /// Configuration additionally enabling `[database]` and `[auth]`
+    /// against a fresh temporary database (removed on drop), so tests
+    /// can exercise the `user` template global.
+    fn config_with_auth(&self, tune: impl FnOnce(&mut AppConfig)) -> (AppConfig, TempDbGuard) {
+        let db = TempDbGuard::new();
+        let config = self.config_with(|config| {
+            config.database.enabled = true;
+            config.database.url = db.url().to_owned();
+            config.database.max_connections = 2;
+            config.auth.enabled = true;
+            config.auth.jwt_secret = String::from("integration-test-secret-0123456789abcdef0123");
+            tune(config);
+        });
+        (config, db)
     }
 }
 
@@ -92,6 +109,14 @@ const VIEW_BLOG: &str = "<html>blog index</html>";
 const VIEW_ONLY: &str = "<html>only view</html>";
 const BOOM_JHS: &str = "<?jhs throw new Error(\"boom\"); ?>";
 const VIEW_HEALTH: &str = "<html>view health</html>";
+const VIEW_PROFILE: &str = "\
+<?jhs if (user && user.role == 'admin') { ?>\
+<h1>Bienvenido, administrador <?= user.username ?></h1>\
+<?jhs } else if (user) { ?>\
+<h1>Hola <?= user.username ?> (<?= user.role ?>)</h1>\
+<?jhs } else { ?>\
+<h1>por favor, inicia sesión</h1>\
+<?jhs } ?>";
 
 async fn body_json(response: reqwest::Response) -> Value {
     let bytes = response.bytes().await.expect("body bytes");
@@ -454,4 +479,137 @@ async fn templates_without_static_serving_still_auto_route_views() {
     assert_eq!(response.status(), 200);
     let body = response.text().await.expect("body text");
     assert!(body.contains("contacto 2"), "view without static: {body}");
+}
+
+// ── The `user` template global (node-jhs2's extra data argument) ──────
+
+/// Registers `username` (the first account bootstraps the `admin` role,
+/// later ones are regular users) and logs in, returning the access token.
+async fn register_and_login(server: &TestServer, username: &str, password: &str) -> String {
+    let client = reqwest::Client::new();
+    let registered = client
+        .post(server.url("/api/auth/register"))
+        .json(&json!({ "username": username, "password": password }))
+        .send()
+        .await
+        .expect("registration request succeeds");
+    assert_eq!(registered.status(), 201, "registration must succeed");
+
+    let login = client
+        .post(server.url("/api/auth/login"))
+        .json(&json!({ "username": username, "password": password }))
+        .send()
+        .await
+        .expect("login request succeeds");
+    assert_eq!(login.status(), 200, "login must succeed");
+    let body: Value = login.json().await.expect("login body is JSON");
+    body["access_token"]
+        .as_str()
+        .expect("access token present")
+        .to_owned()
+}
+
+#[tokio::test]
+async fn templates_receive_the_authenticated_user() {
+    let fixture = FixtureDir::create("user-data");
+    let (config, _db) = fixture.config_with_auth(|_| {});
+    let server = TestServer::start_full(config).await;
+
+    // The first registered account bootstraps the admin role.
+    let admin_token = register_and_login(&server, "root-admin", "sup3r-secret!").await;
+    let client = reqwest::Client::new();
+    let response = client
+        .get(server.url("/profile"))
+        .header("Authorization", format!("Bearer {admin_token}"))
+        .send()
+        .await
+        .expect("request ok");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("body text");
+    assert_eq!(body, "<h1>Bienvenido, administrador root-admin</h1>");
+
+    // Later accounts are regular users: the member branch renders.
+    let member_token = register_and_login(&server, "ana", "password-456").await;
+    let response = client
+        .get(server.url("/profile"))
+        .header("Authorization", format!("Bearer {member_token}"))
+        .send()
+        .await
+        .expect("request ok");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("body text");
+    assert_eq!(body, "<h1>Hola ana (user)</h1>");
+}
+
+#[tokio::test]
+async fn templates_render_anonymous_without_a_token() {
+    let fixture = FixtureDir::create("user-anon");
+    let (config, _db) = fixture.config_with_auth(|_| {});
+    let server = TestServer::start_full(config).await;
+
+    let response = reqwest::get(server.url("/profile"))
+        .await
+        .expect("request ok");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("body text");
+    assert_eq!(body, "<h1>por favor, inicia sesión</h1>");
+}
+
+#[tokio::test]
+async fn templates_render_anonymous_for_invalid_tokens() {
+    let fixture = FixtureDir::create("user-invalid");
+    let (config, _db) = fixture.config_with_auth(|_| {});
+    let server = TestServer::start_full(config).await;
+
+    // A public page must not become an error because of a bad token:
+    // rendering degrades to the anonymous branch instead.
+    let client = reqwest::Client::new();
+    for token in ["garbage-token", "a.b.c", "too.many.segments.here"] {
+        let response = client
+            .get(server.url("/profile"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .expect("request ok");
+        assert_eq!(response.status(), 200, "token: {token}");
+        let body = response.text().await.expect("body text");
+        assert_eq!(
+            body, "<h1>por favor, inicia sesión</h1>",
+            "anonymous render expected for token: {token}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn exposing_the_user_object_can_be_disabled() {
+    let fixture = FixtureDir::create("user-off");
+    let (config, _db) = fixture.config_with_auth(|config| {
+        config.templates.expose_user = false;
+    });
+    let server = TestServer::start_full(config).await;
+
+    let token = register_and_login(&server, "root-admin", "sup3r-secret!").await;
+    let client = reqwest::Client::new();
+    let response = client
+        .get(server.url("/profile"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("request ok");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("body text");
+    assert_eq!(body, "<h1>por favor, inicia sesión</h1>");
+}
+
+#[tokio::test]
+async fn user_is_null_when_auth_is_disabled() {
+    let fixture = FixtureDir::create("user-noauth");
+    let server = TestServer::start_with_config(fixture.config()).await;
+
+    let response = reqwest::get(server.url("/profile"))
+        .await
+        .expect("request ok");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("body text");
+    assert_eq!(body, "<h1>por favor, inicia sesión</h1>");
 }

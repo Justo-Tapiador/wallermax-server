@@ -699,6 +699,40 @@ mod tests {
     }
 
     #[test]
+    fn user_object_drives_conditional_rendering() {
+        // The shape the template middleware injects: a `user` global with
+        // id/username/role, or null for anonymous visitors.
+        let template = "<?jhs if (user && user.role == 'admin') { ?>\
+             <p>Bienvenido, administrador <?= user.username ?></p>\
+             <?jhs } else if (user) { ?>\
+             <p>Hola <?= user.username ?> (<?= user.role ?>)</p>\
+             <?jhs } else { ?>\
+             <p>por favor, inicia sesión</p>\
+             <?jhs } ?>";
+
+        let admin = engine()
+            .render_string(
+                template,
+                &data(json!({"user": {"id": 1, "username": "justo", "role": "admin"}})),
+            )
+            .expect("renders");
+        assert_eq!(admin.html, "<p>Bienvenido, administrador justo</p>");
+
+        let member = engine()
+            .render_string(
+                template,
+                &data(json!({"user": {"id": 2, "username": "ana", "role": "user"}})),
+            )
+            .expect("renders");
+        assert_eq!(member.html, "<p>Hola ana (user)</p>");
+
+        let anonymous = engine()
+            .render_string(template, &data(json!({"user": null})))
+            .expect("renders");
+        assert_eq!(anonymous.html, "<p>por favor, inicia sesión</p>");
+    }
+
+    #[test]
     fn variadic_echo_joins_arguments() {
         let out = engine()
             .render_string("<?jhs echo(\"a\", \"b\", 3); ?>", &Map::new())

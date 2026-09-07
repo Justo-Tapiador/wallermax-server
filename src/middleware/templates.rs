@@ -29,6 +29,20 @@
 //! which is template-author-facing diagnostics rather than a leak:
 //! template code never sees server internals.
 //!
+//! ## Template data: the `user` global
+//!
+//! Every render receives one data key, `user`, mirroring node-jhs2's
+//! extra-data argument. While `[auth]` is enabled and
+//! `[templates] expose_user = true`, the request's `Authorization:
+//! Bearer <token>` header is **verified** (signature, expiry, issuer)
+//! and the identity is injected as `user = { id, username, role }`.
+//! Anonymous visitors — no header, auth disabled, or a token that fails
+//! verification — render with `user = null` instead of being rejected:
+//! template pages are public pages with optional personalisation, and
+//! a bad token should not turn a page into an error. The claims come
+//! from the signed token, so `user.role` is server-issued and cannot
+//! be forged by the client.
+//!
 //! `console.*` output inside templates is routed to `tracing` at the
 //! matching level instead of the process stdout.
 
@@ -36,12 +50,14 @@ use std::path::{Path, PathBuf};
 
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{header, Method, StatusCode};
+use axum::http::{header, HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
 use percent_encoding::percent_decode_str;
+use serde_json::{json, Map, Value};
 
 use crate::error::AppError;
+use crate::extractors::{bearer_token, AuthUser};
 use crate::middleware::request_id::RequestId;
 use crate::state::AppState;
 use crate::template_engine::{JhsEngine, RenderOutput};
@@ -70,12 +86,15 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
         .get::<RequestId>()
         .map(|id| id.0.clone());
 
+    let data = template_data(&state, request.headers());
+
     // On-the-fly rendering of `.jhs` files under the static root.
     if let Some(static_root) = templates.static_root() {
         if decoded.ends_with(".jhs") {
             let candidate = static_root.join(trim_leading_slash(&decoded));
             if candidate.is_file() {
-                return render_response(templates.engine(), candidate, request_id, &method).await;
+                return render_response(templates.engine(), candidate, data, request_id, &method)
+                    .await;
             }
         }
     }
@@ -86,26 +105,52 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
     // Auto-route views for otherwise-unmatched paths.
     if response.status() == StatusCode::NOT_FOUND {
         if let Some(view) = view_candidate(templates.views_dir(), &decoded) {
-            return render_response(templates.engine(), view, request_id, &method).await;
+            return render_response(templates.engine(), view, data, request_id, &method).await;
         }
     }
 
     response
 }
 
-/// Renders `path` and builds the response (or the JSON error envelope).
+/// Builds the per-request template data: the `user` global.
+///
+/// The identity comes from the **verified** Bearer token (the same
+/// `JwtService::verify_token` path the API extractors use), so the
+/// injected `role` is server-issued. Any verification failure — no
+/// header, auth disabled, malformed, expired or foreign-signed token —
+/// degrades to `user = null`: a public page renders anonymously rather
+/// than erroring out.
+fn template_data(state: &AppState, headers: &HeaderMap) -> Map<String, Value> {
+    let user = state
+        .auth_context()
+        .filter(|_| state.config().templates.expose_user)
+        .and_then(|auth| bearer_token(headers).and_then(|token| auth.jwt.verify_token(token).ok()))
+        .and_then(|claims| AuthUser::from_claims(&claims).ok())
+        .map(|user| {
+            json!({
+                "id": user.user_id,
+                "username": user.username,
+                "role": user.role.as_str(),
+            })
+        })
+        .unwrap_or(Value::Null);
+
+    let mut data = Map::new();
+    data.insert(String::from("user"), user);
+    data
+}
+
+/// Renders `path` with `data` and builds the response (or the JSON error
+/// envelope).
 async fn render_response(
     engine: std::sync::Arc<JhsEngine>,
     path: PathBuf,
+    data: Map<String, Value>,
     request_id: Option<String>,
     method: &Method,
 ) -> Response {
     let label = path.display().to_string();
-    let render = tokio::task::spawn_blocking(move || {
-        let data = serde_json::Map::new();
-        engine.render(&label, &data)
-    })
-    .await;
+    let render = tokio::task::spawn_blocking(move || engine.render(&label, &data)).await;
 
     let output = match render {
         Ok(Ok(output)) => output,

@@ -135,6 +135,14 @@ cache = true
 # Literal template text is never escaped; raw() always bypasses it.
 auto_escape = true
 
+# Expose the authenticated identity to templates as the `user` global:
+# user = { id, username, role } with a valid Authorization: Bearer token
+# (verified: signature, expiry, issuer), user = null for anonymous
+# visitors, disabled [auth], or tokens that fail verification. Templates
+# then branch on it: <?jhs if (user && user.role == 'admin') { ?> ...
+# Turn off when pages must stay identity-free (e.g. CDN caching).
+expose_user = true
+
 # Upper bound on loop iterations inside one render. Protects the
 # workers from runaway template loops (the sandbox throws when a
 # template exceeds it). Must be greater than zero.
