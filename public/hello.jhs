@@ -6,12 +6,15 @@
 </head>
 <body>
   <h1>Hola desde una plantilla .jhs</h1>
+<ul>
 <?jhs
   var items = ["uno", "dos", "tres"];
-  items.forEach(function (item, i) {
-    echo("<li>elemento " + (i + 1) + ": " + item + "</li>\n");
+  items.forEach(function (item, i) {?> <li><?jhs 
+    echo("elemento " + (i + 1) + ": " + item);
+    ?></li><?jhs 
   });
-?>
+?> 
+</ul>
   <p>Resultado de una expresión: <?= 40 + 2 ?></p>
   <p>Con escape automático: <?= "<b>no en negrita</b>" ?></p>
   <p>Sin escape (contenido de confianza): <?= raw("<b>sí en negrita</b>") ?></p>
