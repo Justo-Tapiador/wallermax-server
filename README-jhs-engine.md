@@ -23,7 +23,7 @@ see the [main README](README.md).
 - [Shared partials: `include()`](#shared-partials-include)
 - [Importing modules: `require()`](#importing-modules-require)
 - [Redirecting from a template: `res.redirect()`](#redirecting-from-a-template-resredirect)
-- [Escaping: `<?= ?>`, `echo()` and `raw()`](#escaping--echo-and-raw)
+- [Escaping: `<?= ?>`, `echo()` and `raw()`](#escaping---echo-and-raw)
 - [Cookbook: markup from loops](#cookbook-markup-from-loops)
 - [The sandbox](#the-sandbox)
 - [Caching and hot reload](#caching-and-hot-reload)
@@ -245,7 +245,7 @@ loop, and how to choose between them.
 ```
 
 (`user` is one of the globals the server injects into every render —
-see [the next section](#template-data-the-user-object).)
+see [the next section](#template-data-the-globals).)
 
 ### Building output programmatically
 
@@ -694,7 +694,7 @@ global variables (via `Object.defineProperty` with
 `CreateDataProperty` semantics — data keys cannot reach `Object.prototype`
 or shadow the sandbox helpers). The HTTP middleware passes the `user`
 object through this seam (see
-[Template data](#template-data-the-user-object)); the mechanism stays
+[Template data](#template-data-the-globals)); the mechanism stays
 generic for future route-to-template data flows.
 
 ## Caching and hot reload
