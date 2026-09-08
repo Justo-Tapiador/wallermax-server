@@ -19,7 +19,10 @@ see the [main README](README.md).
 - [Where template files live](#where-template-files-live)
 - [Configuration](#configuration)
 - [Writing `.jhs` templates](#writing-jhs-templates)
+- [Template data: the globals](#template-data-the-globals)
 - [Shared partials: `include()`](#shared-partials-include)
+- [Importing modules: `require()`](#importing-modules-require)
+- [Redirecting from a template: `res.redirect()`](#redirecting-from-a-template-resredirect)
 - [Escaping: `<?= ?>`, `echo()` and `raw()`](#escaping--echo-and-raw)
 - [The sandbox](#the-sandbox)
 - [Caching and hot reload](#caching-and-hot-reload)
@@ -45,10 +48,15 @@ markup with two kinds of interpolations:
 The engine compiles the template into a single JavaScript program,
 executes it, and returns the produced HTML. In this port the JavaScript
 runs inside [boa_engine](https://github.com/boa-dev/boa) — a JavaScript
-engine written entirely in Rust — wrapped in a strict sandbox: no
-`require`, no `Buffer`, no file system, no network, no
-process access. Templates can compute, format and loop; they cannot
-touch the host.
+engine written entirely in Rust — wrapped in a strict sandbox. Since
+v0.9.0 the original engine's `require()` is back, rebuilt as a **native
+bridge**: a configurable module **banner** (`forbidden_modules` — the
+hardened descendant of node-jhs2's `banned_require`), the `crypto`
+polyfill implemented in Rust, and CommonJS loading of pure-JS modules
+from the `modules/` directory. There is still no Node.js behind the
+sandbox: no `Buffer`, no `process`, no native addons, and the file
+system is only reachable for modules under `modules/`. Templates can
+compute, format, loop, import and redirect; they cannot touch the host.
 
 The feature is split into two layers:
 
@@ -160,6 +168,13 @@ cache = true
 auto_escape = true
 expose_user = true
 loop_iteration_limit = 10000000
+require_enabled = true
+modules_dir = "modules"
+forbidden_modules = [
+  "child_process", "cluster", "dgram", "dns", "fs", "http", "https",
+  "inspector", "jhs", "mv", "net", "os", "process", "repl", "tls",
+  "tty", "v8", "vm", "worker_threads",
+]
 ```
 
 | Key | Default | Meaning |
@@ -170,6 +185,9 @@ loop_iteration_limit = 10000000
 | `auto_escape` | `true` | HTML-escape all dynamic output (`<?= ?>` and `echo()`). `raw()` always bypasses it. |
 | `expose_user` | `true` | Inject the authenticated identity as the `user` template global (`null` when anonymous or unverifiable). |
 | `loop_iteration_limit` | `10000000` | Upper bound on loop iterations per render; exceeding it throws. Must be > 0. |
+| `require_enabled` | `true` | Installs the `require()` bridge (see [below](#importing-modules-require)). `false` = the v0.8.x sandbox, `require` undefined. |
+| `modules_dir` | `"modules"` | Root local JS modules resolve under. May be absent at startup (requiring a local module then answers a descriptive miss); `..` segments rejected. |
+| `forbidden_modules` | the 19 dangerous built-ins + `jhs` + `mv` | The banner: module names `require()` rejects outright. Checked before polyfills and files. |
 
 Like every section it participates in the layered configuration:
 environment overrides use the `WALLERMAX_TEMPLATES__` prefix
@@ -271,8 +289,8 @@ anonymous visitors) — see below.
 
 The original node-jhs2 accepted an extra data object next to the file
 path (`render(templatePath, data)`), whose keys became template
-globals. The HTTP middleware uses that seam; since v0.8.0 every render
-receives **four** globals:
+globals. The HTTP middleware uses that seam; since v0.9.0 every render
+receives **five** globals:
 
 | Global | Value |
 |---|---|
@@ -280,6 +298,7 @@ receives **four** globals:
 | `path` | The request path — the login/register modals post it back as their `redirect` field so users land where they were |
 | `query` | The query parameters as an object of first-value strings (`?login_error=credenciales` → `query.login_error`), how the flash-style error codes reach the templates |
 | `pages` | The published CMS pages (`[{ id, slug, title, updated_at, updated_at_h }]`, newest first, capped at 50) while the CMS is enabled; an empty array otherwise |
+| `req` | An Express-shaped request object: `{ method, url, path, query, headers }`. Only a fixed allowlist of harmless headers is exposed (see the section on [`req`](#redirecting-from-a-template-resredirect)) |
 
 | Request | `user` value |
 |---|---|
@@ -361,6 +380,126 @@ The shipped `views/partials/header.jhs` (site header + login/register
 modals) and `views/partials/footer.jhs` are the reference example, and
 CMS page bodies may embed them too.
 
+## Importing modules: `require()`
+
+Since v0.9.0 templates can import modules exactly like the original
+node-jhs2 did — with the crucial difference that there is **no Node.js
+behind the sandbox** (boa_engine is a pure ECMAScript interpreter), so
+the loader is rebuilt as a native bridge with the original's *banner*
+concept kept and hardened:
+
+```html
+<?jhs
+  const { randomBytes, randomUUID } = require('crypto');
+  const greeting = require('greeting');          // modules/greeting.js
+  const tag = randomBytes(16).toString('hex');   // cache-busting
+?>
+<link rel="stylesheet" href="style.css?v=<?= tag ?>">
+<p><?= greeting.hello('mundo') ?> <?= randomUUID() ?></p>
+```
+
+Three sources feed `require`, checked in this order:
+
+1. **The banner** (`[templates] forbidden_modules`). The administrator's
+   list of module names rejected outright — `fs`, `mv`, `child_process`,
+   … — checked against the *package name* (the first path segment), so
+   `mv`, `mv/sub` and `node:mv` are all covered by the entry `mv`. The
+   banner wins over everything, including polyfills: listing `crypto`
+   there bans the polyfill too.
+2. **Builtins as native polyfills.** `crypto` is implemented in Rust
+   (`randomBytes(size).toString('hex' | 'base64' | 'utf8' |
+   'latin1')` with `length`, and `randomUUID()`), backed by the OS
+   CSPRNG — never `Math.random`. Every other Node builtin (`fs`, `net`,
+   `path`, `events`, …) answers a descriptive error: there is no Node
+   runtime behind the sandbox, so it cannot exist here.
+3. **Local CommonJS modules** under `modules_dir` (default `modules/`):
+   your own files, or npm packages copied in. The loader follows Node's
+   lookup ladder — exact file, `<name>.js`, `<name>/index.js`,
+   `<name>/package.json`'s `main` — evaluates the source with the
+   standard wrapper (`exports`, `require`, `module`, `__filename`,
+   `__dirname`), and caches instances **per render** (the module object
+   is registered before the body runs, so circular requires return
+   partial exports exactly like Node's).
+
+Rules worth internalising:
+
+- **Bare names** (`require('lodash')`) resolve under `modules/`, then
+  under `modules/node_modules/`. **Relative names** (`./x`, `../x`)
+  resolve against the *requiring file's* directory — in template code
+  that is the modules root itself.
+- **Every resolved path must stay inside `modules_dir`** (symlinks
+  resolved): `require('../../etc/passwd')`, absolute paths and any
+  traversal answer a sandbox-escape error, not a file read. The modules
+  directory is the only file system the sandbox can ever see.
+- **A module body is compiled as a `new Function` parameter**, never
+  concatenated into evaluable source — a crafted body cannot break out
+  of its wrapper. This design point is also what keeps exported
+  closures working: a nested `Context::eval` inside the native call
+  reenters boa's run loop and leaves freshly created closures
+  un-callable.
+- **Pure-JS modules only.** A module may use the ECMAScript language
+  and the sandbox globals (`JSON`, `Math`, `Date`, `console`, …). It
+  cannot use `Buffer`, `process`, `fs`, streams or native addons —
+  those do not exist here, and packages that hard-depend on them fail
+  with the descriptive errors above. CommonJS only (`module.exports`);
+  ES module syntax (`import`/`export`) is not compiled.
+- **Guards**: the total module source bytes per render are capped
+  (8 MiB), module nesting is bounded by the runtime recursion limit,
+  and module code shares the render's loop-iteration limit. Editing a
+  module file takes effect on the next request (mtime-based source
+  cache, exactly like templates).
+- **State never leaks between requests**: every render builds a fresh
+  sandbox, so module-level state (`var count = 0` at the top of a
+  module) resets per request. Node caches module instances for the
+  process lifetime — here that would be a cross-request leak.
+- Set `require_enabled = false` to remove `require` entirely and get
+  the v0.8.x sandbox back (with `res.redirect()` still available).
+
+Extending the polyfill registry (`src/template_engine/require_bridge.rs`)
+is deliberately simple: one match arm in `resolve_impl` plus a builder
+function — `crypto` is ~80 lines including its tests.
+
+## Redirecting from a template: `res.redirect()`
+
+The original engine's host app passed the Express `res` object into
+render data, so templates could do `res.redirect('/login')`. That is
+rebuilt as a safe shim: every template (views, `public/*.jhs`, CMS page
+bodies) gets a non-shadowable `res` object with one method —
+
+```html
+<?jhs if (!user) { res.redirect('/login'); return; } ?>
+área privada
+```
+
+- `res.redirect(location)` records a redirect **intent**; when the
+  render finishes, the route layer answers it with the real HTTP
+  redirect (302 by default) instead of the HTML. The pattern above —
+  redirect then a bare top-level `return;` — behaves exactly like the
+  original engine.
+- `res.redirect(location, status)` accepts 301, 302, 303, 307 and 308.
+  The first call wins (the response is committed, like Express).
+- **Local paths only** (`/...`): `http://`, `https://` and
+  protocol-relative `//evil.example` targets throw — the same
+  anti-open-redirect posture as the auth forms. A CMS editor cannot
+  turn your domain into a phishing redirect.
+- `res` and `require` are protected globals: render data can never
+  shadow them.
+
+### The `req` global
+
+The mirror object arrives as render data: `req = { method, url, path,
+query, headers }` — `url` is path + query, `query` the first-value
+object (same shape as the `query` global). **Headers are a fixed
+allowlist** (`accept`, `accept-language`, `content-type`, `host`,
+`referer`, `user-agent`): everything else is simply *absent* —
+`req.headers.cookie` is `undefined` even when the browser sent a
+cookie. The reason is the CMS's multi-editor model: page **editors**
+author template code, so a page echoing the *viewer's* session cookie
+would leak it to the page author. The allowlist keeps `req` useful for
+rendering (language negotiation, UA-based markup) without that class
+of leak. `typeof req.headers.cookie === 'undefined'` — a template
+annot even detect that credentials were sent.
+
 ## Escaping: `<?= ?>`, `echo()` and `raw()`
 
 With `auto_escape = true` (the default):
@@ -385,19 +524,26 @@ Every render builds a **fresh JavaScript context** — no state leaks
 between requests, workers or templates. Inside it:
 
 **Available**: the ECMAScript language core plus `echo`, `raw`,
-`escapeHtml`, `console` and `JSON`. `include("name")` works only as a
-standalone tag — it is resolved at compile time by the host, never
-executed inside the sandbox.
+`escapeHtml`, `console`, `JSON`, `res` (with `redirect`), and — while
+`require_enabled = true` — `require()` backed by the module bridge
+(banner + `crypto` polyfill + CommonJS modules under `modules_dir`; see
+[Importing modules](#importing-modules-require)). `include("name")`
+works only as a standalone tag — it is resolved at compile time by the
+host, never executed inside the sandbox.
 
 **Not available, by construction**:
 
-- `require` / module loading (there is no module system at all)
+- `Buffer`, `process`, timers, `fetch`, any network or native addons
+  (there is no Node.js behind boa_engine, period)
+- `require` of anything outside the three sanctioned sources: the
+  banner rejects listed names, non-polyfilled built-ins throw, and file
+  resolution is jailed to `modules_dir`
 - `include` **at execution time** (the original engine's runtime
   file-embedding helper — see
   [divergences](#deliberate-divergences-from-node-jhs2): here include
   is a compile-time, host-side, path-validated tag)
-- `Buffer`, `process`, timers, `fetch`, any network or file I/O
 - The host: Rust objects, configuration, secrets, request internals
+  (beyond the `req` data global's sanitized allowlist)
 
 **Loop bound**: `loop_iteration_limit` caps total loop iterations per
 render. `<?jhs while (true) { } ?>` throws instead of hanging a worker
@@ -455,22 +601,33 @@ nothing reaches the HTTP response:
 ## Deliberate divergences from node-jhs2
 
 The port is behaviour-faithful (a 20-case fidelity battery asserts
-identical output against the original engine's semantics) with four
+identical output against the original engine's semantics) with
 deliberate exceptions, all in the security direction:
 
-1. **No `require`, no `Buffer`** — the sandbox exposes no host I/O at
-   all, so template code cannot read the file system, spawn processes
-   or load modules. `include()` exists but is resolved **by the host at
-   compile time** against validated views-tree paths — the sandbox
-   itself never reads a file (a misuse stub explains this at
-   execution time).
+1. **`require()` is a native bridge, not Node's.** The original wrapped
+   the real Node `require` with a small `banned_require` blocklist —
+   `fs` and `child_process` were loadable there. This port keeps the
+   banner posture (`[templates] forbidden_modules`, defaulting to the
+   dangerous built-ins) but modules come from a Rust polyfill registry
+   (`crypto`) and from pure-JS CommonJS files under `modules_dir`,
+   jailed to that directory. There is no Node.js behind boa_engine, so
+   native addons and host-touching built-ins cannot exist here.
 2. **Loop iteration limit** replaces the original's ineffective 5-second
-   `vm` timeout: runaway loops throw deterministically.
+   `vm` timeout: runaway loops throw deterministically (and the limit
+   covers module code too).
 3. **mtime cache invalidation** — the original caches compiled templates
-   forever; this engine recompiles when the file (or an embedded
-   partial) changes.
+   and module instances forever; this engine recompiles when a file (or
+   an embedded partial, or a required module) changes, and module
+   instances live per render so state never leaks across requests.
 4. **`console.*` is captured** and routed to `tracing` instead of the
    process stdout.
+5. **`res` and `req` are rebuilt as safe shims.** The original received
+   the host app's Express objects as render data — full headers, open
+   redirects included. Here `res.redirect()` accepts local paths only,
+   and `req` exposes a fixed header allowlist: the CMS's editor role
+   authors template code, and an editor page echoing a viewer's cookie
+   (or redirecting to an attacker's site) must be impossible by
+   construction.
 
 The custom-tag options of the original (`openTag`, `closeTag`,
 `echoTag`) are supported by the engine API (`TagOptions`) with the same
@@ -480,8 +637,8 @@ defaults; the HTTP layer always uses the standard tags.
 
 ```console
 $ cargo test --test template_fidelity   # 20-case battery vs the original engine
-$ cargo test --test templates           # 20 HTTP integration tests (real server)
-$ cargo test                            # full suite: 354 tests
+$ cargo test --test templates           # 37 HTTP integration tests (real server)
+$ cargo test                            # full suite: 396 tests
 ```
 
 The HTTP battery covers the whole contract: on-the-fly rendering under
@@ -490,12 +647,22 @@ directory index, trailing slash, root fallback), static index
 precedence, API precedence, HEAD rendering, non-GET bypass, traversal
 rejection, JSON 404/500 envelopes, mtime reload, coexistence with plain
 static files, security headers on rendered responses and the disabled
-configuration.
+configuration — and, since v0.9.0, `require()` from views (crypto and
+local modules), the configurable banner, `require_enabled = false`,
+`res.redirect()` as a real 302/301, and the `req` global with its
+header allowlist.
 
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
+| `500 ... require('fs') is forbidden` | The banner did its job: `fs` ships in the default `forbidden_modules`. Removing it from the list changes nothing on its own — there is no Node runtime behind the sandbox anyway. |
+| `500 ... Cannot find module 'x': ... looked under the modules directory` | Put the module under `modules/` (`modules/x.js`, `modules/x/index.js`, or `modules/x/package.json` with a `main`), or point `modules_dir` at the right directory. |
+| `500 ... 'net' is a Node.js built-in ... only as native polyfills` | There is no Node.js behind boa_engine — that builtin cannot be required. Use the `crypto` polyfill, a local module, or extend the polyfill registry in Rust. |
+| `500 ... escapes the modules directory` | A module tried to reach outside `modules/` (a `../../` climb, an absolute path, a symlink). Modules must live inside the modules directory. |
+| An npm package fails on `Buffer` / `process` / `fs` | Pure-JS packages only: anything hard-depending on Node APIs cannot run inside the sandbox. |
+| `require is not defined` | `[templates] require_enabled = false`; flip it to `true`. |
+| `res.redirect('https://…')` threw | Local paths only — open-redirect protection. |
 | `500 Template execution error ... ReferenceError: x is not defined` | The variable is not declared in the template — declare it or check the typo. The injected `user` global is always defined (`null` when anonymous); anything else must be declared. |
 | `GET /x` answers JSON 404 but the file exists | Is it `views/x.jhs`? The views tree only serves extensionless paths after a 404; `public/` serves `/x.jhs` directly. |
 | Template changes are not picked up | `cache = true` recompiles on mtime change; ensure the editor really changes the mtime (some tools preserve it). |

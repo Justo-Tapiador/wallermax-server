@@ -37,8 +37,10 @@ impl FixtureDir {
             std::env::temp_dir().join(format!("wallermax-templates-{tag}-{}", std::process::id()));
         let static_root = path.join("static");
         let views = path.join("views");
+        let modules = path.join("modules");
         std::fs::create_dir_all(static_root.join("api")).expect("static dirs create");
         std::fs::create_dir_all(views.join("blog")).expect("blog view dir");
+        std::fs::create_dir_all(modules.join("lib")).expect("modules dir");
 
         if with_index {
             std::fs::write(static_root.join("index.html"), INDEX_HTML).expect("index write");
@@ -46,6 +48,10 @@ impl FixtureDir {
         std::fs::write(static_root.join("hello.jhs"), HELLO_JHS).expect("hello write");
         std::fs::write(static_root.join("raw.jhs"), RAW_JHS).expect("raw write");
         std::fs::write(static_root.join("style.css"), CSS).expect("css write");
+
+        // v0.9.0: local require() modules.
+        std::fs::write(modules.join("greeting.js"), GREETING_MODULE).expect("module write");
+        std::fs::write(modules.join("lib").join("shout.js"), SHOUT_MODULE).expect("module write");
 
         std::fs::write(views.join("index.jhs"), VIEW_INDEX).expect("view index write");
         std::fs::write(views.join("contacto.jhs"), VIEW_CONTACTO).expect("view write");
@@ -55,6 +61,11 @@ impl FixtureDir {
         std::fs::write(views.join("health.jhs"), VIEW_HEALTH).expect("health view write");
         std::fs::write(views.join("profile.jhs"), VIEW_PROFILE).expect("profile view write");
         std::fs::write(views.join("login.jhs"), VIEW_LOGIN).expect("login view write");
+        std::fs::write(views.join("requires.jhs"), VIEW_REQUIRES).expect("requires view write");
+        std::fs::write(views.join("banme.jhs"), VIEW_BANME).expect("ban view write");
+        std::fs::write(views.join("privado.jhs"), VIEW_REDIRECT).expect("redirect view write");
+        std::fs::write(views.join("reqview.jhs"), VIEW_REQ).expect("req view write");
+        std::fs::write(views.join("norequire.jhs"), VIEW_NOREQUIRE).expect("norequire write");
         Self { path }
     }
 
@@ -64,12 +75,18 @@ impl FixtureDir {
         self.config_with(|_| {})
     }
 
+    /// Writes (or overwrites) a view template.
+    fn write_view(&self, name: &str, source: &str) {
+        std::fs::write(self.path.join("views").join(name), source).expect("view write");
+    }
+
     fn config_with(&self, tune: impl FnOnce(&mut AppConfig)) -> AppConfig {
         let mut config = AppConfig::default();
         config.static_files.enabled = true;
         config.static_files.root_dir = self.path.join("static").to_string_lossy().into_owned();
         config.templates.enabled = true;
         config.templates.views_dir = self.path.join("views").to_string_lossy().into_owned();
+        config.templates.modules_dir = self.path.join("modules").to_string_lossy().into_owned();
         config.templates.loop_iteration_limit = 10_000_000;
         tune(&mut config);
         config
@@ -128,6 +145,29 @@ const VIEW_LOGIN: &str = r#"<?jhs if (user) { ?>
 <input type="hidden" name="redirect" value="/profile">
 <button>Entrar</button></form>
 <?jhs } ?>"#;
+
+// v0.9.0: local CommonJS modules the views require().
+const GREETING_MODULE: &str =
+    "module.exports = { hello: function (who) { return 'hola ' + who; } };";
+const SHOUT_MODULE: &str =
+    "var greeting = require('../greeting');\nmodule.exports = function (s) { return greeting.hello(s).toUpperCase(); };";
+
+const VIEW_REQUIRES: &str = "\
+<?jhs \
+const { randomBytes } = require('crypto'); \
+const greeting = require('greeting'); \
+const shout = require('lib/shout'); \
+const tag = randomBytes(16).toString('hex'); \
+?>\
+<?= greeting.hello('jhs') ?> / <?= shout('rust') ?> / <?= tag ?>";
+
+const VIEW_BANME: &str = "<?jhs require('fs'); ?>nunca";
+const VIEW_REDIRECT: &str = "\
+<?jhs if (!user) { res.redirect('/login'); return; } ?>\
+área privada";
+const VIEW_REQ: &str = "\
+<?= req.method ?>|<?= req.path ?>|<?= req.query.code ?>|<?= req.headers['user-agent'] ?>|<?= typeof req.headers.cookie ?>";
+const VIEW_NOREQUIRE: &str = "<?= typeof require ?>";
 
 async fn body_json(response: reqwest::Response) -> Value {
     let bytes = response.bytes().await.expect("body bytes");
@@ -763,4 +803,135 @@ async fn the_full_browser_flow_form_login_then_personalised_page() {
     assert_eq!(response.status(), 200);
     let body = response.text().await.expect("body text");
     assert_eq!(body, "<h1>Bienvenido, administrador root-admin</h1>");
+}
+
+// ─── v0.9.0: require(), res.redirect() and the req global ───────────
+
+#[tokio::test]
+async fn views_can_require_crypto_and_local_modules() {
+    let fixture = FixtureDir::create("require");
+    let server = TestServer::start_with_config(fixture.config()).await;
+    let response = reqwest::get(server.url("/requires"))
+        .await
+        .expect("request ok");
+
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("body text");
+    assert!(body.starts_with("hola jhs / HOLA RUST / "), "body: {body}");
+    // A fresh 32-hex cache-busting tag per request.
+    let tag = body.rsplit('/').next().unwrap_or_default().trim();
+    assert_eq!(tag.len(), 32, "hex tag: {body}");
+    assert!(tag.chars().all(|c| c.is_ascii_hexdigit()), "tag: {body}");
+}
+
+#[tokio::test]
+async fn forbidden_modules_answer_the_error_envelope() {
+    let fixture = FixtureDir::create("ban");
+    let server = TestServer::start_with_config(fixture.config()).await;
+    let response = reqwest::get(server.url("/banme"))
+        .await
+        .expect("request ok");
+
+    assert_eq!(response.status(), 500);
+    let error = body_json(response).await;
+    let message = error["error"]["message"].as_str().expect("message");
+    assert!(message.contains("forbidden"), "message: {message}");
+    assert!(message.contains("forbidden_modules"), "message: {message}");
+}
+
+#[tokio::test]
+async fn the_banner_is_configurable_from_wallermax_toml() {
+    let fixture = FixtureDir::create("ban-custom");
+    let config = fixture.config_with(|config| {
+        config.templates.forbidden_modules = vec![String::from("greeting")];
+    });
+    let server = TestServer::start_with_config(config).await;
+    let response = reqwest::get(server.url("/requires"))
+        .await
+        .expect("request ok");
+
+    // 'greeting' is banned by name even though the file exists.
+    assert_eq!(response.status(), 500);
+    let error = body_json(response).await;
+    let message = error["error"]["message"].as_str().expect("message");
+    assert!(message.contains("'greeting'"), "message: {message}");
+    assert!(message.contains("forbidden"), "message: {message}");
+}
+
+#[tokio::test]
+async fn res_redirect_in_views_answers_a_real_http_redirect() {
+    let fixture = FixtureDir::create("redirect");
+    let server = TestServer::start_with_config(fixture.config()).await;
+
+    let browser = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("client builds");
+    let response = browser
+        .get(server.url("/privado"))
+        .send()
+        .await
+        .expect("request ok");
+
+    // Anonymous visitor: user is null, the template redirects to /login.
+    assert_eq!(response.status(), 302);
+    assert_eq!(response.headers()["location"], "/login");
+    assert_eq!(response.headers()["cache-control"], "no-store");
+}
+
+#[tokio::test]
+async fn res_redirect_honours_custom_statuses() {
+    let fixture = FixtureDir::create("redirect-301");
+    fixture.write_view("moved.jhs", "<?jhs res.redirect('/login', 301); return; ?>");
+    let server = TestServer::start_with_config(fixture.config()).await;
+
+    let browser = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("client builds");
+    let response = browser
+        .get(server.url("/moved"))
+        .send()
+        .await
+        .expect("request ok");
+    assert_eq!(response.status(), 301);
+    assert_eq!(response.headers()["location"], "/login");
+}
+
+#[tokio::test]
+async fn the_req_global_exposes_the_request_shape() {
+    let fixture = FixtureDir::create("req");
+    let server = TestServer::start_with_config(fixture.config()).await;
+
+    let response = reqwest::Client::new()
+        .get(server.url("/reqview?code=42"))
+        .header("User-Agent", "wallermax-test-agent")
+        .header("Cookie", "wallermax_session=stolen-value")
+        .send()
+        .await
+        .expect("request ok");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("body text");
+
+    // Method, path, first query value and the allowlisted user-agent;
+    // the cookie header never reaches the sandbox (editor threat model).
+    assert_eq!(
+        body, "GET|/reqview|42|wallermax-test-agent|undefined",
+        "req global: {body}"
+    );
+}
+
+#[tokio::test]
+async fn require_can_be_disabled_entirely() {
+    let fixture = FixtureDir::create("no-require");
+    let config = fixture.config_with(|config| {
+        config.templates.require_enabled = false;
+    });
+    let server = TestServer::start_with_config(config).await;
+    let response = reqwest::get(server.url("/norequire"))
+        .await
+        .expect("request ok");
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.text().await.expect("body text"), "undefined");
 }

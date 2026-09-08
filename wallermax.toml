@@ -122,13 +122,20 @@ index_file = "index.html"
 [templates]
 # Dynamic .jhs template rendering (PHP-style JavaScript templates,
 # ported faithfully from the node-jhs2 engine and sandboxed with
-# boa_engine: no require, no Buffer, no file system, no network).
-# While enabled: GET /hello.jhs renders public/hello.jhs on the fly
-# (the source is never served raw), otherwise-unmatched paths
-# auto-route to views/ (GET /contacto -> views/contacto.jhs,
+# boa_engine). While enabled: GET /hello.jhs renders public/hello.jhs
+# on the fly (the source is never served raw), otherwise-unmatched
+# paths auto-route to views/ (GET /contacto -> views/contacto.jhs,
 # GET /blog -> views/blog.jhs or views/blog/index.jhs), API routes
 # keep precedence and unresolved paths answer the JSON 404 envelope.
 # Template errors answer the standard JSON error envelope (500).
+#
+# v0.9.0 adds the original engine's require() as a native bridge:
+# require('crypto') returns a Rust polyfill (randomBytes, randomUUID),
+# and any pure-JS CommonJS module under modules/ can be imported
+# (`module.exports`, `exports`, `require`, `__filename`, `__dirname`).
+# There is no Node.js behind the sandbox, so native addons and
+# built-ins without a polyfill fail with descriptive errors — the
+# forbidden_modules banner below decides what is rejected outright.
 enabled = true
 
 # Directory holding the view templates, relative to the working
@@ -157,6 +164,51 @@ expose_user = true
 # workers from runaway template loops (the sandbox throws when a
 # template exceeds it). Must be greater than zero.
 loop_iteration_limit = 10000000
+
+# Master switch for require() (v0.9.0). While false, `require` is
+# undefined and templates behave exactly like the v0.8.x sandbox.
+require_enabled = true
+
+# Directory local JavaScript modules resolve under, relative to the
+# working directory (absolute paths are allowed too). Drop pure-JS
+# CommonJS modules here (yours, or npm packages copied in) and import
+# them from templates: <?jhs const { hello } = require('greeting') ?>.
+# Unlike views_dir it may be absent at startup: requiring a local
+# module then answers a descriptive "Cannot find module" error while
+# the crypto polyfill keeps working. `..` segments are rejected at
+# validation, and every resolved path must stay INSIDE this directory
+# (symlinks included) — require('../../etc/passwd') is a sandbox error.
+modules_dir = "modules"
+
+# The module banner (node-jhs2's banned_require, hardened): module
+# names require() rejects with a descriptive error, checked BEFORE
+# polyfills and files, so an entry can also ban 'crypto' or a local
+# module. Entries are plain names (no path separators); 'node:'
+# prefixes and subpaths are normalised, so 'fs' covers 'node:fs' and
+# 'mv' covers 'mv/sub'. The default ships the dangerous Node built-ins
+# (fs, child_process, net, http, ...) plus vm, jhs and mv; trim or
+# extend it freely — it is your list.
+forbidden_modules = [
+  "child_process",
+  "cluster",
+  "dgram",
+  "dns",
+  "fs",
+  "http",
+  "https",
+  "inspector",
+  "jhs",
+  "mv",
+  "net",
+  "os",
+  "process",
+  "repl",
+  "tls",
+  "tty",
+  "v8",
+  "vm",
+  "worker_threads",
+]
 
 [database]
 # SQLite persistence layer (user storage for authentication).

@@ -240,6 +240,8 @@ fn validate_templates(config: &AppConfig) -> Result<(), String> {
         views_dir = %config.templates.views_dir,
         auto_escape = config.templates.auto_escape,
         cache = config.templates.cache,
+        require = config.templates.require_enabled,
+        modules_dir = %config.templates.modules_dir,
         "dynamic template rendering enabled"
     );
     Ok(())

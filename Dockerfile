@@ -74,6 +74,9 @@ COPY --from=builder /wallermax-server /usr/local/bin/wallermax-server
 COPY wallermax.toml /app/wallermax.toml
 COPY public/ /app/public/
 COPY views/ /app/views/
+# require() modules (v0.9.0): the directory ships as a placeholder in the
+# repo, so the COPY always has a context; mount real modules over it.
+COPY modules/ /app/modules/
 # Container-friendly defaults; each can be overridden with `docker run -e`.
 #   * bind all interfaces so published ports work
 #   * keep the SQLite database on the /data volume

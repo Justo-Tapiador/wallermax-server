@@ -41,7 +41,13 @@
 //! Every module is public so that integration tests (and future phases) can
 //! compose the building blocks exactly like the binary does.
 
-#![forbid(unsafe_code)]
+//! The crate stays `unsafe`-free with one deliberate, contained
+//! exception: [`template_engine::require_bridge`] (v0.9.0) uses
+//! boa's `NativeFunction::from_closure`, whose contract is argued in
+//! `SAFETY` comments next to each call. The exception is scoped to
+//! that module through `deny` + a module-local allow; everywhere else
+//! `unsafe` remains a hard error.
+#![deny(unsafe_code)]
 
 pub mod auth;
 pub mod config;

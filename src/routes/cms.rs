@@ -47,7 +47,7 @@
 use std::path::PathBuf;
 
 use axum::extract::{Path, Request, State};
-use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -59,7 +59,7 @@ use crate::db::{NewPage, PageUpdate, RepositoryError, User, UserRole};
 use crate::error::AppError;
 use crate::extractors::AuthUser;
 use crate::middleware::request_id::RequestId;
-use crate::middleware::templates::{base_data, render_response};
+use crate::middleware::templates::{base_data, redirect_response, render_response};
 use crate::state::{AppState, CmsContext};
 use crate::util::{format_timestamp, read_form};
 
@@ -223,6 +223,7 @@ fn escape_html(text: &str) -> String {
 
 /// Request pieces every handler needs for rendering.
 struct PageParts {
+    method: Method,
     headers: HeaderMap,
     uri: Uri,
     request_id: Option<String>,
@@ -231,6 +232,7 @@ struct PageParts {
 impl PageParts {
     fn of(request: &Request) -> Self {
         Self {
+            method: request.method().clone(),
             headers: request.headers().clone(),
             uri: request.uri().clone(),
             request_id: request
@@ -254,7 +256,7 @@ async fn render_view(
         return AppError::internal("templates are not initialized").into_response();
     };
 
-    let mut data = base_data(state, &parts.headers, &parts.uri).await;
+    let mut data = base_data(state, &parts.headers, &parts.uri, &parts.method).await;
     for (key, value) in extra {
         data.insert(key.to_owned(), value);
     }
@@ -320,7 +322,7 @@ async fn public_page(
 
     // Drafts: indistinguishable from missing pages unless the caller
     // may manage content.
-    let identity = base_data(&state, &parts.headers, &parts.uri).await;
+    let identity = base_data(&state, &parts.headers, &parts.uri, &parts.method).await;
     let viewer_is_editor = identity
         .get("user")
         .and_then(|user| user.get("role"))
@@ -342,7 +344,14 @@ async fn public_page(
         };
         let content = page.content.clone();
         match tokio::task::spawn_blocking(move || engine.render_string(&content, &identity)).await {
-            Ok(Ok(output)) => output.html,
+            Ok(Ok(output)) => {
+                // A res.redirect() inside a stored page body redirects the
+                // whole page, exactly like it does inside a view.
+                if let Some(redirect) = &output.redirect {
+                    return redirect_response(redirect, parts.request_id.as_deref());
+                }
+                output.html
+            }
             Ok(Err(error)) => {
                 // Template-author diagnostics, like every other render.
                 return AppError::internal(error.to_string()).into_response();

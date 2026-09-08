@@ -29,7 +29,7 @@ use crate::db::{PageRepository, UserRepository};
 use crate::metrics::Metrics;
 use crate::proxy::{self, Cidr};
 use crate::rate_limit::RateLimiter;
-use crate::template_engine::{JhsEngine, JhsOptions};
+use crate::template_engine::{JhsEngine, JhsOptions, RequireOptions};
 
 /// Authentication services shared by handlers when `[auth]` is enabled.
 ///
@@ -94,6 +94,15 @@ impl TemplateEngine {
             auto_escape: templates.auto_escape,
             tags: Default::default(),
             loop_iteration_limit: templates.loop_iteration_limit,
+            require: RequireOptions {
+                enabled: templates.require_enabled,
+                modules_dir: absolutize(&templates.modules_dir),
+                forbidden: templates
+                    .forbidden_modules
+                    .iter()
+                    .map(|name| name.trim().trim_start_matches("node:").to_owned())
+                    .collect(),
+            },
         };
         Self {
             engine: std::sync::Arc::new(JhsEngine::new(options)),

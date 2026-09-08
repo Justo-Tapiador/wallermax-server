@@ -1,0 +1,32 @@
+
+
+<?jhs 
+const html_title = "CMovies";
+const caption_text = "CMovies";
+const { randomBytes } = require('crypto');
+const n = Math.floor(Math.random() * 4) + 1;
+function UUUID(){return randomBytes(16).toString('hex').match(/.{1,8}/g).join('-');}
+ if (!user) {
+    res.redirect('/hello.jhs');
+    return;
+}
+const fecha = new Date()
+?>
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/svg+xml" href="favicon-alt.svg">
+    <title><? echo(html_title) ?></title>
+    <link rel="stylesheet" href="footer.css?v=<=UUUID()?>" />
+    <link rel="stylesheet" href="style.css?v=<=UUUID()?>" />
+    
+
+</head>
+<body >
+    <h1><?jhs echo(UUUID()) ?></h1>
+ <h2><?= fecha ?></h2>
+
+</body >
+</html>

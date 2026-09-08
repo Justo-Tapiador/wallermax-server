@@ -11,16 +11,19 @@
 
 > A modular, secure and high-performance web server written in Rust.
 
-**Status: v0.8.0 — the four roadmap phases, a dynamic template engine, browser sessions, and a small built-in CMS.** Phase 4 added rotating
+**Status: v0.9.0 — the four roadmap phases, a dynamic template engine with require(), browser sessions, and a small built-in CMS.** Phase 4 added rotating
 refresh tokens with family revocation, a Prometheus `/metrics` endpoint, HTTPS via
 rustls (plus an HTTP-to-HTTPS redirect listener), trusted-proxy `X-Forwarded-For`
 parsing, a multi-stage Docker image with a compose example and a GitHub Actions CI
 pipeline. v0.5.0 added the sandboxed `.jhs` template engine, v0.6.0 injects the
 authenticated identity into every render as the `user` global, v0.7.0 keeps
 browsers logged in with the `wallermax_session` cookie and the no-JavaScript
-`/login` page, and v0.8.0 adds the CMS: database-backed pages at `/p/<slug>`,
-login/registration modals, a JavaScript-free admin panel for content and accounts
-— see
+`/login` page, v0.8.0 adds the CMS: database-backed pages at `/p/<slug>`,
+login/registration modals, a JavaScript-free admin panel for content and accounts,
+and v0.9.0 brings `require()` back to the templates — a native module bridge
+with a configurable forbidden-modules banner, the `crypto` polyfill,
+CommonJS modules under `modules/`, plus `res.redirect()` and the `req`
+global — see
 [README-jhs-engine.md](README-jhs-engine.md) and the [roadmap](#roadmap).
 
 ## Table of contents
@@ -83,9 +86,11 @@ login/registration modals, a JavaScript-free admin panel for content and account
 - **Dynamic `.jhs` templates** — a PHP-style JavaScript template engine
   (a faithful port of [node-jhs2](https://github.com/Justo-Tapiador/node-jhs2))
   running in a [boa_engine](https://github.com/boa-dev/boa) sandbox:
-  no `require`, no file system, no network; escaped output by default,
-  loop-iteration bounds, mtime-based recompilation, view auto-routing
-  and `console.*` routed to the structured logs. See
+  `require()` since v0.9.0 (native bridge: `forbidden_modules` banner,
+  `crypto` polyfill, CommonJS modules jailed to `modules/`), no `Buffer`,
+  no network, escaped output by default, `res.redirect()` and the `req`
+  global, loop-iteration bounds, mtime-based recompilation, view
+  auto-routing and `console.*` routed to the structured logs. See
   [README-jhs-engine.md](README-jhs-engine.md).
 - **Refresh tokens** — long-lived opaque sessions (256-bit, stored only as
   SHA-256 hashes) with rotation on every refresh and automatic family
@@ -426,8 +431,13 @@ including the correlation id:
 While `[templates] enabled = true` the server renders `.jhs` templates
 (PHP-style JavaScript, ported from
 [node-jhs2](https://github.com/Justo-Tapiador/node-jhs2)) inside a
-[boa_engine](https://github.com/boa-dev/boa) sandbox with no host
-access at all: `GET /hello.jhs` renders `public/hello.jhs` on the fly
+[boa_engine](https://github.com/boa-dev/boa) sandbox. Since v0.9.0
+templates can `require()` the `crypto` polyfill and pure-JS CommonJS
+modules under `modules/` (guarded by the `forbidden_modules` banner and
+jailed to that directory), call `res.redirect('/path')` for real HTTP
+redirects, and read the sanitized `req` global — everything else stays
+sandboxed with no host access: `GET /hello.jhs` renders
+`public/hello.jhs` on the fly
 (the template source is never served raw) and otherwise-unmatched
 paths auto-route to the views directory (`GET /contacto` →
 `views/contacto.jhs`, `GET /blog` → `views/blog/index.jhs`). API
@@ -1183,7 +1193,9 @@ fresh temporary asset directory, cleaned up afterwards.
       [node-jhs2](https://github.com/Justo-Tapiador/node-jhs2) to Rust
       on top of [boa_engine](https://github.com/boa-dev/boa) — see
       [README-jhs-engine.md](README-jhs-engine.md).
-- [x] Sandbox hardening: no `require`/fs/network, fresh context per
+- [x] Sandbox hardening: `require()` as a native bridge (banner,
+      polyfills, modules jailed to `modules/`), no
+      `Buffer`/fs-outside-modules/network, fresh context per
       render, loop iteration limits, captured `console.*` → tracing.
 - [x] HTTP integration: on-the-fly rendering under `[static]`, views
       auto-routing with API precedence, JSON error envelopes, mtime

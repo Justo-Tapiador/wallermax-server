@@ -15,15 +15,28 @@
 //!   key named `__proto__` cannot pollute the global object's prototype.
 //!
 //! Data keys colliding with the sandbox helpers (`__escape`,
-//! `escapeHtml`, `raw`, `console`, `JSON`) are ignored, mirroring the
-//! original engine where the helpers are assigned **after** the data
-//! spread and therefore always win.
+//! `escapeHtml`, `raw`, `console`, `JSON`, `require`, `res`, …) are
+//! ignored, mirroring the original engine where the helpers are
+//! assigned **after** the data spread and therefore always win.
 //!
-//! Nothing else is exposed: no `require`, no `Buffer`, no `include`, no
-//! file system, no timers, no network. A loop iteration limit (boa's
-//! runtime limits) bounds runaway loops — the original Node engine
-//! hangs forever on `<?jhs while(true){} ?>` because its `vm` timeout
-//! cannot interrupt a tight loop.
+//! Since v0.9.0 the sandbox additionally exposes the original engine's
+//! `require()` — rebuilt as a native bridge (see [`require_bridge`]):
+//! a configurable module **banner** (`[templates]
+//! forbidden_modules`, the hardened descendant of node-jhs2's
+//! `banned_require`), the `crypto` polyfill implemented in Rust, and
+//! CommonJS loading of pure-JS modules from the modules directory.
+//! There is still no Node.js behind the sandbox: no `Buffer`, no
+//! `process`, no native addons, no file system outside the modules
+//! directory. A loop iteration limit (boa's runtime limits) bounds
+//! runaway loops — the original Node engine hangs forever on
+//! `<?jhs while(true){} ?>` because its `vm` timeout cannot interrupt a
+//! tight loop — and the same limit covers module code.
+//!
+//! Templates also get an Express-shaped `res` shim: `res.redirect()`
+//! records a redirect intent (local paths only) that the route layer
+//! turns into the actual HTTP redirect, and the middleware injects a
+//! `req` global (`method`, `url`, `path`, `query`, sanitized
+//! `headers`) as render data.
 //!
 //! The cache keeps compiled programs keyed by path and invalidated by
 //! mtime, so editing a template takes effect on the next request
@@ -31,13 +44,14 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use boa_engine::{Context, JsValue, Source};
 use serde_json::{Map, Value};
 
 use super::parser::{self, TagOptions};
+use super::require_bridge::{self, ModuleSource, RequireOptions};
 
 /// Maximum nesting depth of the compile-time `include()` resolution
 /// (a partial including a partial including ...).
@@ -67,6 +81,9 @@ pub struct JhsOptions {
     ///
     /// Zero is rejected by the configuration validation.
     pub loop_iteration_limit: u64,
+    /// The `require()` bridge: module banner, modules directory and
+    /// the switch that installs `require` in the sandbox (v0.9.0).
+    pub require: RequireOptions,
 }
 
 impl Default for JhsOptions {
@@ -77,12 +94,13 @@ impl Default for JhsOptions {
             auto_escape: true,
             tags: TagOptions::default(),
             loop_iteration_limit: 10_000_000,
+            require: RequireOptions::default(),
         }
     }
 }
 
 /// Data keys that may not shadow the sandbox helpers.
-const PROTECTED_GLOBALS: [&str; 8] = [
+const PROTECTED_GLOBALS: [&str; 13] = [
     "__escape",
     "escapeHtml",
     "raw",
@@ -91,6 +109,11 @@ const PROTECTED_GLOBALS: [&str; 8] = [
     "__jhsConsoleLines",
     "include",
     "__jhsEchoPart",
+    "require",
+    "res",
+    "__jhsResolve",
+    "__jhsModuleLoad",
+    "__jhsModuleCache",
 ];
 
 /// Error produced while rendering a template.
@@ -141,13 +164,39 @@ pub struct ConsoleLine {
 }
 
 /// The result of a render: the HTML plus everything the template wrote
-/// to the (captured) console.
+/// to the (captured) console, plus the redirect a `res.redirect()`
+/// call requested (v0.9.0).
 #[derive(Debug, Clone, Default)]
 pub struct RenderOutput {
     /// Rendered HTML.
     pub html: String,
     /// Console lines captured during execution.
     pub console: Vec<ConsoleLine>,
+    /// The redirect recorded by `res.redirect()`, if any. The route
+    /// layer answers it with an HTTP redirect instead of the HTML.
+    pub redirect: Option<RedirectIntent>,
+}
+
+/// A redirect requested from inside a template through
+/// `res.redirect(location[, status])`.
+///
+/// Locations are validated to be local paths (starting with a single
+/// `/`) at call time — the same anti-open-redirect posture as the
+/// auth forms — so the route layer can hand the value to the
+/// `Location` header as-is.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct RedirectIntent {
+    /// Target path (always local, `/…`).
+    pub location: String,
+    /// HTTP status: 301, 302 (the default), 303, 307 or 308.
+    #[serde(default = "default_redirect_status")]
+    pub status: u16,
+}
+
+/// The default redirect status (`302 Found`, Node's `res.redirect`
+/// default).
+fn default_redirect_status() -> u16 {
+    302
 }
 
 /// The `.jhs` template engine. Cheap to share: rendering takes `&self`,
@@ -157,6 +206,10 @@ pub struct RenderOutput {
 pub struct JhsEngine {
     options: JhsOptions,
     cache: Mutex<HashMap<PathBuf, CachedTemplate>>,
+    /// Module sources for the `require()` bridge, invalidated by mtime
+    /// exactly like the compiled templates. Shared through an `Arc`
+    /// because the native `require` closure cannot borrow the engine.
+    module_sources: Arc<Mutex<HashMap<PathBuf, ModuleSource>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,6 +229,7 @@ impl JhsEngine {
         Self {
             options,
             cache: Mutex::new(HashMap::new()),
+            module_sources: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -232,9 +286,13 @@ impl JhsEngine {
         self.execute(&program, data, "<string>")
     }
 
-    /// Empties the compiled-template cache.
+    /// Empties the compiled-template and module-source caches.
     pub fn clear_cache(&self) {
         self.cache.lock().expect("template cache mutex").clear();
+        self.module_sources
+            .lock()
+            .expect("module source cache mutex")
+            .clear();
     }
 
     /// Loads (and caches) the compiled program for `path`.
@@ -391,16 +449,30 @@ impl JhsEngine {
             .runtime_limits_mut()
             .set_loop_iteration_limit(self.options.loop_iteration_limit);
 
-        eval(&mut context, &prelude(self.options.auto_escape), path)?;
+        if self.options.require.enabled {
+            let source_cache = self.options.cache.then(|| Arc::clone(&self.module_sources));
+            require_bridge::install(&mut context, &self.options.require, source_cache.as_ref());
+        }
+
+        eval(
+            &mut context,
+            &prelude(self.options.auto_escape, self.options.require.enabled),
+            path,
+        )?;
         let injection = data_injection(data);
         if !injection.is_empty() {
             eval(&mut context, &injection, path)?;
         }
         let result = eval(&mut context, program, path)?;
         let console = console_lines(&mut context, path)?;
+        let redirect = redirect_intent(&mut context, path)?;
         let html = result_value(result, &mut context, path)?;
 
-        Ok(RenderOutput { html, console })
+        Ok(RenderOutput {
+            html,
+            console,
+            redirect,
+        })
     }
 }
 
@@ -493,10 +565,12 @@ fn include_mtime(path: &Path) -> Option<SystemTime> {
         .ok()
 }
 
-/// Builds the sandbox prelude: hidden sentinel, escapers, captured console.
-fn prelude(auto_escape: bool) -> String {
+/// Builds the sandbox prelude: hidden sentinel, escapers, captured
+/// console, the `res` shim and — while `require` is enabled — the
+/// public `require` wrapper and the module cache.
+fn prelude(auto_escape: bool, require_enabled: bool) -> String {
     let auto = if auto_escape { "true" } else { "false" };
-    String::from(
+    let mut prelude = String::from(
         "(function(){\n\
          \x20 function RawString(str) { this.value = String(str); }\n\
          \x20 var __lines = [];\n\
@@ -539,7 +613,73 @@ fn prelude(auto_escape: bool) -> String {
      \x20   trace: capture('trace')\n\
      \x20 };\n\
      \x20 globalThis.__jhsConsoleLines = function() { return JSON.stringify(__lines); };\n\
-     })();"
+     \x20 globalThis.__jhsRedirectIntent = null;\n\
+     \x20 Object.defineProperty(globalThis, 'res', {\n\
+     \x20   value: {\n\
+     \x20     redirect: function(location, status) {\n\
+     \x20       if (typeof location !== 'string' || location.length === 0) {\n\
+     \x20         throw new TypeError('res.redirect(location) expects a target path string');\n\
+     \x20       }\n\
+     \x20       if (location.charAt(0) !== '/' || location.indexOf('//') === 0) {\n\
+     \x20         throw new Error(\"res.redirect() only accepts local paths starting with '/' (open-redirect protection)\");\n\
+     \x20       }\n\
+     \x20       var code = status === undefined ? 302 : status;\n\
+     \x20       if ([301, 302, 303, 307, 308].indexOf(code) === -1) {\n\
+     \x20         throw new Error('res.redirect() status must be one of 301, 302, 303, 307 or 308');\n\
+     \x20       }\n\
+     \x20       if (globalThis.__jhsRedirectIntent === null) {\n\
+     \x20         globalThis.__jhsRedirectIntent = { location: location, status: code };\n\
+     \x20       }\n\
+     \x20     }\n\
+     \x20   },\n\
+     \x20   writable: false, configurable: false, enumerable: false\n\
+     \x20 });\n";
+
+    if require_enabled {
+        // The JavaScript half of the require() bridge: the native
+        // `__jhsResolve` (banner, resolution, sandbox checks, source)
+        // hands back a plain descriptor, and this loader owns the
+        // registry and evaluates bodies through `new Function` — the
+        // body is a *parameter*, so a module cannot break out of its
+        // wrapper, and the closure is created on the ordinary compiler
+        // path (a nested `Context::eval` inside the native call leaves
+        // fresh closures un-callable).
+        prelude.push_str(
+            "     \x20 globalThis.__jhsModuleCache = {};\n\
+             \x20 globalThis.__jhsModuleLoad = function (spec, base) {\n\
+             \x20   var descriptor = globalThis.__jhsResolve(spec, base);\n\
+             \x20   if (descriptor.crypto) {\n\
+             \x20     return globalThis.__jhsModuleCache[descriptor.key];\n\
+             \x20   }\n\
+             \x20   var cache = globalThis.__jhsModuleCache;\n\
+             \x20   if (Object.prototype.hasOwnProperty.call(cache, descriptor.key)) {\n\
+             \x20     return cache[descriptor.key].exports;\n\
+             \x20   }\n\
+             \x20   var module = { exports: {} };\n\
+             \x20   cache[descriptor.key] = module;\n\
+             \x20   var Wrapper;\n\
+             \x20   try {\n\
+             \x20     Wrapper = new Function('exports', 'require', 'module', '__filename', '__dirname', descriptor.source);\n\
+             \x20   } catch (err) {\n\
+             \x20     throw new Error(\"module '\" + descriptor.file + \"' failed to load: \" + (err && err.message ? err.message : err));\n\
+             \x20   }\n\
+             \x20   Wrapper(module.exports, function (spec) {\n\
+             \x20     return globalThis.__jhsModuleLoad(spec, descriptor.base);\n\
+             \x20   }, module, descriptor.file, descriptor.dir);\n\
+             \x20   return module.exports;\n\
+             \x20 };\n\
+             \x20 globalThis.require = function (spec) {\n\
+             \x20   if (typeof spec !== 'string') {\n\
+             \x20     throw new TypeError('require() expects a module name string (got ' + typeof spec + ')');\n\
+             \x20   }\n\
+             \x20   return globalThis.__jhsModuleLoad(spec, '');\n\
+             \x20 };\n\
+             ",
+        );
+    }
+
+    prelude.push_str("     })();");
+    prelude
 }
 
 /// Builds the data injection: `JSON.parse` plus `Object.defineProperty`
@@ -579,6 +719,27 @@ fn console_lines(context: &mut Context, path: &str) -> Result<Vec<ConsoleLine>, 
         .unwrap_or_else(|| String::from("[]"));
     serde_json::from_str(&text)
         .map_err(|error| execution_error(path, &format!("console capture failed: {error}")))
+}
+
+/// Reads the redirect recorded by `res.redirect()` back out of the
+/// sandbox, if the template issued one.
+fn redirect_intent(context: &mut Context, path: &str) -> Result<Option<RedirectIntent>, JhsError> {
+    let value = eval(
+        context,
+        "(function(){ var intent = globalThis.__jhsRedirectIntent;\n\
+         \x20 return intent === null ? '' : JSON.stringify(intent); })()",
+        path,
+    )?;
+    let text = value
+        .as_string()
+        .map(|string| string.to_std_string_escaped())
+        .unwrap_or_default();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|error| execution_error(path, &format!("redirect capture failed: {error}")))
 }
 
 /// Converts the program result to the final HTML string.
@@ -898,16 +1059,20 @@ mod tests {
 
     #[test]
     fn blocks_banned_module_vm() {
-        // No `require` exists in the sandbox at all: the call throws, like
-        // the original's banned-module filter.
-        let result = engine().render_string("<?jhs require(\"vm\"); ?>", &Map::new());
-        assert!(result.is_err());
+        // 'vm' ships in the default banner, so the call throws the
+        // forbidden-module error like the original's filter did.
+        let error = engine()
+            .render_string("<?jhs require(\"vm\"); ?>", &Map::new())
+            .expect_err("must fail");
+        assert!(error.to_string().contains("forbidden"), "{error}");
     }
 
     #[test]
     fn blocks_banned_module_jhs() {
-        let result = engine().render_string("<?jhs require(\"jhs\"); ?>", &Map::new());
-        assert!(result.is_err());
+        let error = engine()
+            .render_string("<?jhs require(\"jhs\"); ?>", &Map::new())
+            .expect_err("must fail");
+        assert!(error.to_string().contains("forbidden"), "{error}");
     }
 
     #[test]
@@ -1161,10 +1326,11 @@ mod tests {
 
     #[test]
     fn sandbox_exposes_no_host_apis() {
-        // require/Buffer/include/process/fs/timers must all be undefined.
+        // Buffer/include/process/fs/timers must all stay undefined (the
+        // `require` bridge itself is covered by its own test module).
         let template = "<?jhs \
              var missing = []; \
-             ['require', 'Buffer', 'include', 'process', 'fs', 'setTimeout'].forEach(function(name){ \
+             ['Buffer', 'include', 'process', 'fs', 'setTimeout'].forEach(function(name){ \
                if (typeof globalThis[name] !== 'undefined') missing.push(name); \
              }); \
              missing.join(',') ?>";
@@ -1172,6 +1338,154 @@ mod tests {
             .render_string(template, &Map::new())
             .expect("renders");
         assert_eq!(out.html, "", "leaked globals: {}", out.html);
+    }
+
+    #[test]
+    fn require_is_installed_but_shadowable_by_neither_data_nor_code() {
+        // With the default options the bridge is present and functional,
+        // and data keys cannot replace it with something else.
+        let out = engine()
+            .render_string(
+                "<?= typeof require ?>",
+                &data(json!({"require": "overwritten"})),
+            )
+            .expect("renders");
+        assert_eq!(out.html, "function");
+    }
+
+    #[test]
+    fn require_disabled_leaves_require_undefined() {
+        let disabled = JhsEngine::new(JhsOptions {
+            cache: false,
+            require: crate::template_engine::RequireOptions {
+                enabled: false,
+                ..crate::template_engine::RequireOptions::default()
+            },
+            ..JhsOptions::default()
+        });
+        let out = disabled
+            .render_string("<?= typeof require ?>", &Map::new())
+            .expect("renders");
+        assert_eq!(out.html, "undefined");
+    }
+
+    // ── res.redirect() (v0.9.0) ─────────────────────────────────────
+
+    #[test]
+    fn res_redirect_records_a_default_302_intent() {
+        let output = engine()
+            .render_string(
+                "<?jhs res.redirect('/login'); return; ?>secreto",
+                &Map::new(),
+            )
+            .expect("renders");
+        assert_eq!(
+            output.redirect,
+            Some(RedirectIntent {
+                location: String::from("/login"),
+                status: 302,
+            })
+        );
+        // A bare top-level `return;` hijacks the output (the preserved
+        // quirk), so the HTML is empty; the route layer answers the
+        // redirect intent instead.
+        assert_eq!(output.html, "");
+    }
+
+    #[test]
+    fn res_redirect_accepts_explicit_statuses() {
+        for (code, expected) in [(301, 301u16), (303, 303), (307, 307), (308, 308)] {
+            let output = engine()
+                .render_string(
+                    &format!("<?jhs res.redirect('/x', {code}); ?>"),
+                    &Map::new(),
+                )
+                .expect("renders");
+            assert_eq!(output.redirect.map(|intent| intent.status), Some(expected));
+        }
+    }
+
+    #[test]
+    fn res_redirect_rejects_open_redirect_targets() {
+        for target in [
+            "https://evil.example",
+            "http://evil.example",
+            "//evil.example",
+            "relative/path",
+            "",
+        ] {
+            let error = engine()
+                .render_string(&format!("<?jhs res.redirect('{target}'); ?>"), &Map::new())
+                .expect_err("must fail");
+            assert!(
+                error.to_string().contains("local paths")
+                    || error.to_string().contains("target path"),
+                "{target}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn res_redirect_rejects_unknown_statuses() {
+        let error = engine()
+            .render_string("<?jhs res.redirect('/x', 200); ?>", &Map::new())
+            .expect_err("must fail");
+        assert!(error.to_string().contains("status"), "{error}");
+
+        let error = engine()
+            .render_string("<?jhs res.redirect('/x', 999); ?>", &Map::new())
+            .expect_err("must fail");
+        assert!(error.to_string().contains("status"), "{error}");
+    }
+
+    #[test]
+    fn res_redirect_first_call_wins() {
+        let output = engine()
+            .render_string(
+                "<?jhs res.redirect('/first'); res.redirect('/second', 301); ?>",
+                &Map::new(),
+            )
+            .expect("renders");
+        assert_eq!(
+            output.redirect,
+            Some(RedirectIntent {
+                location: String::from("/first"),
+                status: 302,
+            })
+        );
+    }
+
+    #[test]
+    fn res_cannot_be_shadowed_by_data() {
+        let out = engine()
+            .render_string(
+                "<?= typeof res.redirect ?>",
+                &data(json!({"res": {"redirect": "fake"}})),
+            )
+            .expect("renders");
+        assert_eq!(out.html, "function");
+    }
+
+    #[test]
+    fn res_is_present_even_with_require_disabled() {
+        let disabled = JhsEngine::new(JhsOptions {
+            cache: false,
+            require: crate::template_engine::RequireOptions {
+                enabled: false,
+                ..crate::template_engine::RequireOptions::default()
+            },
+            ..JhsOptions::default()
+        });
+        let output = disabled
+            .render_string("<?jhs res.redirect('/login'); ?>", &Map::new())
+            .expect("renders");
+        assert_eq!(
+            output.redirect,
+            Some(RedirectIntent {
+                location: String::from("/login"),
+                status: 302,
+            })
+        );
     }
 
     #[test]

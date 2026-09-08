@@ -29,7 +29,8 @@
 //! which is template-author-facing diagnostics rather than a leak:
 //! template code never sees server internals.
 //!
-//! ## Template data: the `user`, `path`, `query` and `pages` globals
+//! ## Template data: the `user`, `path`, `query`, `pages` and `req`
+//! globals
 //!
 //! Every render receives a small set of globals (see [`base_data`]):
 //!
@@ -42,7 +43,20 @@
 //!   (`?login_error=…`) reach the templates;
 //! - `pages` — the published CMS pages (`[{ id, slug, title,
 //!   updated_at }]`, newest first, capped) while the CMS is enabled:
-//!   navigation menus and the home listing render from it.
+//!   navigation menus and the home listing render from it;
+//! - `req` — an Express-shaped request object (v0.9.0):
+//!   `{ method, url, path, query, headers }`. Only a fixed allowlist
+//!   of harmless headers (`accept`, `accept-language`, `content-type`,
+//!   `host`, `referer`, `user-agent`) is exposed — CMS **editors**
+//!   author page bodies, so `cookie`/`authorization` values must never
+//!   reach template code (an editor page echoing the viewer's session
+//!   cookie would leak it to the page author).
+//!
+//! Templates can also call `res.redirect('/path')` (the Express-shaped
+//! `res` shim, v0.9.0): the render records a **local-path-only**
+//! redirect intent — same anti-open-redirect posture as the auth
+//! forms — and [`render_response`] answers it with the corresponding
+//! HTTP redirect instead of the HTML.
 //!
 //! `console.*` output inside templates is routed to `tracing` at the
 //! matching level instead of the process stdout.
@@ -62,10 +76,23 @@ use crate::extractors::{bearer_token, AuthUser};
 use crate::middleware::request_id::RequestId;
 use crate::session;
 use crate::state::AppState;
-use crate::template_engine::{JhsEngine, RenderOutput};
+use crate::template_engine::{JhsEngine, RedirectIntent, RenderOutput};
 
 /// How many published CMS pages the `pages` global carries.
 const PAGES_GLOBAL_LIMIT: i64 = 50;
+
+/// Headers the `req` global may expose to templates. The allowlist is
+/// fixed: CMS editors author template code, so anything carrying
+/// credentials (`cookie`, `authorization`) or proxy secrets (`x-*`,
+/// forwarding headers) stays out of the sandbox by construction.
+const SAFE_REQ_HEADERS: [&str; 6] = [
+    "accept",
+    "accept-language",
+    "content-type",
+    "host",
+    "referer",
+    "user-agent",
+];
 
 /// Template middleware entry point; see the module docs for the
 /// behaviour contract.
@@ -91,7 +118,7 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
         .get::<RequestId>()
         .map(|id| id.0.clone());
 
-    let data = base_data(&state, request.headers(), request.uri()).await;
+    let data = base_data(&state, request.headers(), request.uri(), &method).await;
 
     // On-the-fly rendering of `.jhs` files under the static root.
     if let Some(static_root) = templates.static_root() {
@@ -132,8 +159,8 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
     response
 }
 
-/// Builds the per-request template data: the `user`, `path`, `query`
-/// and `pages` globals.
+/// Builds the per-request template data: the `user`, `path`, `query`,
+/// `pages` and `req` globals.
 ///
 /// The identity comes from the **verified** Bearer header or session
 /// cookie (the same `JwtService::verify_token` path the API extractors
@@ -148,6 +175,7 @@ pub(crate) async fn base_data(
     state: &AppState,
     headers: &HeaderMap,
     uri: &Uri,
+    method: &Method,
 ) -> Map<String, Value> {
     let user = state
         .auth_context()
@@ -172,7 +200,41 @@ pub(crate) async fn base_data(
     data.insert(String::from("path"), Value::String(uri.path().to_owned()));
     data.insert(String::from("query"), query_global(uri));
     data.insert(String::from("pages"), pages_global(state).await);
+    data.insert(String::from("req"), req_global(headers, uri, method));
     data
+}
+
+/// The `req` global (v0.9.0): an Express-shaped request object with a
+/// sanitized header allowlist — see [`SAFE_REQ_HEADERS`].
+fn req_global(headers: &HeaderMap, uri: &Uri, method: &Method) -> Value {
+    let url = uri
+        .path_and_query()
+        .map(|path_and_query| path_and_query.as_str())
+        .unwrap_or_else(|| uri.path());
+
+    json!({
+        "method": method.as_str(),
+        "url": url,
+        "path": uri.path(),
+        "query": query_global(uri),
+        "headers": safe_req_headers(headers),
+    })
+}
+
+/// The allowlisted headers actually present on the request, as plain
+/// strings. Anything not in [`SAFE_REQ_HEADERS`] is simply absent —
+/// templates cannot even detect that a `cookie` header existed.
+fn safe_req_headers(headers: &HeaderMap) -> Value {
+    let mut map = Map::new();
+    for name in SAFE_REQ_HEADERS {
+        if let Some(value) = headers.get(name) {
+            map.insert(
+                name.to_owned(),
+                Value::String(value.to_str().unwrap_or_default().to_owned()),
+            );
+        }
+    }
+    Value::Object(map)
 }
 
 /// The `query` global: first-value-wins object of the query string.
@@ -224,7 +286,9 @@ async fn pages_global(state: &AppState) -> Value {
 ///
 /// Crate-visible so the CMS handlers render through the exact same
 /// pipeline (blocking pool, console capture, `no-store`, security
-/// headers) as the auto-routed views.
+/// headers) as the auto-routed views. A `res.redirect()` issued
+/// inside the template wins over the HTML: the response is the
+/// redirect (with the template-chosen status) instead.
 pub(crate) async fn render_response(
     engine: std::sync::Arc<JhsEngine>,
     path: PathBuf,
@@ -251,6 +315,10 @@ pub(crate) async fn render_response(
 
     log_console(&output);
 
+    if let Some(redirect) = &output.redirect {
+        return redirect_response(redirect, request_id.as_deref());
+    }
+
     let body = if *method == Method::HEAD {
         Body::empty()
     } else {
@@ -266,6 +334,23 @@ pub(crate) async fn render_response(
             tracing::error!(%error, "failed to build the template response");
             AppError::internal("failed to build the template response".to_owned())
                 .into_response_with_request_id(request_id.as_deref())
+        })
+}
+
+/// Builds the HTTP response for a [`RedirectIntent`] recorded by
+/// `res.redirect()`. Crate-visible so the CMS page handler can honour
+/// redirects issued from inside stored page bodies.
+pub(crate) fn redirect_response(redirect: &RedirectIntent, request_id: Option<&str>) -> Response {
+    let status = StatusCode::from_u16(redirect.status).unwrap_or(StatusCode::FOUND);
+    Response::builder()
+        .status(status)
+        .header(header::LOCATION, redirect.location.as_str())
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::empty())
+        .unwrap_or_else(|error| {
+            tracing::error!(%error, "failed to build the template redirect response");
+            AppError::internal("failed to build the template redirect response".to_owned())
+                .into_response_with_request_id(request_id)
         })
 }
 

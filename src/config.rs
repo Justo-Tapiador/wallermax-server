@@ -471,9 +471,10 @@ impl Default for StaticConfig {
 ///
 /// Templates are HTML with embedded JavaScript using `<?jhs ... ?>`
 /// code blocks and `<?= ... ?>` output expressions (the `node-jhs2`
-/// syntax), rendered inside a hardened sandbox (no `require`, no
-/// `Buffer`, no file system, no network; runaway loops are bounded by
-/// `loop_iteration_limit`).
+/// syntax), rendered inside a hardened sandbox (a native `require()`
+/// bridge with a configurable module banner since v0.9.0, but no
+/// `Buffer`, no host file system outside the modules directory and no
+/// network; runaway loops are bounded by `loop_iteration_limit`).
 ///
 /// While enabled:
 ///
@@ -515,6 +516,24 @@ pub struct TemplatesConfig {
     /// workers from runaway template loops (the sandbox throws when a
     /// template exceeds it).
     pub loop_iteration_limit: u64,
+    /// Installs `require()` in the template sandbox (v0.9.0): the
+    /// `crypto` polyfill plus CommonJS loading of pure-JS modules from
+    /// `modules_dir`, guarded by `forbidden_modules`. While `false`,
+    /// `require` is undefined and templates behave exactly like the
+    /// v0.8.x sandbox.
+    pub require_enabled: bool,
+    /// Directory local JavaScript modules resolve under, relative to
+    /// the working directory (absolute paths are allowed too).
+    /// Unlike `views_dir` it may be absent at startup — requiring any
+    /// local module then answers a descriptive "Cannot find module"
+    /// error, while the `crypto` polyfill keeps working.
+    pub modules_dir: String,
+    /// The module banner: package names `require()` rejects with a
+    /// descriptive error, checked before polyfills and files (so an
+    /// entry can ban even the `crypto` polyfill or a local module).
+    /// Defaults to the dangerous Node built-ins (`fs`,
+    /// `child_process`, `net`, …) plus `vm`, `jhs` and `mv`.
+    pub forbidden_modules: Vec<String>,
 }
 
 impl Default for TemplatesConfig {
@@ -526,6 +545,12 @@ impl Default for TemplatesConfig {
             auto_escape: true,
             expose_user: true,
             loop_iteration_limit: 10_000_000,
+            require_enabled: true,
+            modules_dir: String::from("modules"),
+            forbidden_modules: crate::template_engine::DEFAULT_FORBIDDEN_MODULES
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
         }
     }
 }
@@ -924,6 +949,28 @@ impl AppConfig {
             return Err(ConfigError::Message(
                 "`templates.loop_iteration_limit` must be greater than zero".to_owned(),
             ));
+        }
+        if templates.require_enabled
+            && (templates.modules_dir.trim().is_empty() || templates.modules_dir.contains('\0'))
+        {
+            return Err(ConfigError::Message(
+                "`templates.modules_dir` must be a non-empty path".to_owned(),
+            ));
+        }
+        if has_parent_segment(&templates.modules_dir) {
+            return Err(ConfigError::Message(format!(
+                "`templates.modules_dir` must not contain `..` path segments: {:?}",
+                templates.modules_dir
+            )));
+        }
+        for name in &templates.forbidden_modules {
+            let name = name.trim();
+            if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains('\0') {
+                return Err(ConfigError::Message(format!(
+                    "`templates.forbidden_modules` entries must be plain module names, not paths \
+                     (got {name:?})"
+                )));
+            }
         }
         Ok(())
     }
