@@ -24,6 +24,7 @@ see the [main README](README.md).
 - [Importing modules: `require()`](#importing-modules-require)
 - [Redirecting from a template: `res.redirect()`](#redirecting-from-a-template-resredirect)
 - [Escaping: `<?= ?>`, `echo()` and `raw()`](#escaping--echo-and-raw)
+- [Cookbook: markup from loops](#cookbook-markup-from-loops)
 - [The sandbox](#the-sandbox)
 - [Caching and hot reload](#caching-and-hot-reload)
 - [Error handling](#error-handling)
@@ -228,6 +229,10 @@ can live *inside* the loop body:
 (This is exactly how `views/contacto.jhs` is written.) The engine
 re-joins the pieces into one program, so braces opened inside a code
 block must close in a later block — classic PHP discipline applies.
+
+The [cookbook](#cookbook-markup-from-loops) develops this into the full
+toolbox: why `echo()` escapes, the three ways to print markup from a
+loop, and how to choose between them.
 
 ### Conditionals
 
@@ -518,6 +523,139 @@ happens at the boundary (output time), the node-jhs2 semantics.
 Use `raw()` only for markup you generated yourself or fully trust;
 never for user-supplied input.
 
+## Cookbook: markup from loops
+
+The one rule that dissolves the first surprise — printing `<li>` from
+a loop and getting `&lt;li&gt;` on the page:
+
+> **Outside the tags** you are writing the template file itself: the
+> literal text between code blocks reaches the response **verbatim**,
+> never escaped. **Through `echo()` or `<?= ?>`** you are printing
+> **data**: it is HTML-escaped on output.
+
+Both engines behave identically here — node-jhs2's `echo()` is
+`args.map(arg => __escape(String(arg)))` with `autoEscape` on by
+default — and the reason is XSS: values a user can influence (a
+username, a movie title, a query parameter) must arrive at the browser
+inert. Escaping is the default; trust is what you declare explicitly.
+Loops are where the two worlds meet, and three patterns cover it all.
+
+### Pattern 1 — interleave the markup (canonical, both engines)
+
+Keep the static tags in the template — between code blocks — and let
+the loop body span several blocks:
+
+```html
+<ul>
+<?jhs
+  var items = ["uno", "dos", "tres"];
+  items.forEach(function (item, i) { ?>
+  <li><?jhs echo("elemento " + (i + 1) + ": " + item); ?></li>
+<?jhs }); ?>
+</ul>
+```
+
+To the compiler, the text between blocks is literal output and block
+bodies are verbatim JavaScript, so the loop above becomes:
+
+```js
+items.forEach(function (item, i) {
+__output += "\n  <li>";                          // your markup, verbatim
+    echo("elemento " + (i + 1) + ": " + item);   // your data, escaped
+__output += "</li>\n";                           // your markup, verbatim
+});
+```
+
+The tags come out as real HTML; the interpolated data is still
+escaped. Braces may open in one block and close in a later one —
+classic PHP discipline — and this is how every view in `views/admin/`
+is written. It is also the safest form, because static and dynamic
+content never travel through the same expression: there is nothing to
+reason about. (The data can cross the boundary through `<?= item ?>`
+instead of `echo()` — the form shown
+[earlier](#loops-interleaved-with-markup); the guarantees are the same.)
+
+### Pattern 2 — build the string, print it with `raw()`
+
+When interleaving is impractical (deeply nested rows, fragments
+assembled in code), build the markup in a variable and mark the
+**finished** string as trusted:
+
+```html
+<?jhs
+  var rows = "";
+  items.forEach(function (item) {
+    rows += "<tr><td>" + escapeHtml(item) + "</td></tr>\n";
+  });
+?>
+<table><?jhs echo(raw(rows)) ?></table>
+```
+
+Two details matter. First, `raw()` must wrap the **whole concatenated
+value**: a `raw()` result is a sentinel object, so `raw(a) + b` does
+not concatenate — it produces `[object Object]b`. Concatenate first,
+wrap last. Second, notice the `escapeHtml(item)` inside the loop:
+`raw()` marks the *markup you wrote* as trusted, not the *data* —
+escape the data yourself on the way in. `escapeHtml` is a sandbox
+global for exactly this.
+
+### Pattern 3 — `echo(raw(...))` inside the loop
+
+The compact one-liner, same rules as pattern 2:
+
+```html
+<?jhs
+  items.forEach(function (item, i) {
+    echo(raw("<li>elemento " + (i + 1) + ": " + escapeHtml(item) + "</li>\n"));
+  });
+?>
+```
+
+Patterns 2 and 3 are **port-only**. In node-jhs2, `raw` is an identity
+function that suppresses nothing, so the same template prints escaped
+markup there. This port's `raw()` is a real sentinel — the one place
+where the port is *more* capable than the original (see
+[Deliberate divergences](#deliberate-divergences-from-node-jhs2),
+item 6).
+
+### Choosing
+
+| Situation | Pattern |
+|---|---|
+| Loop with static surrounding markup (lists, tables, cards) | 1 — interleave |
+| Markup assembled in code (rows, fragments, deep nesting) | 2 — build + `raw()` |
+| Compact loop, port-only template | 3 — `echo(raw(...))` |
+| Values a user can influence | any — but they cross the boundary via `<?= ?>` or `escapeHtml()` |
+
+### Why the default is worth it
+
+```html
+<?jhs var bad = "<script>alert(1)</script>"; ?>
+<p><?= bad ?></p>
+```
+
+renders as `<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>` — inert text
+on the page. That is the property the default buys you: a template
+author (or a CMS page editor — the same reasoning as the [`req` header
+allowlist](#redirecting-from-a-template-resredirect)) cannot smuggle
+active markup into a visitor's session by accident. `raw()` is the
+explicit opt-out for markup you control.
+
+### Gotchas
+
+- **A `?>` inside a JavaScript string closes the block early.**
+  `echo("a ?> b")` splits the block at the `?>` — inherited from the
+  original's regex compiler. Keep `?>` out of string literals in code
+  blocks.
+- **The text between tags shapes the output.** Pattern 1's newlines and
+  indentation are literal and end up in the response. Cosmetic — but if
+  each element needs its own line, put the newline in the static text
+  rather than inside the `echo()`.
+- **`<?= echo(x) ?>` prints nothing, in both engines.** It compiles to
+  `__output += __escape(echo(x))`, and the `+=` reads `__output` before
+  `echo()` writes it. Print expressions with `<?= x ?>`, print from
+  code with `<?jhs echo(x); ?>` — never nest one inside the other.
+
 ## The sandbox
 
 Every render builds a **fresh JavaScript context** — no state leaks
@@ -628,6 +766,12 @@ deliberate exceptions, all in the security direction:
    authors template code, and an editor page echoing a viewer's cookie
    (or redirecting to an attacker's site) must be impossible by
    construction.
+6. **`raw()` actually suppresses the escape.** In node-jhs2 `raw` is an
+   identity function that suppresses nothing — `<?= raw("<b>") ?>` and
+   `echo(raw("<b>"))` print `&lt;b&gt;` there. Here `raw()` wraps the
+   value in a hidden sentinel that passes untouched through the
+   escaper (and through `echo()`), so the documented escape hatch is
+   real. The safe default is unchanged; only the opt-out works now.
 
 The custom-tag options of the original (`openTag`, `closeTag`,
 `echoTag`) are supported by the engine API (`TagOptions`) with the same
@@ -666,7 +810,7 @@ header allowlist.
 | `500 Template execution error ... ReferenceError: x is not defined` | The variable is not declared in the template — declare it or check the typo. The injected `user` global is always defined (`null` when anonymous); anything else must be declared. |
 | `GET /x` answers JSON 404 but the file exists | Is it `views/x.jhs`? The views tree only serves extensionless paths after a 404; `public/` serves `/x.jhs` directly. |
 | Template changes are not picked up | `cache = true` recompiles on mtime change; ensure the editor really changes the mtime (some tools preserve it). |
-| Escaped markup shows as text (`&lt;li&gt;`) | Expected with `auto_escape` — print trusted markup with `raw()`. |
+| Escaped markup shows as text (`&lt;li&gt;`) | Expected with `auto_escape` — print trusted markup with `raw()`, or move the tags outside the code blocks ([cookbook](#cookbook-markup-from-loops)). |
 | Raw `.jhs` source is being served | `[templates] enabled = false`; set it to `true`. |
 | `while (true) {}` answered 500 | The loop iteration limit did its job — that is the contract. |
 
