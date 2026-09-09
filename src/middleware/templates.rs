@@ -76,7 +76,7 @@ use crate::extractors::{bearer_token, AuthUser};
 use crate::middleware::request_id::RequestId;
 use crate::session;
 use crate::state::AppState;
-use crate::template_engine::{JhsEngine, RedirectIntent, RenderOutput};
+use crate::template_engine::{RedirectIntent, RenderOutput, TemplateRenderer};
 
 /// How many published CMS pages the `pages` global carries.
 const PAGES_GLOBAL_LIMIT: i64 = 50;
@@ -290,7 +290,7 @@ async fn pages_global(state: &AppState) -> Value {
 /// inside the template wins over the HTML: the response is the
 /// redirect (with the template-chosen status) instead.
 pub(crate) async fn render_response(
-    engine: std::sync::Arc<JhsEngine>,
+    engine: std::sync::Arc<dyn TemplateRenderer>,
     path: PathBuf,
     data: Map<String, Value>,
     request_id: Option<String>,

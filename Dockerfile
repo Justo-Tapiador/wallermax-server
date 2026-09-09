@@ -6,8 +6,9 @@
 #   1. `builder`  — compiles the release binary with cargo; dependencies
 #      are cached in their own layer so source-only changes rebuild fast;
 #   2. `runtime`  — minimal Debian carrying only the binary, the default
-#      configuration and the static assets, running as an unprivileged
-#      user with the SQLite database on a /data volume.
+#      configuration, the static assets and Node.js (the JHS sidecar's
+#      runtime), running as an unprivileged user with the SQLite
+#      database on a /data volume.
 #
 # Build:  docker build -t wallermax-server .
 # Run:    docker run -p 8080:8080 -v wallermax-data:/data wallermax-server
@@ -57,10 +58,13 @@ RUN cargo build --release --locked \
 # ---------------------------------------------------------------------------
 FROM debian:bookworm-slim AS runtime
 
-# ca-certificates keep outbound TLS working; the dedicated user owns the
-# database directory so the server never runs as root.
+# ca-certificates keep outbound TLS working; Node.js runs the JHS
+# sidecar (`[templates] backend = "auto"` by default — without Node the
+# server silently renders on the in-process boa engine instead); the
+# dedicated user owns the database directory so the server never runs
+# as root.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates nodejs \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home-dir /app wallermax \
     && mkdir /data \
@@ -77,6 +81,10 @@ COPY views/ /app/views/
 # require() modules (v0.9.0): the directory ships as a placeholder in the
 # repo, so the COPY always has a context; mount real modules over it.
 COPY modules/ /app/modules/
+# The JHS sidecar (v0.10.0): the Node service the server spawns and
+# supervises when [templates] backend is "sidecar" or "auto". It needs
+# no npm install — the engine is vendored and dependency-free.
+COPY sidecar/ /app/sidecar/
 # Container-friendly defaults; each can be overridden with `docker run -e`.
 #   * bind all interfaces so published ports work
 #   * keep the SQLite database on the /data volume

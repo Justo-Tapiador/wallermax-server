@@ -138,6 +138,23 @@ index_file = "index.html"
 # forbidden_modules banner below decides what is rejected outright.
 enabled = true
 
+# Rendering backend (v0.10.0):
+#   "auto"    — (default) render on the Node sidecar when Node.js is
+#                available (the ORIGINAL node-jhs2 engine: real
+#                require() behind the banner, worker hard-kill), with a
+#                transparent fallback to the in-process sandbox the
+#                moment the sidecar is unavailable (and automatic
+#                recovery via health probes).
+#   "boa"     — always the in-process sandboxed engine. No Node.js
+#                needed anywhere; the hardened v0.5-v0.9 behaviour.
+#   "sidecar" — strict: the server refuses to start unless the Node
+#                sidecar launches and passes its 13-check selftest
+#                (escaping, raw(), console capture, res.redirect,
+#                require() banner, hard-kill, hot reload...).
+# The backend covers EVERY template render in the process — .jhs files
+# under public/, auto-routed views/ pages and CMS page bodies alike.
+backend = "auto"
+
 # Directory holding the view templates, relative to the working
 # directory (absolute paths are allowed too). It must exist at startup
 # while rendering is enabled. `..` segments are rejected at validation.
@@ -209,6 +226,39 @@ forbidden_modules = [
   "vm",
   "worker_threads",
 ]
+
+[templates.sidecar]
+# Node sidecar tuning, used while backend is "sidecar" or "auto"
+# (ignored by "boa"). Every value below is the default — an empty
+# [templates.sidecar] table is a valid configuration.
+
+# Node.js binary used to launch the sidecar service (resolved through
+# PATH; override for a specific runtime, e.g. "/usr/bin/node").
+node_command = "node"
+
+# The sidecar service script, relative to the working directory
+# (absolute paths are allowed too). The shipped sidecar/ directory
+# vendors the node-jhs2 2.1.0 engine and needs no npm install.
+script = "sidecar/jhs-sidecar.mjs"
+
+# Render worker threads inside the sidecar. Each worker renders one
+# template at a time; when a render exceeds render_budget_ms its whole
+# worker is terminated (the hard-kill the original engine's vm timeout
+# never managed) and a fresh one takes its place.
+workers = 2
+
+# Budget for the sidecar launch: process spawn, the READY handshake
+# and the 13-check startup selftest.
+startup_timeout_ms = 8000
+
+# Client-side timeout for one render request, queue wait included.
+# Must exceed render_budget_ms so the hard-kill (not the client) wins
+# on runaway renders. Validated at startup.
+request_timeout_ms = 10000
+
+# Wall-clock hard-kill budget per render inside the sidecar — the
+# bound <?jhs while(true){} ?> templates cannot escape.
+render_budget_ms = 5000
 
 [database]
 # SQLite persistence layer (user storage for authentication).

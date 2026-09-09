@@ -1,0 +1,11 @@
+<?jhs
+  // Sidecar liveness probe (v0.10.0).
+  //
+  // The boa sandbox has no Node.js behind require() — it answers the
+  // module banner as a 500 — so this page only renders green through
+  // the NODE SIDECAR backend ([templates] backend = "sidecar" | "auto"
+  // with Node available). Docker and CI smoke tests request:
+  //
+  //   GET /sidecar-check.jhs?probe=7   →   sidecar-ok:7
+  require('url');
+?>sidecar-ok:<?= query.probe || 'none' ?>

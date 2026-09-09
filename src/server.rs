@@ -190,6 +190,15 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
         (None, _) => AppState::new(config.clone()),
     };
 
+    // The strict sidecar backend fails fast: a server configured for
+    // Node-side rendering must not start without the sidecar (the
+    // `auto` backend has already fallen back to boa with a warning).
+    if let Some(templates) = state.templates() {
+        if let Err(error) = templates.ensure_ready() {
+            return Err(error.into());
+        }
+    }
+
     Ok(state)
 }
 
@@ -238,6 +247,7 @@ fn validate_templates(config: &AppConfig) -> Result<(), String> {
     }
     tracing::info!(
         views_dir = %config.templates.views_dir,
+        backend = %config.templates.backend,
         auto_escape = config.templates.auto_escape,
         cache = config.templates.cache,
         require = config.templates.require_enabled,

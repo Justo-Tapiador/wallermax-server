@@ -133,6 +133,11 @@ pub enum JhsError {
         /// The wrapped engine message.
         message: String,
     },
+    /// The Node sidecar backend (`[templates] backend = "sidecar" | "auto"`)
+    /// could not render: its process failed to start, cannot be
+    /// reached, or answered a malformed envelope. Transport-class —
+    /// the `auto` backend treats this as the fallback signal to boa.
+    Sidecar(String),
 }
 
 impl std::fmt::Display for JhsError {
@@ -141,6 +146,7 @@ impl std::fmt::Display for JhsError {
             JhsError::Io(error) => write!(formatter, "template file error: {error}"),
             JhsError::Include(message) => write!(formatter, "template include error: {message}"),
             JhsError::Execution { message, .. } => write!(formatter, "{message}"),
+            JhsError::Sidecar(message) => write!(formatter, "template sidecar error: {message}"),
         }
     }
 }
@@ -149,7 +155,7 @@ impl std::error::Error for JhsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             JhsError::Io(error) => Some(error),
-            JhsError::Include(_) | JhsError::Execution { .. } => None,
+            JhsError::Include(_) | JhsError::Execution { .. } | JhsError::Sidecar(_) => None,
         }
     }
 }

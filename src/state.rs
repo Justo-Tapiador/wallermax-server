@@ -29,7 +29,11 @@ use crate::db::{PageRepository, UserRepository};
 use crate::metrics::Metrics;
 use crate::proxy::{self, Cidr};
 use crate::rate_limit::RateLimiter;
-use crate::template_engine::{JhsEngine, JhsOptions, RequireOptions};
+use crate::template_engine::renderer::BrokenRenderer;
+use crate::template_engine::{
+    AutoRenderer, JhsEngine, JhsOptions, RequireOptions, SidecarOptions, SidecarRenderer,
+    TemplateRenderer,
+};
 
 /// Authentication services shared by handlers when `[auth]` is enabled.
 ///
@@ -66,11 +70,22 @@ pub struct CmsContext {
 /// middleware when `[templates]` is enabled.
 ///
 /// Built once at startup from the configuration and immutable
-/// afterwards; every render runs in a fresh sandbox, so sharing the
-/// engine across workers is safe by construction.
+/// afterwards. The active [`TemplateRenderer`] backend is chosen by
+/// `[templates] backend`: the in-process sandboxed boa engine
+/// (`"boa"`), the Node sidecar running the original node-jhs2 engine
+/// (`"sidecar"`, strict), or the sidecar with transparent boa fallback
+/// (`"auto"`, the default). Every render in the process — public
+/// `.jhs` files, auto-routed views and CMS page bodies — flows through
+/// the same handle.
 pub struct TemplateEngine {
-    /// The sandboxed `.jhs` engine.
-    engine: std::sync::Arc<JhsEngine>,
+    /// The active rendering backend.
+    renderer: std::sync::Arc<dyn TemplateRenderer>,
+    /// The configured backend name (diagnostics for [`Self::ensure_ready`]).
+    backend: String,
+    /// Set when `backend = "sidecar"` and the sidecar failed to start;
+    /// the renderer is then a [`BrokenRenderer`] that answers this
+    /// error on every render.
+    sidecar_spawn_error: Option<String>,
     /// Directory view templates are auto-routed from, resolved to an
     /// absolute path at construction (relative paths resolve against
     /// the working directory, exactly like `[static] root_dir`, and the
@@ -84,11 +99,26 @@ pub struct TemplateEngine {
 }
 
 impl TemplateEngine {
-    /// Builds the engine from the `[templates]` and `[static]`
-    /// configuration.
+    /// Builds the rendering backend from the `[templates]` and
+    /// `[static]` configuration.
+    ///
+    /// While the sidecar backend is selected, this spawns the Node
+    /// child process, performs the READY handshake and requires the
+    /// startup selftest to pass — a synchronous, startup-only wait
+    /// (bounded by `[templates.sidecar] startup_timeout_ms`).
     fn new(templates: &crate::config::TemplatesConfig, static_root: Option<&str>) -> Self {
         let views_dir = absolutize(&templates.views_dir);
-        let options = JhsOptions {
+        let modules_dir = absolutize(&templates.modules_dir);
+        let forbidden: Vec<String> = templates
+            .forbidden_modules
+            .iter()
+            .map(|name| name.trim().trim_start_matches("node:").to_owned())
+            .collect();
+
+        // The hardened in-process backend — always constructed: it is
+        // the "boa" choice, the "auto" fallback and the strict-mode
+        // companion that never goes to waste.
+        let boa = std::sync::Arc::new(JhsEngine::new(JhsOptions {
             views_path: views_dir.clone(),
             cache: templates.cache,
             auto_escape: templates.auto_escape,
@@ -96,25 +126,88 @@ impl TemplateEngine {
             loop_iteration_limit: templates.loop_iteration_limit,
             require: RequireOptions {
                 enabled: templates.require_enabled,
-                modules_dir: absolutize(&templates.modules_dir),
-                forbidden: templates
-                    .forbidden_modules
-                    .iter()
-                    .map(|name| name.trim().trim_start_matches("node:").to_owned())
-                    .collect(),
+                modules_dir: modules_dir.clone(),
+                forbidden: forbidden.clone(),
+            },
+        }));
+
+        let backend = templates.backend.trim().to_owned();
+        let sidecar_options = SidecarOptions {
+            node_command: templates.sidecar.node_command.clone(),
+            script: absolutize(&templates.sidecar.script),
+            views_dir: views_dir.clone(),
+            modules_dir,
+            forbidden,
+            auto_escape: templates.auto_escape,
+            require_enabled: templates.require_enabled,
+            workers: templates.sidecar.workers,
+            startup_timeout: Duration::from_millis(templates.sidecar.startup_timeout_ms),
+            request_timeout: Duration::from_millis(templates.sidecar.request_timeout_ms),
+            render_budget: Duration::from_millis(templates.sidecar.render_budget_ms),
+        };
+
+        let renderer: std::sync::Arc<dyn TemplateRenderer>;
+        let mut sidecar_spawn_error = None;
+        match backend.as_str() {
+            "boa" => {
+                tracing::info!("template backend: boa (the in-process sandboxed engine)");
+                renderer = boa;
+            }
+            "sidecar" => match SidecarRenderer::spawn(&sidecar_options) {
+                Ok(sidecar) => renderer = sidecar,
+                Err(error) => {
+                    sidecar_spawn_error = Some(error.clone());
+                    renderer = std::sync::Arc::new(BrokenRenderer::new(error));
+                }
+            },
+            _ => match SidecarRenderer::spawn(&sidecar_options) {
+                Ok(sidecar) => {
+                    tracing::info!("template backend: auto (Node sidecar, boa fallback)");
+                    renderer = std::sync::Arc::new(AutoRenderer::new(sidecar, boa));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "the JHS sidecar is unavailable; rendering falls back to the \
+                         boa backend ([templates] backend = \"auto\")"
+                    );
+                    renderer = boa;
+                }
             },
         };
+
         Self {
-            engine: std::sync::Arc::new(JhsEngine::new(options)),
+            renderer,
+            backend,
+            sidecar_spawn_error,
             views_dir,
             static_root: static_root.map(absolutize),
         }
     }
 
-    /// A cloneable handle to the sandboxed engine (for
+    /// A cloneable handle to the active rendering backend (for
     /// `spawn_blocking` renders).
-    pub fn engine(&self) -> std::sync::Arc<JhsEngine> {
-        std::sync::Arc::clone(&self.engine)
+    pub fn engine(&self) -> std::sync::Arc<dyn TemplateRenderer> {
+        std::sync::Arc::clone(&self.renderer)
+    }
+
+    /// Startup gate for the strict sidecar backend: fails when the
+    /// sidecar could not be launched or pass its selftest, so the
+    /// server refuses to start instead of serving 500s. The `auto`
+    /// backend has already fallen back (warned above) and `boa` is
+    /// always ready.
+    ///
+    /// Public so embedders and integration tests can gate their own
+    /// startup on the backend being live.
+    pub fn ensure_ready(&self) -> Result<(), String> {
+        if let Some(error) = &self.sidecar_spawn_error {
+            return Err(format!(
+                "templates.backend = \"sidecar\" ({}) but the Node sidecar could not \
+                 start: {error}",
+                self.backend
+            ));
+        }
+        Ok(())
     }
 
     /// The configured views directory.

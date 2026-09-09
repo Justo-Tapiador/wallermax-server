@@ -91,11 +91,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke test (/health, /metrics, static index)
+      - name: Smoke test (/health, /metrics, static index, JHS sidecar)
         run: |
           docker run -d --name wallermax-ci -p 8080:8080 wallermax-server:ci
 
-          # Wait for startup (migrations + listener) with a timeout.
+          # Wait for startup (migrations + sidecar + listener) with a timeout.
           for _ in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8080/health > /dev/null 2>&1; then
               break
@@ -107,5 +107,11 @@ jobs:
           echo
           curl -fsS http://127.0.0.1:8080/metrics | grep -F 'wallermax_uptime_seconds'
           curl -fsS -o /dev/null -w 'static index: %{http_code}\n' http://127.0.0.1:8080/
+
+          # v0.10.0: the template backend must be the Node sidecar inside
+          # the image — sidecar-check.jhs calls require('url'), which the
+          # in-process boa sandbox cannot resolve (it would answer the
+          # module banner as a 500 and fail this curl -f).
+          curl -fsS 'http://127.0.0.1:8080/sidecar-check.jhs?probe=7' | grep -F 'sidecar-ok:7'
 
           docker rm -f wallermax-ci

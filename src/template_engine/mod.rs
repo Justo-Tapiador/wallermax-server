@@ -10,14 +10,17 @@
 //! - `<?jhs ... ?>` — a JavaScript code block;
 //! - `<?= expr ?>`  — an output expression (HTML-escaped by default).
 //!
-//! The engine is split in three modules:
+//! The engine is split in five modules:
 //!
 //! | Module             | Responsibility                                             |
-//! |--------------------|------------------------------------------------------------|
+//!|--------------------|------------------------------------------------------------|
 //! | [`parser`]         | Compiles `.jhs` source into one JavaScript program         |
-//! | [`engine`]         | Sandbox execution, caching, error model, public API        |
+//! | [`engine`]         | Sandboxed execution, caching, error model, public API        |
 //! | [`require_bridge`] | The v0.9.0 `require()` bridge: module banner, polyfills and |
 //! |                    | CommonJS loading of local JS modules                       |
+//! | [`renderer`]       | The v0.10.0 backend abstraction shared by every render      |
+//! | [`sidecar`]        | The Node sidecar backend: original-engine rendering in a    |
+//! |                    | supervised child process, plus the auto fallback            |
 //!
 //! Deliberate divergences from the original engine (documented in each
 //! module):
@@ -46,11 +49,29 @@
 //!   render data are rebuilt as a safe shim: `res.redirect()` records a
 //!   local-path-only redirect intent that the route layer honours, and
 //!   `req` arrives as template data with a sanitized header allowlist.
+//!
+//! Since v0.10.0 a second backend exists side by side with the boa
+//! sandbox: the **Node sidecar** (see [`sidecar`]) runs the ORIGINAL
+//! `node-jhs2` engine in a supervised child process, so templates get
+//! the real Node runtime behind `require()` (minus the
+//! `forbidden_modules` banner) — `require('url')` works, the compiler
+//! is the original's, and runaway renders are hard-killed by a
+//! wall-clock worker budget. `[templates] backend` picks the engine:
+//! `"boa"` (in-process, hardened default), `"sidecar"` (strict — the
+//! server refuses to start without Node) or `"auto"` (sidecar when
+//! available, transparent boa fallback). Both backends implement the
+//! same [`TemplateRenderer`] seam, so EVERY render in the process —
+//! public `.jhs` files, auto-routed views and CMS page bodies alike —
+//! flows through the selected backend.
 
 pub mod engine;
 pub mod parser;
+pub mod renderer;
 pub mod require_bridge;
+pub mod sidecar;
 
 pub use engine::{ConsoleLine, JhsEngine, JhsError, JhsOptions, RedirectIntent, RenderOutput};
 pub use parser::TagOptions;
+pub use renderer::TemplateRenderer;
 pub use require_bridge::{RequireOptions, DEFAULT_FORBIDDEN_MODULES};
+pub use sidecar::{AutoRenderer, SidecarOptions, SidecarRenderer};

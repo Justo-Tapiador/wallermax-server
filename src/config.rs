@@ -493,6 +493,17 @@ impl Default for StaticConfig {
 pub struct TemplatesConfig {
     /// Enables dynamic template rendering.
     pub enabled: bool,
+    /// The rendering backend (v0.10.0):
+    ///
+    /// - `"boa"` — the in-process sandboxed engine (hardened default);
+    /// - `"sidecar"` — the Node sidecar running the original node-jhs2
+    ///   engine; startup fails fast when Node cannot be launched;
+    /// - `"auto"` — the sidecar when it starts and stays healthy, with a
+    ///   transparent fallback to `"boa"` renders.
+    pub backend: String,
+    /// Sidecar tuning while `backend` is `"sidecar"` or `"auto"`
+    /// (v0.10.0); ignored by the `"boa"` backend.
+    pub sidecar: SidecarConfig,
     /// Directory holding the view templates, relative to the working
     /// directory (absolute paths are allowed too). It must exist at
     /// startup while rendering is enabled. `..` segments are rejected
@@ -540,6 +551,8 @@ impl Default for TemplatesConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            backend: String::from("auto"),
+            sidecar: SidecarConfig::default(),
             views_dir: String::from("views"),
             cache: true,
             auto_escape: true,
@@ -551,6 +564,48 @@ impl Default for TemplatesConfig {
                 .iter()
                 .map(|name| (*name).to_owned())
                 .collect(),
+        }
+    }
+}
+
+/// The `[templates.sidecar]` section: Node sidecar tuning
+/// (v0.10.0).
+///
+/// Every field has a working default, so an empty
+/// `[templates.sidecar]` table is a valid configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SidecarConfig {
+    /// Node.js binary used to launch the sidecar (resolved through
+    /// `PATH`).
+    pub node_command: String,
+    /// The sidecar service script, relative to the working directory
+    /// (absolute paths are allowed too).
+    pub script: String,
+    /// Render worker threads inside the sidecar. Each worker runs one
+    /// render at a time and is terminated (and respawned) when a render
+    /// exceeds `render_budget_ms`.
+    pub workers: u32,
+    /// Budget for the sidecar launch: process spawn, the READY
+    /// handshake and the startup selftest.
+    pub startup_timeout_ms: u64,
+    /// Client-side timeout for one render request, queue wait
+    /// included. Must exceed `render_budget_ms` (validated).
+    pub request_timeout_ms: u64,
+    /// Wall-clock hard-kill budget per render inside the sidecar — the
+    /// bound the original engine's ineffective `vm` timeout never had.
+    pub render_budget_ms: u64,
+}
+
+impl Default for SidecarConfig {
+    fn default() -> Self {
+        Self {
+            node_command: String::from("node"),
+            script: String::from("sidecar/jhs-sidecar.mjs"),
+            workers: 2,
+            startup_timeout_ms: 8_000,
+            request_timeout_ms: 10_000,
+            render_budget_ms: 5_000,
         }
     }
 }
@@ -971,6 +1026,53 @@ impl AppConfig {
                      (got {name:?})"
                 )));
             }
+        }
+
+        let backend = templates.backend.trim();
+        if !matches!(backend, "boa" | "sidecar" | "auto") {
+            return Err(ConfigError::Message(format!(
+                "`templates.backend` must be one of \"boa\", \"sidecar\" or \"auto\" (got {backend:?})"
+            )));
+        }
+        let sidecar = &templates.sidecar;
+        if sidecar.workers == 0 || sidecar.workers > 16 {
+            return Err(ConfigError::Message(
+                "`templates.sidecar.workers` must be between 1 and 16".to_owned(),
+            ));
+        }
+        if sidecar.startup_timeout_ms == 0 || sidecar.request_timeout_ms == 0 {
+            return Err(ConfigError::Message(
+                "`templates.sidecar.startup_timeout_ms` and \
+                 `templates.sidecar.request_timeout_ms` must be greater than zero"
+                    .to_owned(),
+            ));
+        }
+        if sidecar.render_budget_ms < 100 {
+            return Err(ConfigError::Message(
+                "`templates.sidecar.render_budget_ms` must be at least 100".to_owned(),
+            ));
+        }
+        if sidecar.request_timeout_ms <= sidecar.render_budget_ms {
+            return Err(ConfigError::Message(
+                "`templates.sidecar.request_timeout_ms` must exceed \
+                 `templates.sidecar.render_budget_ms` (the client must outwait the \
+                 hard-kill budget, or every budgeted render would time out client-side \
+                 first)"
+                    .to_owned(),
+            ));
+        }
+        if backend != "boa" && (sidecar.script.trim().is_empty() || sidecar.script.contains('\0')) {
+            return Err(ConfigError::Message(
+                "`templates.sidecar.script` must be a non-empty path while the sidecar \
+                 backend is selected"
+                    .to_owned(),
+            ));
+        }
+        if backend != "boa" && has_parent_segment(&sidecar.script) {
+            return Err(ConfigError::Message(format!(
+                "`templates.sidecar.script` must not contain `..` path segments: {:?}",
+                sidecar.script
+            )));
         }
         Ok(())
     }
