@@ -160,6 +160,17 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
         );
     }
 
+    // A default page without a mounted CMS is a configuration smell:
+    // accepted (validate_cms only enforces the slug shape) but called
+    // out loudly, because the homepage quietly keeps its normal
+    // behaviour otherwise.
+    if config.cms.default_page.is_some() && cms.is_none() {
+        tracing::warn!(
+            "cms.default_page is set but the CMS is not mounted; GET / keeps its normal \
+             behaviour"
+        );
+    }
+
     if config.auth.enabled {
         tracing::info!(
             registration_enabled = config.auth.registration_enabled,
@@ -175,6 +186,12 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
             "cms enabled (public pages at /p, admin panel at /admin; content and users — \
              server configuration stays in wallermax.toml)"
         );
+        if let Some(slug) = config.cms.default_page.as_deref() {
+            tracing::info!(
+                slug,
+                "cms default page takes over GET / (a missing slug warns and falls back)"
+            );
+        }
     }
 
     if config.metrics.enabled {
@@ -260,7 +277,9 @@ fn validate_templates(config: &AppConfig) -> Result<(), String> {
 /// Log line describing the mounted route families.
 fn route_map(config: &AppConfig, auth_enabled: bool, tls: bool) -> String {
     let mut routes = String::new();
-    if config.static_files.enabled {
+    if config.cms.enabled && config.cms.default_page.is_some() {
+        routes.push_str("GET / (cms)  |  GET /api  |  ");
+    } else if config.static_files.enabled {
         routes.push_str("GET / (static)  |  GET /api  |  ");
     } else {
         routes.push_str("GET /  |  GET /api  |  ");

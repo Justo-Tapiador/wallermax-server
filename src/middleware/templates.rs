@@ -14,13 +14,24 @@
 //!    protections and answers them.
 //! 3. `GET`/`HEAD` for an existing `*.jhs` file under the `[static]`
 //!    root is **rendered** — the template source is never served raw.
-//! 4. Everything else runs the normal pipeline (API routes first, then
+//! 4. `GET`/`HEAD /` while `[cms] default_page` names an existing page
+//!    renders that CMS page directly (v0.11.0) — through the exact
+//!    `GET /p/{slug}` pipeline (sandboxed body render,
+//!    `views/cms_page.jhs` wrapper, draft gating) and **before** the
+//!    normal pipeline below, so the explicit configuration beats the
+//!    static index file, the views auto-routing and the JSON 404.
+//!    Rendering directly (no redirect) keeps `/` the canonical URL. A
+//!    slug that no longer exists logs a warning and falls back to the
+//!    normal chain; a draft default page follows the `/p/{slug}`
+//!    gating (404 for the public, banner for editors).
+//! 5. Everything else runs the normal pipeline (API routes first, then
 //!    static files).
-//! 5. A pipeline `404` auto-routes to the views directory before the
+//! 6. A pipeline `404` auto-routes to the views directory before the
 //!    JSON envelope is returned: `GET /contacto` renders
 //!    `views/contacto.jhs`, `GET /blog` renders `views/blog.jhs` or
 //!    `views/blog/index.jhs`, and `GET /` falls back to
-//!    `views/index.jhs` when the static index file is missing.
+//!    `views/index.jhs` when the static index file is missing (and no
+//!    CMS default page took it over).
 //!
 //! Rendering happens on the blocking pool (`spawn_blocking`): the JS
 //! engine is CPU-bound and the fresh-sandbox-per-render design keeps it
@@ -74,6 +85,7 @@ use serde_json::{json, Map, Value};
 use crate::error::AppError;
 use crate::extractors::{bearer_token, AuthUser};
 use crate::middleware::request_id::RequestId;
+use crate::routes::cms::{render_public_page, PageParts, PublicPageOutcome};
 use crate::session;
 use crate::state::AppState;
 use crate::template_engine::{RedirectIntent, RenderOutput, TemplateRenderer};
@@ -134,6 +146,28 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
                     StatusCode::OK,
                 )
                 .await;
+            }
+        }
+    }
+
+    // The CMS default page takes over the homepage (v0.11.0). This
+    // runs BEFORE the pipeline, so the explicit configuration wins
+    // over `public/index.html` and the views auto-routing by
+    // construction. A slug that no longer exists (page deleted,
+    // typo) degrades gracefully: a warning, then the normal chain —
+    // the homepage never hard-fails because of a content lookup.
+    if decoded == "/" {
+        if let Some(slug) = state.config().cms.default_page.as_deref() {
+            if state.cms().is_some() {
+                let parts = PageParts::of(&request);
+                match render_public_page(&state, &parts, &data, slug).await {
+                    PublicPageOutcome::Served(response) => return response,
+                    PublicPageOutcome::Missing => tracing::warn!(
+                        slug,
+                        "the configured `cms.default_page` does not exist; GET / falls back \
+                         to the normal homepage chain"
+                    ),
+                }
             }
         }
     }

@@ -344,6 +344,23 @@ refresh_token_ttl_secs = 2592000
 # stays in wallermax.toml (local repository access).
 enabled = true
 
+# Slug of the CMS page that takes over GET / (v0.11.0). While set, the
+# homepage renders that page through the exact GET /p/<slug> pipeline
+# (sandboxed .jhs body, views/cms_page.jhs wrapper, draft gating) and
+# the explicit configuration WINS over public/index.html and the
+# views/index.jhs auto-routing — rendering directly (no redirect)
+# keeps / itself the canonical URL. Left unset (the default) the
+# homepage keeps the normal chain.
+#
+# A slug that stops existing (page deleted, or not created yet) logs a
+# warning and GET / falls back to the normal chain — the homepage
+# never hard-fails; a DRAFT default page is only visible to editors
+# (the public gets the same 404 as /p/<slug>). The slug shape is
+# validated at startup exactly like the panel forms validate it.
+# Override with WALLERMAX_CMS__DEFAULT_PAGE.
+#
+# default_page = "inicio"
+
 [metrics]
 # Prometheus exposition endpoint: scrapes return every collected metric
 # in the text exposition format. Unauthenticated by design — restrict at

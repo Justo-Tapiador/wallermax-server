@@ -98,6 +98,29 @@ fn environment_overrides_phase3_sections() {
 }
 
 #[test]
+fn environment_overrides_cms_section() {
+    // The checked-in `wallermax.toml` ships the CMS enabled without a
+    // default page; the environment wins over the enabled switch and
+    // adds the v0.11.0 homepage takeover.
+    std::env::set_var("WALLERMAX_CMS__ENABLED", "false");
+    std::env::set_var("WALLERMAX_CMS__DEFAULT_PAGE", "inicio");
+
+    let config = AppConfig::load().expect("configuration loads");
+
+    assert!(!config.cms.enabled);
+    assert_eq!(
+        config.cms.default_page.as_deref(),
+        Some("inicio"),
+        "the slug string survives try_parsing"
+    );
+    // `load()` already validated the merged configuration (the slug
+    // shape survives the env round trip).
+
+    std::env::remove_var("WALLERMAX_CMS__ENABLED");
+    std::env::remove_var("WALLERMAX_CMS__DEFAULT_PAGE");
+}
+
+#[test]
 fn environment_overrides_static_section() {
     // The checked-in `wallermax.toml` ships static serving enabled with
     // root_dir = "public"; the environment wins over each value.

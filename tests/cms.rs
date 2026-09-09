@@ -389,6 +389,223 @@ async fn drafts_are_invisible_to_the_public_and_visible_to_editors() {
     assert!(body.contains("Borrador:"), "the draft banner: {body}");
 }
 
+// ── The v0.11.0 homepage takeover (`[cms] default_page`) ─────────────
+
+/// Creates a temp directory with an `index.html` carrying `marker`, to
+/// prove the default page outranks (and falls back to) the static
+/// index file. Best-effort cleanup: the tests remove it on drop.
+struct StaticRootGuard {
+    dir: std::path::PathBuf,
+}
+
+impl StaticRootGuard {
+    fn with_index(marker: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "wallermax-cms-home-{}-{marker}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp static root");
+        std::fs::write(dir.join("index.html"), format!("<h1>{marker}</h1>"))
+            .expect("index fixture");
+        Self { dir }
+    }
+
+    /// Forward-slash path (valid on Windows as well).
+    fn root_dir(&self) -> String {
+        self.dir.display().to_string().replace('\\', "/")
+    }
+}
+
+impl Drop for StaticRootGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[tokio::test]
+async fn default_page_takes_over_the_homepage() {
+    let (mut config, _db) = cms_config();
+    config.cms.default_page = Some(String::from("inicio"));
+    let server = TestServer::start_full(config).await;
+    register_admin(&server, "root-admin", "sup3r-secret!").await;
+    let admin = login_browser(&server, "root-admin", "sup3r-secret!").await;
+    create_page(
+        &server,
+        &admin,
+        "inicio",
+        "Portada del sitio",
+        "<p>contenido-de-la-portada</p>",
+        true,
+    )
+    .await;
+
+    let response = anon_client()
+        .get(server.url("/"))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), 200, "the default page renders at /");
+    // Rendered directly, not redirected: / stays the canonical URL.
+    assert!(
+        response.headers().get("location").is_none(),
+        "no redirect to /p/inicio"
+    );
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/html")),
+        "the homepage is HTML"
+    );
+    let body = response.text().await.expect("html body");
+    assert!(
+        body.contains("Portada del sitio"),
+        "the cms_page.jhs wrapper title: {body}"
+    );
+    assert!(body.contains("/p/inicio"), "the wrapper meta: {body}");
+    assert!(
+        body.contains("contenido-de-la-portada"),
+        "the page body: {body}"
+    );
+
+    // The page keeps its canonical /p/{slug} URL too — same pipeline.
+    let response = anon_client()
+        .get(server.url("/p/inicio"))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("html body");
+    assert!(
+        body.contains("contenido-de-la-portada"),
+        "same page: {body}"
+    );
+}
+
+#[tokio::test]
+async fn default_page_outranks_the_static_index_and_misses_degrade() {
+    let (mut config, _db) = cms_config();
+    let root = StaticRootGuard::with_index("estatica");
+    config.static_files.root_dir = root.root_dir();
+    config.cms.default_page = Some(String::from("inicio"));
+    let server = TestServer::start_full(config).await;
+    register_admin(&server, "root-admin", "sup3r-secret!").await;
+    let admin = login_browser(&server, "root-admin", "sup3r-secret!").await;
+    let page_id = create_page(
+        &server,
+        &admin,
+        "inicio",
+        "Portada",
+        "<p>la-portada-vive</p>",
+        true,
+    )
+    .await;
+
+    // The explicit configuration beats the static index file.
+    let response = anon_client()
+        .get(server.url("/"))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("html body");
+    assert!(
+        body.contains("la-portada-vive"),
+        "the CMS page wins: {body}"
+    );
+    assert!(!body.contains("estatica"), "the static index loses: {body}");
+
+    // A slug that stops existing mid-flight degrades gracefully: the
+    // homepage falls back to the normal chain instead of hard-failing.
+    let response = admin
+        .post(server.url(&format!("/admin/pages/{page_id}/delete")))
+        .send()
+        .await
+        .expect("deletion succeeds");
+    assert_eq!(response.status(), 303, "deletion redirects (PRG)");
+
+    let response = anon_client()
+        .get(server.url("/"))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(
+        response.status(),
+        200,
+        "the homepage falls back, never hard-fails"
+    );
+    let body = response.text().await.expect("html body");
+    assert!(
+        body.contains("estatica"),
+        "the static index file serves the fallback: {body}"
+    );
+}
+
+#[tokio::test]
+async fn default_page_draft_follows_the_p_gating() {
+    let (mut config, _db) = cms_config();
+    config.cms.default_page = Some(String::from("borrador-portada"));
+    let server = TestServer::start_full(config).await;
+    register_admin(&server, "root-admin", "sup3r-secret!").await;
+    let admin = login_browser(&server, "root-admin", "sup3r-secret!").await;
+    create_page(
+        &server,
+        &admin,
+        "borrador-portada",
+        "Portada oculta",
+        "<p>secreto-portada</p>",
+        false,
+    )
+    .await;
+
+    // The public gets the same 404 as /p/{slug} — drafts stay drafts
+    // wherever they are mounted.
+    let response = anon_client()
+        .get(server.url("/"))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(
+        response.status(),
+        404,
+        "a draft homepage is invisible to the public"
+    );
+    let body = response.text().await.expect("html body");
+    assert!(body.contains("404"), "the HTML 404 view: {body}");
+
+    // Editors preview it with the banner, straight from /.
+    let response = admin
+        .get(server.url("/"))
+        .send()
+        .await
+        .expect("editor preview");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("html body");
+    assert!(body.contains("Borrador:"), "the draft banner: {body}");
+    assert!(body.contains("secreto-portada"), "the draft body: {body}");
+}
+
+#[tokio::test]
+async fn default_page_is_ignored_while_the_cms_is_disabled() {
+    let (mut config, _db) = cms_config();
+    config.cms.enabled = false;
+    config.cms.default_page = Some(String::from("inicio"));
+    let server = TestServer::start_full(config).await;
+
+    let response = anon_client()
+        .get(server.url("/"))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.expect("html body");
+    assert!(
+        body.contains("Páginas publicadas"),
+        "the normal views/index.jhs chain serves the homepage: {body}"
+    );
+}
+
 #[tokio::test]
 async fn cms_page_bodies_render_as_jhs_with_the_globals() {
     let (config, _db) = cms_config();

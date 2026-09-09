@@ -52,7 +52,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::auth::{hash_password, validate_password, validate_username, verify_password};
 use crate::db::{NewPage, PageUpdate, RepositoryError, User, UserRole};
@@ -221,8 +221,14 @@ fn escape_html(text: &str) -> String {
 
 // ─── Shared rendering plumbing ───────────────────────────────────────
 
-/// Request pieces every handler needs for rendering.
-struct PageParts {
+/// The request facts the page flows need (method, headers, uri,
+/// request id), captured once and threaded through the shared
+/// renderers.
+///
+/// Crate-visible: the template middleware builds one for the v0.11.0
+/// homepage takeover (`[cms] default_page`) so `GET /` renders through
+/// the exact `GET /p/{slug}` pipeline.
+pub(crate) struct PageParts {
     method: Method,
     headers: HeaderMap,
     uri: Uri,
@@ -230,7 +236,7 @@ struct PageParts {
 }
 
 impl PageParts {
-    fn of(request: &Request) -> Self {
+    pub(crate) fn of(request: &Request) -> Self {
         Self {
             method: request.method().clone(),
             headers: request.headers().clone(),
@@ -252,14 +258,30 @@ async fn render_view(
     extra: Vec<(&str, Value)>,
     status: StatusCode,
 ) -> Response {
-    let Some(templates) = state.templates() else {
-        return AppError::internal("templates are not initialized").into_response();
-    };
-
     let mut data = base_data(state, &parts.headers, &parts.uri, &parts.method).await;
     for (key, value) in extra {
         data.insert(key.to_owned(), value);
     }
+    render_view_with_data(state, parts, data, view, status).await
+}
+
+/// Renders `views/<view>.jhs` with **precomputed** globals, answering
+/// with `status`.
+///
+/// Split out of [`render_view`] so [`render_public_page`] can reuse
+/// the `base_data` it already needs for the draft gate and the body
+/// render instead of recomputing it (one `pages` query less per page
+/// view).
+async fn render_view_with_data(
+    state: &AppState,
+    parts: &PageParts,
+    data: Map<String, Value>,
+    view: &str,
+    status: StatusCode,
+) -> Response {
+    let Some(templates) = state.templates() else {
+        return AppError::internal("templates are not initialized").into_response();
+    };
 
     let path = templates.views_dir().join(view);
     render_response(
@@ -290,7 +312,23 @@ fn see_other(location: &str) -> Response {
         .expect("valid redirect")
 }
 
-// ─── Public: `GET /p/{slug}` ─────────────────────────────────────────
+// ─── Public: `GET /p/{slug}` (and the v0.11.0 homepage) ─────────────
+
+/// What [`render_public_page`] decided for a slug.
+///
+/// Crate-visible so the template middleware can share the exact
+/// `/p/{slug}` rendering for the v0.11.0 homepage takeover
+/// (`[cms] default_page`): both routes behave identically by
+/// construction.
+pub(crate) enum PublicPageOutcome {
+    /// A complete response: the rendered page, a `res.redirect()` issued
+    /// by the page body, the hidden-draft 404 or an error envelope.
+    Served(Response),
+    /// No page row exists for the slug. `GET /p/{slug}` answers the
+    /// HTML 404 view; the homepage instead falls back to its normal
+    /// chain (static index file, then views auto-routing).
+    Missing,
+}
 
 /// Renders one CMS page.
 ///
@@ -303,27 +341,34 @@ fn see_other(location: &str) -> Response {
 ///
 /// Drafts are invisible to the public (same 404 as a missing slug) and
 /// carry a preview banner for editors.
-async fn public_page(
-    State(state): State<AppState>,
-    Path(slug): Path<String>,
-    request: Request,
-) -> Response {
-    let parts = PageParts::of(&request);
-    let Ok(cms) = cms_context(&state) else {
-        return AppError::internal("the CMS is not initialized").into_response();
+///
+/// Crate-visible: the template middleware calls this for `GET /` while
+/// `[cms] default_page` names a slug. `data` is the precomputed
+/// `base_data` globals for the request (the caller needs them anyway);
+/// the slug lookup happens **before** any cloning so a missing slug
+/// costs one query and nothing else.
+pub(crate) async fn render_public_page(
+    state: &AppState,
+    parts: &PageParts,
+    data: &Map<String, Value>,
+    slug: &str,
+) -> PublicPageOutcome {
+    let Ok(cms) = cms_context(state) else {
+        return PublicPageOutcome::Served(
+            AppError::internal("the CMS is not initialized").into_response(),
+        );
     };
 
-    let Some(page) = cms.pages.find_by_slug(&slug).await.unwrap_or_else(|error| {
+    let Some(page) = cms.pages.find_by_slug(slug).await.unwrap_or_else(|error| {
         tracing::error!(%error, "page lookup failed");
         None
     }) else {
-        return render_view(&state, &parts, "404.jhs", Vec::new(), StatusCode::NOT_FOUND).await;
+        return PublicPageOutcome::Missing;
     };
 
     // Drafts: indistinguishable from missing pages unless the caller
     // may manage content.
-    let identity = base_data(&state, &parts.headers, &parts.uri, &parts.method).await;
-    let viewer_is_editor = identity
+    let viewer_is_editor = data
         .get("user")
         .and_then(|user| user.get("role"))
         .and_then(Value::as_str)
@@ -331,34 +376,45 @@ async fn public_page(
         .is_some_and(|role| role.is_editor());
 
     if !page.is_published && !viewer_is_editor {
-        return render_view(&state, &parts, "404.jhs", Vec::new(), StatusCode::NOT_FOUND).await;
+        return PublicPageOutcome::Served(
+            render_view_with_data(state, parts, data.clone(), "404.jhs", StatusCode::NOT_FOUND)
+                .await,
+        );
     }
 
     // Render the page body (template source) with the same globals.
     let body_html = {
-        let engine = match state.templates() {
-            Some(templates) => templates.engine(),
-            None => {
-                return AppError::internal("templates are not initialized").into_response();
-            }
+        let Some(templates) = state.templates() else {
+            return PublicPageOutcome::Served(
+                AppError::internal("templates are not initialized").into_response(),
+            );
         };
+        let engine = templates.engine();
         let content = page.content.clone();
-        match tokio::task::spawn_blocking(move || engine.render_string(&content, &identity)).await {
+        let globals = data.clone();
+        match tokio::task::spawn_blocking(move || engine.render_string(&content, &globals)).await {
             Ok(Ok(output)) => {
                 // A res.redirect() inside a stored page body redirects the
                 // whole page, exactly like it does inside a view.
                 if let Some(redirect) = &output.redirect {
-                    return redirect_response(redirect, parts.request_id.as_deref());
+                    return PublicPageOutcome::Served(redirect_response(
+                        redirect,
+                        parts.request_id.as_deref(),
+                    ));
                 }
                 output.html
             }
             Ok(Err(error)) => {
                 // Template-author diagnostics, like every other render.
-                return AppError::internal(error.to_string()).into_response();
+                return PublicPageOutcome::Served(
+                    AppError::internal(error.to_string()).into_response(),
+                );
             }
             Err(join_error) => {
                 tracing::error!(%join_error, "page rendering task failed");
-                return AppError::internal("page rendering task failed".to_owned()).into_response();
+                return PublicPageOutcome::Served(
+                    AppError::internal("page rendering task failed".to_owned()).into_response(),
+                );
             }
         }
     };
@@ -381,14 +437,32 @@ async fn public_page(
         "author": author,
     });
 
-    render_view(
-        &state,
-        &parts,
-        "cms_page.jhs",
-        vec![("page", page_json), ("content", Value::String(body_html))],
-        StatusCode::OK,
+    let mut wrapper_data = data.clone();
+    wrapper_data.insert(String::from("page"), page_json);
+    wrapper_data.insert(String::from("content"), Value::String(body_html));
+
+    PublicPageOutcome::Served(
+        render_view_with_data(state, parts, wrapper_data, "cms_page.jhs", StatusCode::OK).await,
     )
-    .await
+}
+
+/// `GET /p/{slug}`: the route half of [`render_public_page`].
+async fn public_page(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    request: Request,
+) -> Response {
+    let parts = PageParts::of(&request);
+    let data = base_data(&state, &parts.headers, &parts.uri, &parts.method).await;
+
+    match render_public_page(&state, &parts, &data, &slug).await {
+        PublicPageOutcome::Served(response) => response,
+        // A slug with no page behind it answers the HTML 404 view —
+        // the homepage is the caller that falls back instead.
+        PublicPageOutcome::Missing => {
+            render_view(&state, &parts, "404.jhs", Vec::new(), StatusCode::NOT_FOUND).await
+        }
+    }
 }
 
 // ─── Admin: dashboard ────────────────────────────────────────────────
@@ -750,24 +824,17 @@ fn validate_page_form(form: &PageForm) -> Result<(), &'static str> {
 }
 
 /// A slug is valid when it has 1-64 characters of `[a-z0-9-]`, does not
-/// start or end with a dash, and contains no double dash.
+/// start or end with a dash, and contains no double dash — the shared
+/// [`crate::util::valid_slug`] rule, wrapped in the form's message.
 fn validate_slug(slug: &str) -> Result<(), &'static str> {
-    let invalid = "El slug debe tener 1-64 caracteres: minúsculas, números y guiones \
-                   (sin empezar ni terminar en guion).";
-    let length = slug.len();
-    if !(1..=64).contains(&length) {
-        return Err(invalid);
+    if crate::util::valid_slug(slug) {
+        Ok(())
+    } else {
+        Err(
+            "El slug debe tener 1-64 caracteres: minúsculas, números y guiones \
+             (sin empezar ni terminar en guion).",
+        )
     }
-    if slug.starts_with('-') || slug.ends_with('-') || slug.contains("--") {
-        return Err(invalid);
-    }
-    if !slug
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-    {
-        return Err(invalid);
-    }
-    Ok(())
 }
 
 /// Re-renders the page form with the submitted values and an error.

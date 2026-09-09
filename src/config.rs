@@ -433,6 +433,27 @@ pub struct CmsConfig {
     /// `[templates]`: the lean server keeps the section off until the
     /// configuration file (the shipped `wallermax.toml`) turns it on.
     pub enabled: bool,
+    /// The slug of the CMS page that takes over `GET /` (v0.11.0).
+    ///
+    /// While set (and the CMS is enabled), the homepage renders that
+    /// page through the exact `GET /p/{slug}` pipeline — sandboxed body
+    /// render, `views/cms_page.jhs` wrapper, draft gating — BEFORE the
+    /// static index file, the views auto-routing or the JSON 404 are
+    /// considered: the explicit configuration always beats
+    /// `public/index.html`. Rendering directly (instead of redirecting
+    /// to `/p/{slug}`) keeps `/` itself the canonical URL.
+    ///
+    /// A slug that no longer exists at request time (page deleted after
+    /// startup) logs a warning and falls back to the normal homepage
+    /// chain; a **draft** default page follows the `/p/{slug}` gating
+    /// (404 for the public, preview banner for editors). The slug shape
+    /// is validated at startup exactly like the panel forms validate
+    /// it.
+    ///
+    /// `WALLERMAX_CMS__DEFAULT_PAGE` overrides the file value. Setting
+    /// it while `cms.enabled = false` is accepted (the shape is still
+    /// validated) but ignored, with a startup warning in `build_state`.
+    pub default_page: Option<String>,
 }
 
 /// Static file serving settings.
@@ -878,6 +899,18 @@ impl AppConfig {
     /// silently degraded CMS would be far more confusing than a clear
     /// startup failure.
     fn validate_cms(&self) -> Result<(), ConfigError> {
+        // The slug shape is checked even while the CMS is off: a
+        // typo'd `default_page` is a configuration mistake regardless
+        // of the switch, and validating it costs nothing.
+        if let Some(slug) = self.cms.default_page.as_deref() {
+            if !crate::util::valid_slug(slug) {
+                return Err(ConfigError::Message(format!(
+                    "invalid `cms.default_page` `{slug}`; expected the same slug shape the \
+                     panel forms enforce: 1-64 characters of lowercase letters, digits and \
+                     single dashes"
+                )));
+            }
+        }
         if !self.cms.enabled {
             return Ok(());
         }
@@ -1469,6 +1502,60 @@ mod tests {
         let mut config = AppConfig::default();
         config.static_files.root_dir = String::new();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn cms_default_page_parses_and_defaults_to_none() {
+        let config = AppConfig::default();
+        assert!(
+            config.cms.default_page.is_none(),
+            "the homepage takeover stays off by default"
+        );
+        assert!(config.validate().is_ok());
+
+        let config = from_toml(
+            r#"
+            [cms]
+            enabled = true
+            default_page = "inicio"
+            "#,
+        );
+        assert_eq!(config.cms.default_page.as_deref(), Some("inicio"));
+        assert!(config.cms.enabled);
+    }
+
+    #[test]
+    fn cms_default_page_requires_a_well_formed_slug() {
+        let mut config = AppConfig::default();
+        config.cms.enabled = true;
+        config.database.enabled = true;
+        config.auth.enabled = true;
+        config.templates.enabled = true;
+
+        config.cms.default_page = Some(String::from("inicio"));
+        assert!(
+            config.validate_cms().is_ok(),
+            "a well-formed slug passes with the CMS on"
+        );
+
+        config.cms.default_page = Some(String::from("Malformed Slug!"));
+        assert!(
+            config.validate_cms().is_err(),
+            "a malformed slug refuses startup"
+        );
+
+        // The shape is validated even while the CMS is off: a typo is a
+        // configuration mistake regardless of the switch.
+        config.cms.enabled = false;
+        assert!(
+            config.validate_cms().is_err(),
+            "shape errors are not silent while the CMS is off"
+        );
+
+        // A well-formed slug with the CMS off is accepted — and ignored,
+        // with a startup warning from `build_state`.
+        config.cms.default_page = Some(String::from("inicio"));
+        assert!(config.validate_cms().is_ok());
     }
 
     #[test]

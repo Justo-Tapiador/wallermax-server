@@ -18,6 +18,22 @@ pub(crate) fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// A well-formed CMS slug: 1-64 characters of `[a-z0-9-]`, no
+/// leading/trailing dash and no double dash.
+///
+/// Shared by the admin form validation ([`crate::routes::cms`]) and the
+/// `[cms] default_page` configuration check so both enforce the exact
+/// same shape — a config typo and a form typo fail identically.
+pub(crate) fn valid_slug(slug: &str) -> bool {
+    (1..=64).contains(&slug.len())
+        && !slug.starts_with('-')
+        && !slug.ends_with('-')
+        && !slug.contains("--")
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 /// Formats unix seconds as `YYYY-MM-DD HH:MM` (UTC, no dependencies).
 ///
 /// The CMS listings pass the result to the views as `*_h` fields so
@@ -78,6 +94,22 @@ mod tests {
         assert_eq!(round3(1.23456), 1.235);
         assert_eq!(round3(0.0), 0.0);
         assert_eq!(round3(2.9999), 3.0);
+    }
+
+    #[test]
+    fn slugs_validate_the_documented_shape() {
+        assert!(valid_slug("a"));
+        assert!(valid_slug("inicio"));
+        assert!(valid_slug("pagina-2-de-la-guia"));
+
+        assert!(!valid_slug(""), "empty");
+        assert!(!valid_slug("-inicio"), "leading dash");
+        assert!(!valid_slug("inicio-"), "trailing dash");
+        assert!(!valid_slug("pagina--2"), "double dash");
+        assert!(!valid_slug("Inicio"), "uppercase");
+        assert!(!valid_slug("pagina_2"), "underscore");
+        assert!(!valid_slug("página"), "non-ascii");
+        assert!(!valid_slug(&"x".repeat(65)), "too long");
     }
 
     #[test]

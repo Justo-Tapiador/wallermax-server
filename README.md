@@ -3,7 +3,7 @@
 [![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![Built with Axum](https://img.shields.io/badge/Built%20with-Axum%200.8-blueviolet)](https://github.com/tokio-rs/axum)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
-[![Roadmap](https://img.shields.io/badge/Roadmap-All%207%20phases%20done-green)](#roadmap)
+[![Roadmap](https://img.shields.io/badge/Roadmap-All%208%20phases%20done-green)](#roadmap)
 
 <div align="left">
 <p><img src="ws.png" width="482" alt="IA-SO BROODER"></p>
@@ -11,7 +11,7 @@
 
 > A modular, secure and high-performance web server written in Rust.
 
-**Status: v0.10.1 — the roadmap phases done, a dynamic template engine with require() running on the original node-jhs2 engine, browser sessions, and a small built-in CMS.** Phase 4 added rotating
+**Status: v0.11.0 — the roadmap phases done, a dynamic template engine with require() running on the original node-jhs2 engine, browser sessions, and a small built-in CMS that owns the homepage.** Phase 4 added rotating
 refresh tokens with family revocation, a Prometheus `/metrics` endpoint, HTTPS via
 rustls (plus an HTTP-to-HTTPS redirect listener), trusted-proxy `X-Forwarded-For`
 parsing, a multi-stage Docker image with a compose example and a GitHub Actions CI
@@ -26,9 +26,13 @@ CommonJS modules under `modules/`, plus `res.redirect()` and the `req`
 global. v0.10.0 moves every render onto a supervised **Node sidecar**
 running the **original node-jhs2 engine** (`[templates] backend =
 auto | boa | sidecar`), and v0.10.1 exposes the live backend through
-`GET /health` and the `wallermax_template_backend` metric — see
+`GET /health` and the `wallermax_template_backend` metric. v0.11.0 gives
+the CMS the homepage: `[cms] default_page` renders a database-backed page
+at `GET /` — ahead of the static index file, with the `/p/<slug>` draft
+gating and a graceful fallback. See
 [README-jhs-engine.md](README-jhs-engine.md),
-[Template backends](#template-backends-boa-and-the-node-sidecar-v0100) and the [roadmap](#roadmap).
+[Template backends](#template-backends-boa-and-the-node-sidecar-v0100),
+[The CMS](#the-cms-v080) and the [roadmap](#roadmap).
 
 ## Table of contents
 
@@ -125,9 +129,12 @@ auto | boa | sidecar`), and v0.10.1 exposes the live backend through
   shared partials via `include()`); a `/admin` panel manages pages
   (create, edit, publish, import from `public/`) and accounts (admin
   only), plus a self-service password change — every bit of it plain
-  HTML forms, no JavaScript, CSP keeps scripts blocked. The panel
-  manages content and accounts only: server configuration stays in
-  `wallermax.toml`.
+  HTML forms, no JavaScript, CSP keeps scripts blocked. Since v0.11.0
+  `[cms] default_page` mounts any page as the homepage: `GET /` renders
+  it through the exact `/p/<slug>` pipeline, ahead of the static index
+  file, with a graceful fallback when the slug stops existing. The
+  panel manages content and accounts only: server configuration stays
+  in `wallermax.toml`.
 - **Prometheus metrics** — `GET /metrics` (configurable path) exposing
   request counters, latency histograms, rate-limit rejections, uptime and
   registered users in the text exposition format; scrapes are exempt
@@ -144,7 +151,7 @@ auto | boa | sidecar`), and v0.10.1 exposes the live backend through
   matrix, Docker build with in-container smoke test).
 - **Storage-agnostic** — handlers depend on the `UserRepository` trait, not
   on SQLite; the engine can be swapped without touching HTTP code.
-- **Tested** — 413 tests: unit tests per module plus end-to-end integration
+- **Tested** — 421 tests: unit tests per module plus end-to-end integration
   tests that boot the *real* server (plain HTTP and HTTPS) and speak HTTP
   to it — including a cookie-jar "browser" battery for the CMS and the
   Node sidecar battery (spawn, selftest, parity, hard-kill, respawn)
@@ -172,7 +179,7 @@ auto | boa | sidecar`), and v0.10.1 exposes the live backend through
 
 ```console
 $ cargo run
-   Compiling wallermax-server v0.10.1
+   Compiling wallermax-server v0.11.0
     Finished dev [unoptimized + debuginfo] target(s)
      Running `target/debug/wallermax-server`
 
@@ -184,7 +191,7 @@ INFO wallermax_server::server: sqlite pool ready (migrations applied) url=sqlite
 INFO wallermax_server::server: authentication enabled (the first registered user becomes the admin) registration_enabled=true token_ttl_secs=3600 refresh_tokens_enabled=true refresh_token_ttl_secs=2592000
 INFO wallermax_server::server: cms enabled (public pages at /p, admin panel at /admin; content and users — server configuration stays in wallermax.toml)
 INFO wallermax_server::server: prometheus metrics enabled path=/metrics
-INFO wallermax_server::server: wallermax-server listening address=127.0.0.1:8080 version=0.10.1
+INFO wallermax_server::server: wallermax-server listening address=127.0.0.1:8080 version=0.11.0
 INFO wallermax_server::server: route map ready routes="GET / (static) | GET /api | GET /health | GET /api/stats | POST /api/echo | GET /metrics | POST /api/auth/register | POST /api/auth/login | GET /api/auth/me | POST /api/auth/refresh | POST /api/auth/logout | POST /api/auth/logout_all | GET /api/admin/users | GET /p/{slug} | GET /admin | POST /perfil/password | + static files | + .jhs templates"
 ```
 
@@ -212,7 +219,7 @@ $ curl http://127.0.0.1:8080/api
 {"service":"wallermax-server",...}
 
 $ curl http://127.0.0.1:8080/health
-{"status":"ok","version":"0.10.1","template_backend":"sidecar"}
+{"status":"ok","version":"0.11.0","template_backend":"sidecar"}
 
 $ curl http://127.0.0.1:8080/hello.jhs     # .jhs template, rendered on the fly
 <h1>Hola desde una plantilla .jhs</h1>
@@ -339,6 +346,8 @@ each middleware's tuning values live in their own section.
 | `auth.min_password_len` | integer | `8` | Minimum accepted password length. |
 | `auth.refresh_tokens_enabled` | bool | `true` | Mount `/api/auth/refresh`, `/logout`, `/logout_all`; login returns a refresh token. |
 | `auth.refresh_token_ttl_secs` | integer | `2592000` | Refresh token lifetime (30 days). |
+| `cms.enabled` | bool | `false` (defaults) / `true` (wallermax.toml) | Mount the CMS route family (requires `[database]`, `[auth]` and `[templates]`). |
+| `cms.default_page` | string | unset | Slug of the CMS page that takes over `GET /` (v0.11.0) — beats the static index file; a missing slug warns and falls back, a draft stays editor-only. |
 | `metrics.enabled` | bool | `false` (defaults) / `true` (wallermax.toml) | Serve the Prometheus exposition endpoint. |
 | `metrics.path` | string | `/metrics` | Path of the exposition endpoint. |
 | `tls.enabled` | bool | `false` | Serve HTTPS (rustls) on `server.host:port` instead of plain HTTP. |
@@ -378,7 +387,7 @@ recommended production setup.
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `GET` | `/` | — | Static index file while `[static]` is on; JSON service index otherwise. |
+| `GET` | `/` | — | The CMS default page while `cms.default_page` is set (v0.11.0); otherwise the static index file while `[static]` is on, or the JSON service index. |
 | `GET` | `/api` | — | Service index: name, version and endpoint discovery. |
 | `GET` | `/health` | — | Liveness probe (version + the live `template_backend`). |
 | `GET` | `/api/stats` | — | Runtime metrics (+ `registered_users` while auth is on). |
@@ -408,13 +417,13 @@ Example responses:
 
 ```json
 // GET /api
-{"service":"wallermax-server","version":"0.10.1","description":"...","endpoints":["GET / (static index + files)","GET /api","GET /health","GET /api/stats","POST /api/echo","GET /metrics","POST /api/auth/register","POST /api/auth/login","GET /api/auth/me","GET /api/admin/users","POST /api/auth/refresh","POST /api/auth/logout","POST /api/auth/logout_all"]}
+{"service":"wallermax-server","version":"0.11.0","description":"...","endpoints":["GET / (static index + files)","GET /api","GET /health","GET /api/stats","POST /api/echo","GET /metrics","POST /api/auth/register","POST /api/auth/login","GET /api/auth/me","GET /api/admin/users","POST /api/auth/refresh","POST /api/auth/logout","POST /api/auth/logout_all"]}
 
 // GET /health
-{"status":"ok","version":"0.10.1","template_backend":"sidecar"}
+{"status":"ok","version":"0.11.0","template_backend":"sidecar"}
 
 // GET /api/stats
-{"service":"wallermax-server","version":"0.10.1","uptime_seconds":10.244,"total_requests":12,"requests_per_second":1.171,"rate_limited_requests":0,"registered_users":2}
+{"service":"wallermax-server","version":"0.11.0","uptime_seconds":10.244,"total_requests":12,"requests_per_second":1.171,"rate_limited_requests":0,"registered_users":2}
 
 // POST /api/echo  (Content-Type: text/plain, body "hello wallermax")
 {"received_bytes":15,"content_type":"text/plain","body":"hello wallermax"}
@@ -561,7 +570,7 @@ What the sidecar adds on top of the engine itself:
 
 ```console
 $ curl http://127.0.0.1:8080/health
-{"status":"ok","version":"0.10.1","template_backend":"sidecar"}
+{"status":"ok","version":"0.11.0","template_backend":"sidecar"}
 
 $ curl http://127.0.0.1:8080/metrics | grep template_backend
 wallermax_template_backend{backend="sidecar"} 1
@@ -736,6 +745,31 @@ v0.4); registration forms always create plain `user` accounts.
   reuse the shared partials (`<?jhs include("partials/header") ?>`).
   Drafts answer `404` for the public and render with a preview banner
   for editors.
+
+### The homepage: `default_page` (v0.11.0)
+
+`[cms] default_page = "slug"` (env: `WALLERMAX_CMS__DEFAULT_PAGE`) makes
+`GET /` render that CMS page through the **exact** `/p/{slug}` pipeline
+— same sandboxed body render, same `views/cms_page.jhs` wrapper, same
+globals; one shared renderer serves both routes — with three
+deliberate properties:
+
+- **Priority**: the explicit configuration beats `public/index.html`
+  and the `views/index.jhs` auto-routing, and rendering directly (no
+  redirect to `/p/{slug}`) keeps `/` itself the canonical URL.
+- **Gating**: a draft default page follows the `/p/{slug}` rules — `404`
+  for the public, preview banner for editors — so an unpublished
+  homepage can never leak.
+- **Graceful degradation**: a slug that stops existing (page deleted,
+  or not created yet) logs a warning and the homepage falls back to the
+  normal chain — static index file, then views auto-routing — instead
+  of hard-failing. The takeover is live: create the page and `/` serves
+  it, no restart.
+
+The slug shape is validated at startup with the exact rule the panel
+forms use (`1-64` characters of lowercase, digits and single dashes).
+Setting `default_page` while `cms.enabled = false` is accepted (the
+shape is still validated) but ignored, with a startup warning.
 
 ### The admin panel (`/admin`)
 
@@ -1146,7 +1180,7 @@ wallermax-server/
 
 ```console
 $ cargo test
-running 231 tests ... ok      # unit tests (config, state, error, limiter,
+running 234 tests ... ok      # unit tests (config, state, error, limiter,
                                #   proxy CIDRs, auth + refresh primitives,
                                #   repository incl. refresh token store and
                                #   the page repository, metrics registry
@@ -1154,20 +1188,25 @@ running 231 tests ... ok      # unit tests (config, state, error, limiter,
                                #   server helpers, middleware, template
                                #   engine + parser + include() + session
                                #   cookie helpers, login helpers, CMS
-                               #   validation helpers, sidecar client)
-running 4 tests ... ok          # config_env: environment override semantics
+                               #   validation helpers incl. the
+                               #   default_page slug rule, sidecar client)
+running 5 tests ... ok          # config_env: environment override semantics
+                               #   (incl. cms.default_page)
 running 30 tests ... ok         # auth: register/login/profile/admin flows,
                                #   the session cookie (set/authenticate/
                                #   rotate/clear, Bearer precedence) and the
                                #   browser form flows (303, open-redirect
                                #   rejection, error redirects, idempotent
                                #   form logout)
-running 25 tests ... ok         # cms: the cookie-jar "browser" battery —
+running 29 tests ... ok         # cms: the cookie-jar "browser" battery —
                                #   guards (anon/user/editor/admin), page
                                #   lifecycle over forms, drafts, imports,
                                #   .jhs page bodies (globals + include),
                                #   account management, last-admin lockout,
-                               #   modals, password change, cookie flags
+                               #   modals, password change, cookie flags,
+                               #   and the v0.11.0 default_page homepage
+                               #   (takeover, priority over the static
+                               #   index, draft gating, fallback, off mode)
 running 12 tests ... ok         # refresh_tokens: rotation, reuse detection,
                                #   family revocation, logout/logout_all,
                                #   expiry, disabled mode, multi-rotation
@@ -1197,7 +1236,7 @@ running 11 tests ... ok         # sidecar: the Node sidecar battery — spawn
                                #   node on PATH)
 ```
 
-**413 tests total**, all of them plain `cargo test` (no docker, no
+**421 tests total**, all of them plain `cargo test` (no docker, no
 network). The sidecar battery needs `node` on `PATH` and skips
 gracefully otherwise — mirroring the `auto` backend's fallback. The
 integration tests boot the exact same application the
@@ -1411,6 +1450,19 @@ fresh temporary asset directory, cleaned up afterwards.
       the `wallermax_template_backend` Prometheus gauge; the Docker
       runtime image ships Node.js and CI's container smoke expects the
       sidecar answering.
+
+### Phase 8 — The CMS homepage (done, v0.11.0)
+
+- [x] `[cms] default_page`: `GET /` renders the named CMS page through
+      the exact `GET /p/{slug}` pipeline (one shared renderer behind
+      both routes), ahead of `public/index.html` and the views
+      auto-routing; rendered directly, so `/` stays the canonical URL.
+- [x] Same draft gating as `/p/{slug}` (`404` for the public, preview
+      banner for editors); a missing slug warns and falls back to the
+      normal homepage chain — the takeover is live, no restart needed.
+- [x] The slug shape is validated at startup with the panel forms' exact
+      rule; `WALLERMAX_CMS__DEFAULT_PAGE` env override; ignored (with a
+      startup warning) while the CMS is off.
 
 ### Beyond the roadmap (ideas)
 
