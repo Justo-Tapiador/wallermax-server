@@ -433,6 +433,10 @@ impl TemplateRenderer for SidecarRenderer {
         let body = json!({ "source": template, "data": data });
         self.render_call(body, "<string>")
     }
+
+    fn backend_name(&self) -> &'static str {
+        "sidecar"
+    }
 }
 
 /// The success envelope of `/render` and `/render-string`.
@@ -591,6 +595,17 @@ impl TemplateRenderer for AutoRenderer {
             |sidecar| sidecar.render_string(template, data),
             |boa| boa.render_string(template, data),
         )
+    }
+
+    fn backend_name(&self) -> &'static str {
+        // The live half of the composition: flips to "boa" the moment
+        // a transport failure trips the fallback and back to
+        // "sidecar" once the recovery probe answers.
+        if self.sidecar_healthy() {
+            "sidecar"
+        } else {
+            "boa"
+        }
     }
 }
 

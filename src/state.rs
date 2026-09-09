@@ -391,6 +391,20 @@ impl AppState {
         self.inner.templates.is_some()
     }
 
+    /// The effective `.jhs` rendering backend (v0.10.1): `None` while
+    /// `[templates]` is disabled, otherwise the live identity behind
+    /// [`TemplateRenderer::backend_name`] — `"boa"` or `"sidecar"`
+    /// (`"auto"` resolves to whichever half is currently serving).
+    /// Backs the `template_backend` field of `GET /health` and the
+    /// `wallermax_template_backend` Prometheus gauge; a pure
+    /// in-memory read, safe for liveness probes.
+    pub fn template_backend(&self) -> Option<&'static str> {
+        self.inner
+            .templates
+            .as_ref()
+            .map(|engine| engine.engine().backend_name())
+    }
+
     /// Returns the CMS services when the `[cms]` feature is enabled
     /// (which additionally requires `[database]`, `[auth]` and
     /// `[templates]`).
@@ -685,7 +699,7 @@ mod tests {
         let metrics = state.metrics().expect("metrics present");
         // Vec families only appear once a labelled child exists.
         metrics.record_request("GET", 200, 0.001);
-        let body = metrics.render(1.0, None).expect("renders");
+        let body = metrics.render(1.0, None, None).expect("renders");
         assert!(body.contains("wallermax_requests_total"));
     }
 

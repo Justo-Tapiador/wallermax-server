@@ -47,6 +47,14 @@ async fn health_reports_ok() {
     let body: Value = response.json().await.expect("JSON body");
     assert_eq!(body["status"], "ok");
     assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+
+    // v0.10.1: the live template backend ships with the probe. It is
+    // `null` here — this server boots with `[templates]` disabled; the
+    // metrics and sidecar suites assert the live values.
+    assert!(
+        body.get("template_backend").is_some(),
+        "the template_backend field must be present"
+    );
 }
 
 #[tokio::test]

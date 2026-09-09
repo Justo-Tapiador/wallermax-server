@@ -106,6 +106,8 @@ jobs:
           curl -fsS http://127.0.0.1:8080/health
           echo
           curl -fsS http://127.0.0.1:8080/metrics | grep -F 'wallermax_uptime_seconds'
+          # v0.10.1: the backend gauge must report the sidecar live.
+          curl -fsS http://127.0.0.1:8080/metrics | grep -F 'wallermax_template_backend{backend="sidecar"} 1'
           curl -fsS -o /dev/null -w 'static index: %{http_code}\n' http://127.0.0.1:8080/
 
           # v0.10.0: the template backend must be the Node sidecar inside

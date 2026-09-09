@@ -170,6 +170,66 @@ async fn the_index_lists_the_metrics_endpoint_while_enabled() {
     assert!(endpoints.iter().any(|endpoint| endpoint == "GET /metrics"));
 }
 
+#[tokio::test]
+async fn the_template_backend_gauge_matches_health() {
+    // v0.10.1: templates enabled (backend = "auto") so a live backend
+    // exists — the sidecar while Node answers, boa otherwise — and the
+    // gauge must agree with whatever `/health` reports on this host.
+    let dir =
+        std::env::temp_dir().join(format!("wallermax-metrics-backend-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("static")).expect("static dir create");
+    std::fs::create_dir_all(dir.join("views")).expect("views dir create");
+    std::fs::create_dir_all(dir.join("modules")).expect("modules dir create");
+
+    let mut config = wallermax_config();
+    config.static_files.enabled = true;
+    config.static_files.root_dir = dir.join("static").to_string_lossy().into_owned();
+    config.templates.enabled = true;
+    config.templates.views_dir = dir.join("views").to_string_lossy().into_owned();
+    config.templates.modules_dir = dir.join("modules").to_string_lossy().into_owned();
+    config.metrics.enabled = true;
+    let server = TestServer::start_with_config(config).await;
+
+    let health: Value = reqwest::get(server.url("/health"))
+        .await
+        .expect("health request succeeds")
+        .json()
+        .await
+        .expect("health JSON");
+    let backend = health["template_backend"]
+        .as_str()
+        .expect("the template_backend field names the live backend");
+    assert!(
+        backend == "boa" || backend == "sidecar",
+        "unexpected backend: {backend}"
+    );
+
+    let body = reqwest::get(server.url("/metrics"))
+        .await
+        .expect("metrics request succeeds")
+        .text()
+        .await
+        .expect("metrics body");
+
+    // The live backend is 1, the other half of the pair is 0 —
+    // whichever way "auto" resolved on this host.
+    let other = if backend == "boa" { "sidecar" } else { "boa" };
+    assert!(
+        body.contains(&format!(
+            "wallermax_template_backend{{backend=\"{backend}\"}} 1"
+        )),
+        "live backend missing in {body}"
+    );
+    assert!(
+        body.contains(&format!(
+            "wallermax_template_backend{{backend=\"{other}\"}} 0"
+        )),
+        "inactive backend must stay at 0 in {body}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Base config without database/auth (plain HTTP stack).
 fn wallermax_config() -> wallermax_server::config::AppConfig {
     wallermax_server::config::AppConfig::default()

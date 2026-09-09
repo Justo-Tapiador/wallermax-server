@@ -16,6 +16,12 @@
 //! | `wallermax_rate_limited_requests_total`    | counter   | —               |
 //! | `wallermax_uptime_seconds`                 | gauge     | —               |
 //! | `wallermax_registered_users`               | gauge     | — (auth only)   |
+//! | `wallermax_template_backend`               | gauge     | `backend`       |
+//!
+//! `wallermax_template_backend` (v0.10.1) is a 0/1 pair over the
+//! `boa`/`sidecar` labels: the backend currently serving renders is
+//! `1`, the other `0` (both `0` while `[templates]` is disabled), so
+//! either half can be alerted on.
 //!
 //! On Linux the standard `process_*` collectors (CPU, memory, file
 //! descriptors, ...) are registered as well; they are unavailable on
@@ -26,8 +32,8 @@
 //! `GET /api/stats`.
 
 use prometheus::{
-    Encoder, Gauge, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, Opts,
-    Registry, TextEncoder,
+    Encoder, Gauge, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
+    Opts, Registry, TextEncoder,
 };
 
 /// Content type of the exposition payload (Prometheus text format).
@@ -42,6 +48,7 @@ pub struct Metrics {
     rate_limited_total: IntCounter,
     uptime_seconds: Gauge,
     registered_users: Option<IntGauge>,
+    template_backend: IntGaugeVec,
 }
 
 impl Metrics {
@@ -96,6 +103,15 @@ impl Metrics {
             registry.register(Box::new(gauge.clone()))?;
         }
 
+        let template_backend = IntGaugeVec::new(
+            Opts::new(
+                "wallermax_template_backend",
+                "Whether the .jhs rendering backend is live: 1 on the backend currently serving renders, 0 on the other (both 0 while templates are disabled).",
+            ),
+            &["backend"],
+        )?;
+        registry.register(Box::new(template_backend.clone()))?;
+
         // Process collectors exist on Linux only; the feature is
         // enabled for the crate but the module is cfg-gated upstream.
         #[cfg(target_os = "linux")]
@@ -113,6 +129,7 @@ impl Metrics {
             rate_limited_total,
             uptime_seconds,
             registered_users,
+            template_backend,
         })
     }
 
@@ -136,8 +153,9 @@ impl Metrics {
 
     /// Renders the exposition payload.
     ///
-    /// `uptime_secs` and `registered_users` are refreshed before
-    /// gathering so the gauges are exact at scrape time.
+    /// `uptime_secs`, `registered_users` and `template_backend` are
+    /// refreshed before gathering so the gauges are exact at scrape
+    /// time.
     ///
     /// # Errors
     ///
@@ -146,6 +164,7 @@ impl Metrics {
         &self,
         uptime_secs: f64,
         registered_users: Option<i64>,
+        template_backend: Option<&str>,
     ) -> Result<String, String> {
         self.uptime_seconds.set(uptime_secs);
         if let Some(count) = registered_users {
@@ -153,6 +172,20 @@ impl Metrics {
                 gauge.set(count.max(0));
             }
         }
+
+        // v0.10.1: the live template backend as a 0/1 pair, so either
+        // half can be alerted on (sidecar down => boa fallback).
+        // "unavailable" (strict spawn failed) and `None` ([templates]
+        // disabled) both render as "no backend is serving".
+        let (sidecar, boa) = match template_backend {
+            Some("sidecar") => (1, 0),
+            Some("boa") => (0, 1),
+            _ => (0, 0),
+        };
+        self.template_backend
+            .with_label_values(&["sidecar"])
+            .set(sidecar);
+        self.template_backend.with_label_values(&["boa"]).set(boa);
 
         let families = self.registry.gather();
         let mut buffer = Vec::new();
@@ -184,13 +217,17 @@ mod tests {
         metrics.record_request("POST", 404, 0.25);
         metrics.record_rate_limited();
 
-        let body = metrics.render(12.5, None).expect("renders");
+        let body = metrics
+            .render(12.5, None, Some("sidecar"))
+            .expect("renders");
         assert!(body.contains("# HELP wallermax_requests_total"));
         assert!(body.contains("wallermax_requests_total{code=\"200\",method=\"GET\"} 1"));
         assert!(body.contains("wallermax_requests_total{code=\"404\",method=\"POST\"} 1"));
         assert!(body.contains("wallermax_rate_limited_requests_total 1"));
         assert!(body.contains("wallermax_uptime_seconds 12.5"));
         assert!(!body.contains("wallermax_registered_users"));
+        assert!(body.contains("wallermax_template_backend{backend=\"sidecar\"} 1"));
+        assert!(body.contains("wallermax_template_backend{backend=\"boa\"} 0"));
     }
 
     #[test]
@@ -201,21 +238,41 @@ mod tests {
         metrics.record_request("GET", 200, 0.002);
         metrics.record_request("GET", 500, 0.003);
 
-        let body = metrics.render(1.0, None).expect("renders");
+        let body = metrics.render(1.0, None, None).expect("renders");
         assert!(body.contains("wallermax_requests_total{code=\"200\",method=\"GET\"} 2"));
         assert!(body.contains("wallermax_requests_total{code=\"500\",method=\"GET\"} 1"));
         assert!(body.contains("wallermax_request_duration_seconds_count{method=\"GET\"} 3"));
+        assert!(body.contains("wallermax_template_backend{backend=\"sidecar\"} 0"));
+        assert!(body.contains("wallermax_template_backend{backend=\"boa\"} 0"));
     }
 
     #[test]
     fn registered_users_gauge_tracks_auth() {
         let metrics = Metrics::new(true).expect("metrics build");
 
-        let body = metrics.render(2.0, Some(7)).expect("renders");
+        let body = metrics.render(2.0, Some(7), Some("boa")).expect("renders");
         assert!(body.contains("wallermax_registered_users 7"));
+        assert!(body.contains("wallermax_template_backend{backend=\"boa\"} 1"));
 
-        let refreshed = metrics.render(3.0, Some(8)).expect("renders");
+        let refreshed = metrics.render(3.0, Some(8), Some("boa")).expect("renders");
         assert!(refreshed.contains("wallermax_registered_users 8"));
+    }
+
+    #[test]
+    fn template_backend_gauge_reports_the_live_backend() {
+        let metrics = Metrics::new(false).expect("metrics build");
+
+        let sidecar = metrics.render(1.0, None, Some("sidecar")).expect("renders");
+        assert!(sidecar.contains("wallermax_template_backend{backend=\"sidecar\"} 1"));
+        assert!(sidecar.contains("wallermax_template_backend{backend=\"boa\"} 0"));
+
+        let fallback = metrics.render(2.0, None, Some("boa")).expect("renders");
+        assert!(fallback.contains("wallermax_template_backend{backend=\"boa\"} 1"));
+        assert!(fallback.contains("wallermax_template_backend{backend=\"sidecar\"} 0"));
+
+        let disabled = metrics.render(3.0, None, None).expect("renders");
+        assert!(disabled.contains("wallermax_template_backend{backend=\"boa\"} 0"));
+        assert!(disabled.contains("wallermax_template_backend{backend=\"sidecar\"} 0"));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 [![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![Built with Axum](https://img.shields.io/badge/Built%20with-Axum%200.8-blueviolet)](https://github.com/tokio-rs/axum)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
-[![Roadmap](https://img.shields.io/badge/Roadmap-All%205%20phases%20done-green)](#roadmap)
+[![Roadmap](https://img.shields.io/badge/Roadmap-All%207%20phases%20done-green)](#roadmap)
 
 <div align="left">
 <p><img src="ws.png" width="482" alt="IA-SO BROODER"></p>
@@ -11,7 +11,7 @@
 
 > A modular, secure and high-performance web server written in Rust.
 
-**Status: v0.9.0 — the four roadmap phases, a dynamic template engine with require(), browser sessions, and a small built-in CMS.** Phase 4 added rotating
+**Status: v0.10.1 — the roadmap phases done, a dynamic template engine with require() running on the original node-jhs2 engine, browser sessions, and a small built-in CMS.** Phase 4 added rotating
 refresh tokens with family revocation, a Prometheus `/metrics` endpoint, HTTPS via
 rustls (plus an HTTP-to-HTTPS redirect listener), trusted-proxy `X-Forwarded-For`
 parsing, a multi-stage Docker image with a compose example and a GitHub Actions CI
@@ -23,8 +23,12 @@ login/registration modals, a JavaScript-free admin panel for content and account
 and v0.9.0 brings `require()` back to the templates — a native module bridge
 with a configurable forbidden-modules banner, the `crypto` polyfill,
 CommonJS modules under `modules/`, plus `res.redirect()` and the `req`
-global — see
-[README-jhs-engine.md](README-jhs-engine.md) and the [roadmap](#roadmap).
+global. v0.10.0 moves every render onto a supervised **Node sidecar**
+running the **original node-jhs2 engine** (`[templates] backend =
+auto | boa | sidecar`), and v0.10.1 exposes the live backend through
+`GET /health` and the `wallermax_template_backend` metric — see
+[README-jhs-engine.md](README-jhs-engine.md),
+[Template backends](#template-backends-boa-and-the-node-sidecar-v0100) and the [roadmap](#roadmap).
 
 ## Table of contents
 
@@ -34,6 +38,7 @@ global — see
 - [Configuration](#configuration)
 - [HTTP API](#http-api)
 - [Dynamic templates (.jhs)](#dynamic-templates-jhs)
+- [Template backends: boa and the Node sidecar (v0.10.0)](#template-backends-boa-and-the-node-sidecar-v0100)
 - [Refresh tokens](#refresh-tokens)
 - [Browser sessions (v0.7.0)](#browser-sessions-v070)
 - [The CMS (v0.8.0)](#the-cms-v080)
@@ -92,6 +97,18 @@ global — see
   global, loop-iteration bounds, mtime-based recompilation, view
   auto-routing and `console.*` routed to the structured logs. See
   [README-jhs-engine.md](README-jhs-engine.md).
+- **Pluggable template backends** (v0.10.0) — every render in the process
+  (public `.jhs`, auto-routed views, CMS page bodies) can flow through a
+  supervised **Node sidecar** running the original node-jhs2 engine
+  (vendored in `sidecar/`, no npm install): `[templates] backend =
+  auto` (the default — sidecar with transparent boa fallback and
+  automatic recovery), `boa` (zero Node, the hardened sandbox) or
+  `sidecar` (strict — the server refuses to start without it). Real
+  `require()` built-ins behind the `forbidden_modules` banner, a
+  wall-clock hard-kill budget for runaway renders, a 13-check startup
+  selftest, and the live backend visible in `GET /health` plus the
+  `wallermax_template_backend` metric (v0.10.1). See
+  [Template backends](#template-backends-boa-and-the-node-sidecar-v0100).
 - **Refresh tokens** — long-lived opaque sessions (256-bit, stored only as
   SHA-256 hashes) with rotation on every refresh and automatic family
   revocation when a retired token is replayed; `POST /api/auth/logout`
@@ -127,9 +144,11 @@ global — see
   matrix, Docker build with in-container smoke test).
 - **Storage-agnostic** — handlers depend on the `UserRepository` trait, not
   on SQLite; the engine can be swapped without touching HTTP code.
-- **Tested** — 354 tests: unit tests per module plus end-to-end integration
+- **Tested** — 413 tests: unit tests per module plus end-to-end integration
   tests that boot the *real* server (plain HTTP and HTTPS) and speak HTTP
-  to it — including a cookie-jar "browser" battery for the CMS.
+  to it — including a cookie-jar "browser" battery for the CMS and the
+  Node sidecar battery (spawn, selftest, parity, hard-kill, respawn)
+  whenever Node is on `PATH`.
 
 ## Requirements
 
@@ -142,23 +161,30 @@ global — see
   compiled from source). Visual Studio 2022's MSVC on Windows, or
   `gcc`/`clang` elsewhere.
 - Docker (optional) — only to build/run the container image.
+- Node.js **18 or newer** (optional) — only while `[templates] backend =
+  "sidecar"` or `"auto"` (the default): the sidecar runs the original
+  node-jhs2 engine as a supervised child process. `backend = "boa"`
+  needs no Node at all, and the Docker runtime image already ships
+  Node.js, so containers are covered either way.
 - No other runtime requirements.
 
 ## Getting started
 
 ```console
 $ cargo run
-   Compiling wallermax-server v0.8.0
+   Compiling wallermax-server v0.10.1
     Finished dev [unoptimized + debuginfo] target(s)
      Running `target/debug/wallermax-server`
 
 INFO wallermax_server::server: static file serving enabled root_dir=public index_file=index.html
 INFO wallermax_server::server: dynamic template rendering enabled views_dir=views auto_escape=true cache=true
+INFO wallermax_server::state: template backend: auto (Node sidecar, boa fallback)
+INFO wallermax_server::template_engine::sidecar: the JHS sidecar is up: templates render on the original node-jhs2 engine, addr: 127.0.0.1:45145, workers: 2, budget_ms: 5000
 INFO wallermax_server::server: sqlite pool ready (migrations applied) url=sqlite://wallermax.db?mode=rwc max_connections=5
 INFO wallermax_server::server: authentication enabled (the first registered user becomes the admin) registration_enabled=true token_ttl_secs=3600 refresh_tokens_enabled=true refresh_token_ttl_secs=2592000
 INFO wallermax_server::server: cms enabled (public pages at /p, admin panel at /admin; content and users — server configuration stays in wallermax.toml)
 INFO wallermax_server::server: prometheus metrics enabled path=/metrics
-INFO wallermax_server::server: wallermax-server listening address=127.0.0.1:8080 version=0.8.0
+INFO wallermax_server::server: wallermax-server listening address=127.0.0.1:8080 version=0.10.1
 INFO wallermax_server::server: route map ready routes="GET / (static) | GET /api | GET /health | GET /api/stats | POST /api/echo | GET /metrics | POST /api/auth/register | POST /api/auth/login | GET /api/auth/me | POST /api/auth/refresh | POST /api/auth/logout | POST /api/auth/logout_all | GET /api/admin/users | GET /p/{slug} | GET /admin | POST /perfil/password | + static files | + .jhs templates"
 ```
 
@@ -186,17 +212,23 @@ $ curl http://127.0.0.1:8080/api
 {"service":"wallermax-server",...}
 
 $ curl http://127.0.0.1:8080/health
-{"status":"ok","version":"0.8.0"}
+{"status":"ok","version":"0.10.1","template_backend":"sidecar"}
 
 $ curl http://127.0.0.1:8080/hello.jhs     # .jhs template, rendered on the fly
 <h1>Hola desde una plantilla .jhs</h1>
 ...                                       # demo; see README-jhs-engine.md
+
+$ curl "http://127.0.0.1:8080/sidecar-check.jhs?probe=7"   # sidecar probe (v0.10.0)
+sidecar-ok:7
 
 $ curl http://127.0.0.1:8080/metrics | head -4
 # HELP wallermax_requests_total Requests served, by HTTP method and response status code.
 # TYPE wallermax_requests_total counter
 wallermax_requests_total{code="200",method="GET"} 3
 ...
+$ curl http://127.0.0.1:8080/metrics | grep template_backend   # which engine is live (v0.10.1)
+wallermax_template_backend{backend="sidecar"} 1
+wallermax_template_backend{backend="boa"} 0
 
 $ curl -X POST http://127.0.0.1:8080/api/auth/register \
     -H "Content-Type: application/json" \
@@ -316,6 +348,13 @@ each middleware's tuning values live in their own section.
 | `static.enabled` | bool | `false` (defaults) / `true` (wallermax.toml) | Serve static files for otherwise unmatched paths. |
 | `static.root_dir` | string | `public` | Directory holding the assets; must exist when enabled. |
 | `static.index_file` | string | `index.html` | File served for `GET /` (inside `root_dir`). |
+| `templates.backend` | string | `auto` | Which engine renders `.jhs`: `auto` / `boa` / `sidecar` — see [Template backends](#template-backends-boa-and-the-node-sidecar-v0100). |
+| `templates.sidecar.node_command` | string | `node` | Node.js binary the sidecar spawns. |
+| `templates.sidecar.script` | string | `sidecar/jhs-sidecar.mjs` | Sidecar entry point (the loopback HTTP service). |
+| `templates.sidecar.workers` | integer | `2` | Render worker pool size (one worker = one render). |
+| `templates.sidecar.startup_timeout_ms` | integer | `8000` | Budget for spawn + READY handshake + the selftest. |
+| `templates.sidecar.request_timeout_ms` | integer | `10000` | Client-side timeout per render (must exceed `render_budget_ms`). |
+| `templates.sidecar.render_budget_ms` | integer | `5000` | Wall-clock hard-kill per render — runaway loops die with the worker, not the server. |
 
 ### Environment variable overrides
 
@@ -341,7 +380,7 @@ recommended production setup.
 |--------|------|------|-------------|
 | `GET` | `/` | — | Static index file while `[static]` is on; JSON service index otherwise. |
 | `GET` | `/api` | — | Service index: name, version and endpoint discovery. |
-| `GET` | `/health` | — | Liveness probe. |
+| `GET` | `/health` | — | Liveness probe (version + the live `template_backend`). |
 | `GET` | `/api/stats` | — | Runtime metrics (+ `registered_users` while auth is on). |
 | `POST` | `/api/echo` | — | Debug utility: reads and describes the request body. |
 | `POST` | `/api/auth/register` | — | Create an account; the **first** one becomes the admin. JSON **and** form bodies: JSON answers `201`, the form path logs the fresh account in (cookie + `303`). |
@@ -369,13 +408,13 @@ Example responses:
 
 ```json
 // GET /api
-{"service":"wallermax-server","version":"0.5.0","description":"...","endpoints":["GET / (static index + files)","GET /api","GET /health","GET /api/stats","POST /api/echo","GET /metrics","POST /api/auth/register","POST /api/auth/login","GET /api/auth/me","GET /api/admin/users","POST /api/auth/refresh","POST /api/auth/logout","POST /api/auth/logout_all"]}
+{"service":"wallermax-server","version":"0.10.1","description":"...","endpoints":["GET / (static index + files)","GET /api","GET /health","GET /api/stats","POST /api/echo","GET /metrics","POST /api/auth/register","POST /api/auth/login","GET /api/auth/me","GET /api/admin/users","POST /api/auth/refresh","POST /api/auth/logout","POST /api/auth/logout_all"]}
 
 // GET /health
-{"status":"ok","version":"0.5.0"}
+{"status":"ok","version":"0.10.1","template_backend":"sidecar"}
 
 // GET /api/stats
-{"service":"wallermax-server","version":"0.5.0","uptime_seconds":10.244,"total_requests":12,"requests_per_second":1.171,"rate_limited_requests":0,"registered_users":2}
+{"service":"wallermax-server","version":"0.10.1","uptime_seconds":10.244,"total_requests":12,"requests_per_second":1.171,"rate_limited_requests":0,"registered_users":2}
 
 // POST /api/echo  (Content-Type: text/plain, body "hello wallermax")
 {"received_bytes":15,"content_type":"text/plain","body":"hello wallermax"}
@@ -460,6 +499,87 @@ renders additionally receive `path` (the request path), `query` (the
 query parameters) and `pages` (the published CMS pages), and templates
 embed shared partials with `<?jhs include("partials/header") ?>` —
 see [README-jhs-engine.md](README-jhs-engine.md).
+
+## Template backends: boa and the Node sidecar (v0.10.0)
+
+The `.jhs` language is stable; the *engine* behind it is a choice.
+Since v0.10.0 every render in the process — public `.jhs` files,
+auto-routed views and CMS page bodies — flows through one
+`TemplateRenderer` seam with two implementations:
+
+| | **boa** (the sandbox since v0.5.0) | **sidecar** (Node) |
+|---|---|---|
+| Runtime | in-process, `#![forbid(unsafe_code)]` | a supervised child process, `node` |
+| Engine | the faithful Rust port on [boa_engine](https://github.com/boa-dev/boa) | **the original node-jhs2 2.1.0**, vendored in `sidecar/engine.js` (pinned, no npm install) |
+| `require('url')`, `require('crypto')`, `require('path')` | polyfill / module banner | **real Node built-ins** (behind the same `forbidden_modules` banner) |
+| `Buffer` | absent (sandboxed) | absent (documented divergence — see `sidecar/README.md`) |
+| Fidelity | hardened port, documented divergences | byte-for-byte upstream semantics |
+| Node.js needed | no | yes (18+; the Docker image ships it) |
+
+Choose with `[templates] backend`:
+
+| Value | Behaviour |
+|-------|-----------|
+| `auto` (the default) | the sidecar while Node is available; a **transparent fallback to boa** when the child dies, with an automatic recovery probe (~10 s cooldown) bringing it back. |
+| `boa` | the in-process sandbox, zero Node — the hardened behaviour of v0.5.0–v0.9.0. |
+| `sidecar` | strict: the server **refuses to start** without a live, selftested sidecar — a loud boot failure instead of mysterious 500s. |
+
+```toml
+[templates]
+backend = "auto"        # auto (default) | boa | sidecar
+
+[templates.sidecar]
+node_command = "node"           # Node.js binary
+script = "sidecar/jhs-sidecar.mjs"
+workers = 2                     # render workers (one worker = one render)
+startup_timeout_ms = 8000       # spawn + READY handshake + selftest
+request_timeout_ms = 10000      # client-side timeout (> render_budget)
+render_budget_ms = 5000         # hard-kill: runaway renders die here
+```
+
+What the sidecar adds on top of the engine itself:
+
+- **Real `require()` built-ins** — `url`, `crypto`, `path`… resolve to
+  actual Node modules behind the same `forbidden_modules` banner (the
+  port's polyfills are not in play), and local CommonJS modules under
+  `modules/` keep working.
+- **Upstream `include()` semantics**, resolved at compile time exactly
+  the way node-jhs2 resolves them.
+- **Per-render isolation and capture** — a fresh worker context per
+  render, `console.*` captured into the structured logs, and
+  `res.redirect()` honoured as a real HTTP redirect.
+- **A wall-clock hard-kill budget** (`render_budget_ms`): an infinite
+  loop costs one worker, which is respawned — never the request
+  handler, never the server.
+- **A 13-check selftest at startup** (automatic escaping, the `raw()`
+  sentinel, `console` capture, data escaping, `res.redirect` and the
+  open-redirect rejection, `require` built-ins, the forbid banner, hot
+  reload by mtime, the hard-kill, the worker respawn…): the backend is
+  only accepted when everything passes.
+
+**Is the sidecar actually serving?** Two one-liners (v0.10.1):
+
+```console
+$ curl http://127.0.0.1:8080/health
+{"status":"ok","version":"0.10.1","template_backend":"sidecar"}
+
+$ curl http://127.0.0.1:8080/metrics | grep template_backend
+wallermax_template_backend{backend="sidecar"} 1
+wallermax_template_backend{backend="boa"} 0
+```
+
+And one public page that only renders green through Node:
+
+```console
+$ curl "http://127.0.0.1:8080/sidecar-check.jhs?probe=7"
+sidecar-ok:7            # boa would answer the module banner as a 500
+```
+
+Operational details — the loopback protocol, the timing-safe token
+handshake, worker respawn, hardening notes and the documented
+divergences — live in **[sidecar/README.md](sidecar/README.md)**; the
+template language itself is
+[README-jhs-engine.md](README-jhs-engine.md).
 
 ## Refresh tokens
 
@@ -660,6 +780,15 @@ Flip `[metrics] enabled = true` (on in the shipped `wallermax.toml`) and
 | `wallermax_rate_limited_requests_total`  | counter   | —               |
 | `wallermax_uptime_seconds`               | gauge     | —               |
 | `wallermax_registered_users`             | gauge     | — (auth only)   |
+| `wallermax_template_backend`             | gauge     | `backend`       |
+
+`wallermax_template_backend{backend="sidecar"|"boa"}` (v0.10.1) is a
+0/1 pair refreshed at scrape time: the backend currently serving
+renders is `1`, the other `0` (both `0` while `[templates]` is
+disabled). In `auto` mode a sidecar failure flips it to `boa` — if
+Node-side rendering is a requirement for you, alert on
+`wallermax_template_backend{backend="sidecar"} == 0`. It pairs with
+the `template_backend` field of `GET /health`.
 
 On Linux the standard `process_*` collectors (CPU, memory, file
 descriptors) are registered as well. The request counters and the latency
@@ -742,10 +871,11 @@ The repository ships a multi-stage `Dockerfile`:
   release binary with `--locked`; dependencies are cached in their own
   layer so source-only changes rebuild in seconds.
 - **Runtime stage** — `debian:bookworm-slim` with only the binary, the
-  default configuration and `public/`; runs as an **unprivileged user**
-  (`wallermax`, uid 10001); SQLite lives on the **`/data` volume**; the
-  binary is PID 1 and handles `SIGTERM` gracefully (so `docker stop`
-  drains in-flight requests).
+  default configuration, `public/` and `sidecar/` — plus **Node.js**
+  (from Debian), so the sidecar backend works in containers. It runs
+  as an **unprivileged user** (`wallermax`, uid 10001); SQLite lives on
+  the **`/data` volume**; the binary is PID 1 and handles `SIGTERM`
+  gracefully (so `docker stop` drains in-flight requests).
 
 ```console
 $ docker build -t wallermax-server .
@@ -771,8 +901,12 @@ orchestrator. A `compose.yaml` example with a named volume is included.
 - **test** — `cargo test --locked` on **Linux and Windows** (the two
   platforms the project is developed against), with cargo caching;
 - **docker** — builds the image (which doubles as the MSRV check, since
-  the Dockerfile pins 1.88) and smoke-tests `/health`, `/metrics` and
-  the static index inside the running container.
+  the Dockerfile pins 1.88) and smoke-tests `/health`, `/metrics`, the
+  static index **and the live Node sidecar** inside the running
+  container: `sidecar-check.jhs` must answer `sidecar-ok:7` and the
+  `wallermax_template_backend{backend="sidecar"} 1` gauge must be up
+  (the boa sandbox cannot answer either — `sidecar-check.jhs` calls
+  `require('url')`).
 
 ## Architecture
 
@@ -817,6 +951,7 @@ through `[middleware]` in the configuration.
 | `src/auth.rs` | Argon2id hashing, JWT access tokens, refresh token primitives. |
 | `src/db.rs` | SQLite pool, embedded migrations, `UserRepository` trait + impl. |
 | `src/metrics.rs` | Prometheus registry and exposition. |
+| `src/template_engine/` | `.jhs` parsing, the boa sandbox, the `TemplateRenderer` seam and the Node sidecar client. |
 | `src/extractors.rs` | `AuthUser` / `AdminUser` / `JsonBody` request extractors. |
 | `src/routes/*` | One module per feature area, merged in `routes/mod.rs`. |
 | `src/middleware/*` | One module per middleware, composed in `middleware/mod.rs`. |
@@ -954,12 +1089,18 @@ wallermax-server/
 │   └── 0002_create_refresh_tokens.sql
 ├── public/               # static site root ([static] root_dir)
 │   ├── index.html        #   the page served at GET / ("Hello, world!")
-│   └── hello.jhs         #   demo template, rendered at GET /hello.jhs
+│   ├── hello.jhs         #   demo template, rendered at GET /hello.jhs
+│   └── sidecar-check.jhs #   public sidecar probe: green only through Node
 ├── views/                # view templates ([templates] views_dir)
 │   ├── index.jhs         #   root fallback when public/index.html is absent
 │   ├── contacto.jhs      #   auto-routed at GET /contacto
 │   ├── perfil.jhs        #   GET /perfil — the `user` global demo
 │   └── login.jhs         #   GET /login — the no-JavaScript login form
+├── sidecar/              # the Node sidecar ([templates] backend = sidecar | auto)
+│   ├── jhs-sidecar.mjs   #   loopback HTTP service: token, worker pool, respawn
+│   ├── render-worker.mjs #   one worker = one render (require bridge, capture)
+│   ├── engine.js         #   vendored node-jhs2 2.1.0 (pinned, no npm install)
+│   └── README.md         #   sidecar operations guide
 ├── LICENSE               # MIT
 ├── README.md
 ├── README-jhs-engine.md  # the .jhs template engine guide
@@ -979,7 +1120,7 @@ wallermax-server/
 │   ├── logging.rs        # tracing setup
 │   ├── server.rs         # bootstrap, TLS, graceful shutdown
 │   ├── util.rs           # tiny shared helpers
-│   ├── template_engine/  # .jhs engine: parser + boa sandbox + cache
+│   ├── template_engine/  # .jhs engine: parser + boa sandbox + renderer trait + sidecar client
 │   ├── routes/           # one file per feature area (index, health, stats,
 │   │                     #   echo, auth, admin, static_files, metrics)
 │   └── middleware/       # one file per middleware (incl. templates.rs)
@@ -996,6 +1137,8 @@ wallermax-server/
     ├── tls.rs            # HTTPS serving + redirect listener tests
     ├── templates.rs       # .jhs HTTP contract integration tests
     ├── template_fidelity.rs  # engine fidelity vs the original node-jhs2
+    ├── sidecar.rs        # Node sidecar battery — spawn, selftest, parity,
+    │                      #   hard-kill, respawn (skipped without node)
     └── config_env.rs     # environment override semantics
 ```
 
@@ -1003,14 +1146,15 @@ wallermax-server/
 
 ```console
 $ cargo test
-running 191 tests ... ok      # unit tests (config, state, error, limiter,
+running 231 tests ... ok      # unit tests (config, state, error, limiter,
                                #   proxy CIDRs, auth + refresh primitives,
                                #   repository incl. refresh token store and
-                               #   the page repository, metrics registry,
+                               #   the page repository, metrics registry
+                               #   incl. the template backend gauge,
                                #   server helpers, middleware, template
                                #   engine + parser + include() + session
                                #   cookie helpers, login helpers, CMS
-                               #   validation helpers)
+                               #   validation helpers, sidecar client)
 running 4 tests ... ok          # config_env: environment override semantics
 running 30 tests ... ok         # auth: register/login/profile/admin flows,
                                #   the session cookie (set/authenticate/
@@ -1028,9 +1172,11 @@ running 12 tests ... ok         # refresh_tokens: rotation, reuse detection,
                                #   family revocation, logout/logout_all,
                                #   expiry, disabled mode, multi-rotation
 running 11 tests ... ok         # http_api: real server + real HTTP requests
+                               #   (+ the health probe's template_backend)
 running 15 tests ... ok         # security: rate limit, CORS, body limit, ...
-running 7 tests ... ok          # metrics: exposition format, headers, path,
-                               #   scrape exemption, registered users gauge
+running 8 tests ... ok          # metrics: exposition format, headers, path,
+                               #   scrape exemption, registered users gauge,
+                               #   the template backend gauge vs /health
 running 6 tests ... ok          # proxy: XFF parsing, trust boundaries,
                                #   per-client buckets via forwarded IPs
 running 16 tests ... ok         # static_files: index, assets, 404/405,
@@ -1039,14 +1185,22 @@ running 6 tests ... ok          # tls: HTTPS serving, auth over TLS,
                                #   strict-client rejection, 308 redirects
 running 1 test ... ok           # template_fidelity: 20-case battery vs the
                                #   original node-jhs2 engine
-running 30 tests ... ok         # templates: rendering, view auto-routing,
+running 37 tests ... ok         # templates: rendering, view auto-routing,
                                #   precedence, error envelopes, mtime
                                #   reload, loop bounds, disabled mode,
                                #   cookie personalisation + /login view
+running 11 tests ... ok         # sidecar: the Node sidecar battery — spawn
+                               #   + selftest, renderer semantics, require
+                               #   built-ins, the hard-kill budget, worker
+                               #   respawn, strict/auto behaviour and the
+                               #   boa/sidecar HTTP parity (skipped without
+                               #   node on PATH)
 ```
 
-**354 tests total**, all of them plain `cargo test` (no docker, no
-network). The integration tests boot the exact same application the
+**413 tests total**, all of them plain `cargo test` (no docker, no
+network). The sidecar battery needs `node` on `PATH` and skips
+gracefully otherwise — mirroring the `auto` backend's fallback. The
+integration tests boot the exact same application the
 binary serves (`server::build_state` + `server::build_app`, with
 `build_app_with_routes` available for injecting custom routes) on an
 ephemeral port and assert on real HTTP responses: status codes, JSON
@@ -1235,6 +1389,28 @@ fresh temporary asset directory, cleaned up afterwards.
       JavaScript), form registration with auto-login, error redirects
       that re-open the modal, idempotent form logout, `secure_cookies`
       (auto/always/never) fixing the plain-HTTP `Secure` gotcha.
+
+### Phase 7 — Template backends (done, v0.10.0)
+
+- [x] The `TemplateRenderer` trait: one seam for public `.jhs` files,
+      auto-routed views and CMS page bodies alike; `JhsEngine` (boa),
+      `SidecarRenderer` (Node) and `AutoRenderer` (sidecar with
+      transparent fallback) behind it, selected by
+      `[templates] backend = auto | boa | sidecar`.
+- [x] The Node sidecar: a supervised child with a READY handshake and a
+      timing-safe token over loopback HTTP (std-only client — zero new
+      Rust dependencies), a worker pool with wall-clock hard-kill and
+      respawn, running the **original node-jhs2 2.1.0** vendored in
+      `sidecar/engine.js` (pinned, no npm install), real `require()`
+      built-ins behind the `forbidden_modules` banner, per-render
+      `console.*` capture and `res.redirect()`.
+- [x] A 13-check startup selftest gates backend acceptance; strict
+      mode refuses to boot without a live sidecar; `auto` falls back to
+      boa and probes for recovery.
+- [x] v0.10.1: observability — the live backend in `GET /health` and
+      the `wallermax_template_backend` Prometheus gauge; the Docker
+      runtime image ships Node.js and CI's container smoke expects the
+      sidecar answering.
 
 ### Beyond the roadmap (ideas)
 

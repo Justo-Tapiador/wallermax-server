@@ -44,7 +44,11 @@ async fn metrics(State(state): State<AppState>) -> Result<Response, AppError> {
     };
 
     let body = metrics
-        .render(round3(state.uptime().as_secs_f64()), registered_users)
+        .render(
+            round3(state.uptime().as_secs_f64()),
+            registered_users,
+            state.template_backend(),
+        )
         .map_err(|message| {
             tracing::error!(%message, "metrics encoding failed");
             AppError::internal("metrics are unavailable")

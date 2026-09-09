@@ -316,6 +316,30 @@ fn auto_backend_falls_back_to_boa_without_node() {
     assert_eq!(output.html, "fallback42");
 }
 
+#[test]
+fn backend_name_identifies_the_live_backend() {
+    // v0.10.1: `backend_name()` is what `/health` and the
+    // `wallermax_template_backend` gauge read. The boa backend always
+    // identifies itself, no Node required.
+    let fixture = FixtureDir::create("names");
+    assert_eq!(renderer(&fixture.config("boa")).backend_name(), "boa");
+
+    if !node_available() {
+        eprintln!("skipping: no node on PATH");
+        return;
+    }
+    // The strict sidecar backend reports the Node half.
+    assert_eq!(
+        renderer(&fixture.config("sidecar")).backend_name(),
+        "sidecar"
+    );
+    // "auto" resolves to whichever half is currently serving — the
+    // sidecar, while it answers — and the state accessor surfaces the
+    // same value that the health probe and the gauge would report.
+    let state = AppState::new(fixture.config("auto"));
+    assert_eq!(state.template_backend(), Some("sidecar"));
+}
+
 // ── End-to-end: HTTP parity between the boa and sidecar backends ─────
 
 #[tokio::test]
