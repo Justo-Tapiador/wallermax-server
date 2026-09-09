@@ -1,9 +1,6 @@
 # wallermax-server
 
-[![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org)
-[![Built with Axum](https://img.shields.io/badge/Built%20with-Axum%200.8-blueviolet)](https://github.com/tokio-rs/axum)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
-[![Roadmap](https://img.shields.io/badge/Roadmap-All%208%20phases%20done-green)](#roadmap)
+[![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org) [![Built with Axum](https://img.shields.io/badge/Built%20with-Axum%200.8-blueviolet)](https://github.com/tokio-rs/axum) [![License: MIT](https://img.shields.io/badge/License-MIT-blue)](LICENSE) [![Roadmap](https://img.shields.io/badge/Roadmap-All%208%20phases%20done-green)](#roadmap)
 
 <div align="left">
 <p><img src="ws.png" width="482" alt="IA-SO BROODER"></p>
@@ -11,7 +8,8 @@
 
 > A modular, secure and high-performance web server written in Rust.
 
-**Status: v0.11.0 — the roadmap phases done, a dynamic template engine with require() running on the original node-jhs2 engine, browser sessions, and a small built-in CMS that owns the homepage.** Phase 4 added rotating
+**Status: v0.11.0 — the roadmap phases done, a dynamic template engine with require() running on the original node-jhs2 engine, 
+browser sessions, and a small built-in CMS that owns the homepage.** Phase 4 added rotating
 refresh tokens with family revocation, a Prometheus `/metrics` endpoint, HTTPS via
 rustls (plus an HTTP-to-HTTPS redirect listener), trusted-proxy `X-Forwarded-For`
 parsing, a multi-stage Docker image with a compose example and a GitHub Actions CI
@@ -40,6 +38,7 @@ gating and a graceful fallback. See
 - [Requirements](#requirements)
 - [Getting started](#getting-started)
 - [Configuration](#configuration)
+- [Security headers and the CSP cookbook](#security-headers-and-the-csp-cookbook)
 - [HTTP API](#http-api)
 - [Dynamic templates (.jhs)](#dynamic-templates-jhs)
 - [Template backends: boa and the Node sidecar (v0.10.0)](#template-backends-boa-and-the-node-sidecar-v0100)
@@ -382,6 +381,188 @@ Values are parsed automatically (`"9000"` → integer, `"5.5"` → float,
 `"false"` → boolean), which makes this pattern ideal for containers and CI.
 Providing the JWT secret through the environment (rather than a file) is the
 recommended production setup.
+
+## Security headers and the CSP cookbook
+
+The `[security_headers]` middleware is the outermost layer of the pipeline:
+its five headers ride on **every** response — pages, API envelopes, static
+files, even the 404/408/413/429 answers. Four of them (`nosniff`,
+`X-Frame-Options`, `Referrer-Policy`, HSTS) are set-and-forget. The fifth,
+`content_security_policy`, decides what visiting **browsers** may load and
+execute on your pages — and it is the one a site owner will tune.
+
+The one thing to internalize before debugging a "broken" page: the server
+always ships the markup intact. When a `<script>` or a `style="…"`
+attribute seems to do nothing, it is the browser that refused it —
+silently — because of this header. Open the developer console (F12) and it
+will tell you verbatim.
+
+### What the shipped policy allows and blocks
+
+`wallermax.toml` ships:
+
+```toml
+[security_headers]
+content_security_policy = "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+```
+
+which keeps the whole site pure HTML+CSS: JavaScript runs **server-side**
+inside the `.jhs` engine, never in the visitor's browser. Directive by
+directive (anything not named inherits `default-src`):
+
+| Directive | What it governs in the browser | Shipped value | Net effect |
+|-----------|-------------------------------|---------------|------------|
+| `default-src` | Fallback for every directive not named below | `'none'` | Scripts, iframes, fonts, media, `fetch`/XHR and workers are all blocked |
+| `style-src` | Stylesheets, `<style>` blocks, `style="…"` attributes | `'self'` | Only same-origin CSS (`/assets/wallermax.css`) applies — inline styles and `<style>` blocks are refused |
+| `img-src` | `<img>`, CSS background images | `'self' data:` | Same-origin images and `data:` URIs; external hotlinks refused |
+| `form-action` | Where `<form>` may submit | `'self'` | Forms post back to this origin only |
+| `frame-ancestors` | Who may embed **your** pages in an iframe | `'none'` | Nobody (clickjacking shield) |
+| `base-uri` | `<base href>` targets | `'none'` | An injected `<base>` cannot rewrite relative URLs |
+
+(`form-action`, `frame-ancestors` and `base-uri` never inherit from
+`default-src` — that is why the shipped value names them explicitly.)
+
+When something is blocked, the console says so:
+
+```console
+Refused to apply inline style because it violates the following Content
+Security Policy directive: "style-src 'self'". Either the 'unsafe-inline'
+keyword, a hash, or a nonce is required to enable inline execution.
+
+Refused to execute inline script because it violates the following Content
+Security Policy directive: "default-src 'none'".
+
+Refused to display 'https://localhost/p/home' in a frame because it set
+'X-Frame-Options' to 'deny'.
+```
+
+### Applying and verifying a policy
+
+Three places, later layers winning: `wallermax.toml` (the committed product
+default) → the git-ignored `wallermax.local.toml` (personal overrides) →
+`WALLERMAX_SECURITY_HEADERS__CONTENT_SECURITY_POLICY` (environment
+variables, e.g. containers). The configuration is read at startup —
+restart after changing it. An **empty string omits the header entirely**
+(see the last recipe). Verify what you are actually sending:
+
+```console
+$ curl -sD - -o /dev/null https://localhost/p/<slug> | grep -iE 'content-security|x-frame'
+```
+
+(Windows PowerShell: `curl.exe -k -sD - -o NUL https://localhost/p/<slug>`
+and look for the headers in the output.)
+
+### The recipes
+
+Every recipe is a complete drop-in value for
+`security_headers.content_security_policy` — the shipped policy plus
+exactly one concern. Start from the one you need and combine by adding
+directives together (the last recipe shows a realistic combination).
+
+#### Inline styles: `style="…"` and `<style>` blocks
+
+```toml
+content_security_policy = "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+```
+
+Unlocks `style="color:Gold"` in CMS page bodies and `<style>` blocks in
+your own views; the same-origin stylesheet keeps loading. The trade-off:
+inline CSS enables overlay-based UI redressing (a fake login form drawn
+with `position:fixed`), so relax it only when page authors are trusted.
+CSS cannot read cookies or storage, and external `url()` loads still hit
+the `img-src` wall, so classic CSS exfiltration stays contained.
+
+#### Client-side JavaScript
+
+```toml
+content_security_policy = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+```
+
+Unlocks `<script src="/assets/app.js">` served from `public/`. The
+`connect-src 'self'` part is what lets that script talk to the HTTP API
+(`fetch('/api/…')`) — without it the script loads but every request is
+refused. To load from a CDN, extend the source list:
+`script-src 'self' https://cdn.jsdelivr.net` — specific hosts, never `*`.
+Inline `<script>` and `onclick="…"` attributes stay blocked: keep the code
+in files. From this recipe on, the no-JavaScript guarantee is gone —
+`.jhs` auto-escaping still stands, but the CSP no longer backstops it.
+
+#### Embedded content: YouTube, Vimeo, Google Maps
+
+```toml
+content_security_policy = "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; frame-src https://www.youtube-nocookie.com https://player.vimeo.com https://www.google.com"
+```
+
+Unlocks `<iframe>` embeds from the listed hosts
+(`www.youtube-nocookie.com` is the privacy-enhanced YouTube player).
+`frame-src` inherits `'none'` from `default-src`, which is why unlisted
+embeds render as empty rectangles. For self-hosted `<video>`/`<audio>` add
+`media-src 'self'` (or the hosting origin). Note this recipe embeds OTHER
+sites in YOUR pages — the reverse situation has its own recipe below.
+
+#### Web fonts, hosted media and WebSockets
+
+```toml
+content_security_policy = "default-src 'none'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; connect-src 'self' wss://api.example.com"
+```
+
+Google Fonts needs **two** permissions: the stylesheet comes from
+`fonts.googleapis.com` (a `style-src` concern) while the font files
+themselves come from `fonts.gstatic.com` (`font-src`). `connect-src`
+governs `fetch`, XHR and WebSockets — list `wss://` endpoints explicitly
+when your client-side JavaScript talks to a live service.
+
+#### Letting other sites embed yours
+
+```toml
+[security_headers]
+x_frame_options = ""
+content_security_policy = "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors https://partner.example; base-uri 'none'"
+```
+
+Two switches, not one: `frame-ancestors` names who may embed your pages —
+and `x_frame_options` (a **separate** header, still `DENY` from
+`wallermax.toml`) keeps blocking every frame regardless of what the CSP
+allows. Empty the one and narrow the other, or the iframe stays blank with
+a console refusal naming `X-Frame-Options`. `SAMEORIGIN` is the middle
+ground when only your own pages may embed each other.
+
+#### Everything open (last resort)
+
+```toml
+[security_headers]
+x_frame_options = ""
+content_security_policy = ""
+```
+
+An empty value **omits the header** — the browser falls back to its
+defaults and everything loads, which is what most of the web effectively
+runs. The explicit equivalent, for when you want the header present but
+unrestricted:
+
+```toml
+content_security_policy = "default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; form-action *; frame-ancestors *; base-uri *"
+```
+
+(`*` does not cover the `data:`/`blob:` schemes, and the last three
+directives never inherit from `default-src`.) What you lose, concretely:
+any script an editor pastes into a CMS page then executes in every
+visitor's browser — the second XSS barrier is gone (`.jhs` auto-escaping
+still stands, and the `HttpOnly` session cookie keeps scripts from
+stealing tokens, but in-page impersonation is possible). Use this to
+experiment locally, not as a resting posture.
+
+#### Putting it together — a realistic policy
+
+A site with its own `/assets/app.js` calling the API, inline styles in CMS
+pages, a YouTube embed and Google Fonts:
+
+```toml
+content_security_policy = "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:; media-src 'self'; frame-src https://www.youtube-nocookie.com; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+```
+
+Scripts still limited to your own origin, styles inline but fonts pinned,
+embeds whitelisted — nothing open to the whole internet.
 
 ## HTTP API
 
