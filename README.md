@@ -28,8 +28,9 @@ auto | boa | sidecar`), and v0.10.1 exposes the live backend through
 the CMS the homepage: `[cms] default_page` renders a database-backed page
 at `GET /` — ahead of the static index file, with the `/p/<slug>` draft
 gating and a graceful fallback. v0.12.0 adds the server-side external
-API proxy: `GET/POST /api/ext/{name}` forwards to operator-named
-upstreams, injecting API keys the browser never sees (and sidestepping
+API proxy: `GET/POST /api/ext/{name}` — optionally with a subpath tail,
+`/api/ext/{name}/{subpath}` — forwards to operator-named upstreams,
+injecting API keys the browser never sees (and sidestepping
 upstream CORS entirely). See
 [README-jhs-engine.md](README-jhs-engine.md),
 [Template backends](#template-backends-boa-and-the-node-sidecar-v0100),
@@ -83,7 +84,10 @@ upstream CORS entirely). See
 - **External API proxy** — `GET/POST /api/ext/{name}` forwards to
   operator-configured upstreams with `${ENV}`-expanded secret headers or
   fixed query parameters (the `keyParam` pattern), so API keys never
-  reach the browser and upstream CORS stops mattering (v0.12.0).
+  reach the browser and upstream CORS stops mattering (v0.12.0);
+  `GET/POST /api/ext/{name}/{subpath}` tails reach deeper upstream
+  routes from the same entry — one `/` joins, `.`/`..` segments are
+  refused, and the tail is re-encoded canonically.
 - **Request body limits** — early `Content-Length` rejection plus
   stream-level enforcement; `413` with the JSON error envelope.
 - **JSON-first** — consistent JSON success bodies and a consistent JSON error
@@ -347,7 +351,7 @@ each middleware's tuning values live in their own section.
 | `external_api.timeout_secs` | integer | `8` | Per-call upstream timeout; must be 1-60 and below `server.request_timeout_secs`. |
 | `external_api.response_limit_bytes` | integer | `262144` | Cap on forwarded upstream bodies (1-16777216); oversized answers become `502`. |
 | `external_api.endpoints` | list of tables | `[]` | Named upstreams; one entry = one route. Empty (the default) keeps the whole family unmounted. |
-| `external_api.endpoints.name` | string | — | Route segment `/api/ext/{name}`; slug rules (lowercase, digits, single dashes), unique. |
+| `external_api.endpoints.name` | string | — | Route segment `/api/ext/{name}` (subpath tails per call reach deeper upstream routes); slug rules (lowercase, digits, single dashes), unique. |
 | `external_api.endpoints.url` | string | — | Absolute upstream `http`/`https` URL; the incoming query string is appended per call. |
 | `external_api.endpoints.auth_required` | bool | `false` | When `true`, calls need a Bearer token or session cookie; the rate limiter applies either way. |
 | `external_api.endpoints.headers` | table | `{}` | Headers attached to every upstream call; values may use `${VAR}` env references. |
@@ -591,7 +595,7 @@ embeds whitelisted — nothing open to the whole internet.
 | `GET` | `/health` | — | Liveness probe (version + the live `template_backend`). |
 | `GET` | `/api/stats` | — | Runtime metrics (+ `registered_users` while auth is on). |
 | `POST` | `/api/echo` | — | Debug utility: reads and describes the request body. |
-| `GET`/`POST` | `/api/ext/{name}` | per endpoint | External API proxy (v0.12.0): forward to the named configured upstream — see [External API proxy](#external-api-proxy-v0120). |
+| `GET`/`POST` | `/api/ext/{name}[/{subpath}]` | per endpoint | External API proxy (v0.12.0): forward to the named configured upstream, with an optional validated subpath appended after its URL — see [External API proxy](#external-api-proxy-v0120). |
 | `POST` | `/api/auth/register` | — | Create an account; the **first** one becomes the admin. JSON **and** form bodies: JSON answers `201`, the form path logs the fresh account in (cookie + `303`). |
 | `POST` | `/api/auth/login` | — | Exchange credentials for a Bearer token (+ refresh token while enabled). JSON **and** `x-www-form-urlencoded` bodies; both set the session cookie (form posts answer `303`). |
 | `GET` | `/api/auth/me` | Bearer / cookie | The caller's profile (fresh from the repository). |
@@ -1044,7 +1048,8 @@ The family mounts only while at least one
 `[[external_api.endpoints]]` entry is configured — the default
 configuration has none, and `/api/ext/...` then answers the standard
 JSON `404`. One entry is one route: `name` becomes the path segment
-(`GET/POST /api/ext/{name}`), validated with the same slug rules the
+(`GET/POST /api/ext/{name}`, with a subpath route below it for deeper
+upstream paths), validated with the same slug rules the
 CMS enforces (lowercase letters, digits, single dashes; unique). The
 `url` must be an absolute `http`/`https` address and is **operator
 territory**: the client picks a *name*, never a URL, so there is no
@@ -1121,11 +1126,57 @@ percent-encoding for the rest) — every pair stays well-formed no matter
 what the browser sends. Endpoints *without* fixed parameters keep the
 byte-for-byte passthrough of earlier releases.
 
+### Subpaths: reaching deeper upstream routes
+
+REST APIs rarely live at a single address: a `/api/v1/<resource>`
+design hangs many routes below its base, and one
+`[[external_api.endpoints]]` entry per resource quickly stops being
+configuration. The subpath route covers them all: everything after the
+endpoint name is joined onto the configured `url`.
+
+```toml
+[[external_api.endpoints]]
+name = "xmdb"
+url = "https://xmdbapi.com/api/v1/"
+auth_required = false
+
+[external_api.endpoints.query]
+apiKey = "${XMDB_API_KEY}"
+```
+
+```js
+// /api/ext/xmdb/movies?q=Alien
+//   → https://xmdbapi.com/api/v1/movies?q=Alien&apiKey=...
+fetch('/api/ext/xmdb/movies?q=Alien')
+  .then(r => r.json())
+  .then(data => /* the upstream JSON, verbatim */);
+```
+
+The join is deliberately boring: exactly one `/` separates the
+configured URL and the subpath whatever trailing slashes the `url`
+carries (`.../api/v1/` + `movies` → `.../api/v1/movies`), and a query
+the `url` already carries stays at the end, after the joined path. The
+page's own query string travels as always (the rules above apply
+unchanged), so subpath and `keyParam` compose freely.
+
+The subpath is client-controlled path input, so it is treated as
+hostile on principle. `.` and `..` segments answer `400` — the client
+may steer the upstream *path*, never rewrite it. Duplicate `/`
+collapse, and the whole tail is re-encoded to a canonical percent form,
+so a decoded `?` or `#` becomes `%3F`/`%23` and stays part of the path
+instead of splitting a query or fragment. Axum percent-decodes path
+captures before the handler sees them, which is exactly why the proxy
+encodes everything back: without that step, a `/` smuggled as `%2F`
+could turn into a path separator upstream. Host, scheme and port stay
+operator-configured no matter what the subpath contains — there is
+still no SSRF surface.
+
 ### The request contract
 
 | Concern | Behaviour |
 |---------|-----------|
 | Methods | `GET` and `POST` pass through (the upstream sees the same method). |
+| Path (subpath) | `/api/ext/{name}/{subpath...}` appends `{subpath}` after the configured URL with exactly one `/`; `.`/`..` segments answer `400`, duplicate `/` collapse, and the tail is re-encoded to a canonical percent form. |
 | Query string | Appended to the configured URL (`?city=Madrid` → upstream `...?city=Madrid`; `&` joins when the URL already has one). With `query` parameters configured, incoming pairs are re-encoded and same-named pairs are dropped — the server-side value always wins. |
 | `POST` bodies | Forwarded as-is while bounded by `server.max_body_size_bytes`, and only for text media types (`application/json`, `text/*`); anything else answers `400`. |
 | Response status | Passes through verbatim — an upstream `429` reaches the browser as `429`. |

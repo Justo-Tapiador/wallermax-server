@@ -1,14 +1,20 @@
 //! External API proxy (the `[external_api]` section, v0.12.0).
 //!
-//! `GET/POST /api/ext/{name}` forwards to a **named, operator-configured**
-//! upstream (see [`crate::external_api`]) and passes the answer back to
-//! the browser. The point is secret hygiene: pages never see the API
+//! `GET/POST /api/ext/{name}` — and, when the page needs a deeper route,
+//! `GET/POST /api/ext/{name}/{subpath...}` — forwards to a **named,
+//! operator-configured** upstream (see [`crate::external_api`]) and passes
+//! the answer back to the browser. The point is secret hygiene: pages never see the API
 //! keys, and the upstream's CORS policy stops mattering because the
 //! browser only ever talks to this origin.
 //!
 //! Rules the handler enforces on every call:
 //!
 //! - the client picks a *name*, never a URL — no SSRF surface;
+//! - a client subpath (`/api/ext/{name}/{subpath...}`) is appended after
+//!   the configured URL with exactly one `/`: it is percent-encoded
+//!   back to a canonical form segment by segment, `.` and `..` segments
+//!   answer `400`, and duplicate `/` collapse — the client may steer the
+//!   upstream *path*, never its host or scheme;
 //! - nothing from the incoming request is forwarded upstream (no
 //!   cookies, no `Authorization`, no arbitrary headers): only the
 //!   configured headers, `User-Agent` and `Accept`;
@@ -49,7 +55,102 @@ use crate::state::AppState;
 /// Mounted only while at least one `[[external_api.endpoints]]` entry is
 /// configured (see [`crate::routes`]).
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/api/ext/{name}", get(forward).post(forward))
+    Router::new()
+        .route("/api/ext/{name}", get(forward).post(forward))
+        .route(
+            "/api/ext/{name}/{*subpath}",
+            get(forward_subpath).post(forward_subpath),
+        )
+}
+
+/// Hex digits for percent-encoding (uppercase, the canonical form).
+const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+/// Whether `c` may travel verbatim in a path segment: the RFC 3986
+/// `pchar` set minus `%` (the extractor already decoded the client's
+/// `%XX`, so a literal `%` must be re-encoded — never passed through).
+fn is_pchar(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            '-' | '.'
+                | '_'
+                | '~'
+                | '!'
+                | '$'
+                | '&'
+                | '\''
+                | '('
+                | ')'
+                | '*'
+                | '+'
+                | ','
+                | ';'
+                | '='
+                | ':'
+                | '@'
+        )
+}
+
+/// Validates and canonically re-encodes a client-provided subpath.
+///
+/// Axum percent-**decodes** path captures, so the raw string is untrusted
+/// twice over: `..` could try to rewrite the upstream path and a decoded
+/// `?`/`#`/control character could try to escape the path entirely. This
+/// function turns the subpath back into a canonical, injection-proof
+/// path: `.`/`..` segments and control characters are refused, empty
+/// segments (from duplicate `/`) collapse, and every character outside
+/// `pchar` is percent-encoded again — so a `?` becomes `%3F` and stays
+/// part of the path, never a query separator.
+///
+/// # Errors
+///
+/// `Err` carries a client-safe reason (`.`/`..` segments, control
+/// characters) — the handler answers it as a `400` verbatim.
+fn encode_subpath(subpath: &str) -> Result<String, &'static str> {
+    let mut segments: Vec<String> = Vec::new();
+    for segment in subpath.split('/') {
+        if segment.is_empty() {
+            continue; // duplicate `/` collapse; the path stays canonical
+        }
+        if segment == "." || segment == ".." {
+            return Err("subpath segments `.` and `..` are not allowed");
+        }
+        if segment.chars().any(char::is_control) {
+            return Err("subpath may not contain control characters");
+        }
+        let mut encoded = String::with_capacity(segment.len());
+        for c in segment.chars() {
+            if is_pchar(c) {
+                encoded.push(c);
+            } else {
+                let mut utf8 = [0u8; 4];
+                for byte in c.encode_utf8(&mut utf8).as_bytes() {
+                    encoded.push('%');
+                    encoded.push(HEX[(byte >> 4) as usize] as char);
+                    encoded.push(HEX[(byte & 0x0f) as usize] as char);
+                }
+            }
+        }
+        segments.push(encoded);
+    }
+    Ok(segments.join("/"))
+}
+
+/// Joins the (already encoded) subpath after the configured base URL:
+/// exactly one `/` separates them, whatever the base's trailing slashes,
+/// and a query the base already carries stays at the end, after the
+/// joined path, where it belongs.
+fn join_subpath(base: &str, subpath: &str) -> String {
+    if subpath.is_empty() {
+        return base.to_owned();
+    }
+    match base.split_once('?') {
+        Some((path, query)) => {
+            format!("{}/{}?{query}", path.trim_end_matches('/'), subpath)
+        }
+        None => format!("{}/{}", base.trim_end_matches('/'), subpath),
+    }
 }
 
 /// Composes the upstream URL: the configured address plus the incoming
@@ -150,25 +251,53 @@ fn transport_error(stage: &str, error: &reqwest::Error) -> AppError {
 
 /// `GET/POST /api/ext/{name}`: forwards to the configured upstream.
 ///
-/// See the module docs for the full rule list; the method is passed
-/// through as-is (browsers `GET` or `POST`, the upstream sees the same).
-#[allow(clippy::too_many_lines)]
+/// Thin wrapper — see [`proxy`] for the actual rule list.
 async fn forward(
     State(state): State<AppState>,
     Path(name): Path<String>,
     user: Result<AuthUser, Rejection>,
     request: Request,
 ) -> Response {
+    proxy(state, &name, None, user, request).await
+}
+
+/// `GET/POST /api/ext/{name}/{subpath}`: same, with the validated and
+/// percent-encoded subpath joined after the configured base URL.
+///
+/// Thin wrapper — see [`proxy`] for the actual rule list.
+async fn forward_subpath(
+    State(state): State<AppState>,
+    Path((name, subpath)): Path<(String, String)>,
+    user: Result<AuthUser, Rejection>,
+    request: Request,
+) -> Response {
+    proxy(state, &name, Some(&subpath), user, request).await
+}
+
+/// The proxy core both routes share: endpoint lookup, auth, URL
+/// composition (optional subpath + query string + fixed parameters) and
+/// the upstream call.
+///
+/// See the module docs for the full rule list; the method is passed
+/// through as-is (browsers `GET` or `POST`, the upstream sees the same).
+#[allow(clippy::too_many_lines)]
+async fn proxy(
+    state: AppState,
+    name: &str,
+    subpath: Option<&str>,
+    user: Result<AuthUser, Rejection>,
+    request: Request,
+) -> Response {
     let api = state.external_api();
-    let Some(endpoint) = api.endpoint(&name) else {
-        let path = format!("/api/ext/{name}");
-        return AppError::not_found(request.method().as_str(), &path).into_response();
+    let Some(endpoint) = api.endpoint(name) else {
+        return AppError::not_found(request.method().as_str(), request.uri().path())
+            .into_response();
     };
     let Some(client) = api.client() else {
         // Unreachable while any endpoint exists; the map and the client
         // are built together.
-        let path = format!("/api/ext/{name}");
-        return AppError::not_found(request.method().as_str(), &path).into_response();
+        return AppError::not_found(request.method().as_str(), request.uri().path())
+            .into_response();
     };
 
     // Authentication is opt-in per endpoint; public pages need to reach
@@ -185,7 +314,22 @@ async fn forward(
     let timeout = Duration::from_secs(state.config().external_api.timeout_secs);
     let limit = api.response_limit_bytes();
 
-    let url = upstream_url(&endpoint.url, query.as_deref(), &endpoint.query);
+    // Subpath first (validated + re-encoded + joined), query second: the
+    // composed base then flows through the regular query rules above.
+    let base = match subpath.filter(|subpath| !subpath.is_empty()) {
+        None => endpoint.url.clone(),
+        Some(raw) => match encode_subpath(raw) {
+            Ok(encoded) => join_subpath(&endpoint.url, &encoded),
+            Err(reason) => {
+                tracing::warn!(
+                    endpoint = %name,
+                    "external API proxy refused an unsafe subpath"
+                );
+                return AppError::bad_request(reason).into_response();
+            }
+        },
+    };
+    let url = upstream_url(&base, query.as_deref(), &endpoint.query);
     // `axum::http::Method` and `reqwest::Method` are the same `http`
     // type — no conversion needed. The client-level timeout already
     // bounds the whole call; the per-request timeout is belt and braces.
@@ -288,7 +432,7 @@ async fn forward(
 
 #[cfg(test)]
 mod tests {
-    use super::upstream_url;
+    use super::{encode_subpath, join_subpath, upstream_url};
 
     fn fixed(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
@@ -388,6 +532,81 @@ mod tests {
         assert_eq!(
             upstream_url("https://api.example.com/", None, &tricky),
             "https://api.example.com/?token=a%26b%3Dc+d"
+        );
+    }
+
+    #[test]
+    fn subpaths_join_with_exactly_one_slash() {
+        // Whatever trailing slashes the base carries, the join inserts
+        // exactly one `/` — the upstream never sees `//`.
+        assert_eq!(
+            join_subpath("https://api.example.com/v1", "search/deep"),
+            "https://api.example.com/v1/search/deep"
+        );
+        assert_eq!(
+            join_subpath("https://www.omdbapi.com/", "search"),
+            "https://www.omdbapi.com/search"
+        );
+        assert_eq!(
+            join_subpath("https://api.example.com/v1//", "a"),
+            "https://api.example.com/v1/a"
+        );
+        // A query the base already carries stays at the end, after the
+        // joined path.
+        assert_eq!(
+            join_subpath("https://api.example.com/v1?format=json", "data"),
+            "https://api.example.com/v1/data?format=json"
+        );
+        // An empty subpath (a bare trailing `/`) is no subpath at all.
+        assert_eq!(
+            join_subpath("https://api.example.com/v1", ""),
+            "https://api.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn dot_segments_are_refused() {
+        // `..` (and `.`) could try to rewrite the upstream path; the
+        // proxy answers 400 instead of guessing the intent.
+        assert!(encode_subpath("ok/..").is_err());
+        assert!(encode_subpath("../ok").is_err());
+        assert!(encode_subpath(".").is_err());
+        assert!(encode_subpath("ok/./x").is_err());
+    }
+
+    #[test]
+    fn subpaths_are_reencoded_to_a_canonical_form() {
+        // The path extractor already decoded the client's `%XX`, so the
+        // proxy encodes everything outside pchar back — a decoded `?`
+        // stays part of the path (`%3F`), spaces and non-ASCII travel
+        // percent-encoded, and a literal `%` becomes `%25` (never a
+        // double-encoding pass-through).
+        assert_eq!(encode_subpath("search").unwrap(), "search");
+        assert_eq!(encode_subpath("a/b/c").unwrap(), "a/b/c");
+        assert_eq!(encode_subpath("a//b").unwrap(), "a/b");
+        assert_eq!(encode_subpath("term?x=1").unwrap(), "term%3Fx=1");
+        assert_eq!(
+            encode_subpath("caf\u{e9} au lait").unwrap(),
+            "caf%C3%A9%20au%20lait"
+        );
+        assert_eq!(encode_subpath("50%").unwrap(), "50%25");
+        assert_eq!(encode_subpath("a&b=c").unwrap(), "a&b=c");
+    }
+
+    #[test]
+    fn control_characters_are_refused() {
+        assert!(encode_subpath("bad\u{7}segment").is_err());
+        assert!(encode_subpath("line\nbreak").is_err());
+    }
+
+    #[test]
+    fn fixed_parameters_travel_with_a_joined_subpath() {
+        // Subpath first, keyParam second: the pair composes.
+        let key = fixed(&[("apikey", "omdb-secret-42")]);
+        let base = join_subpath("https://www.omdbapi.com/", "search");
+        assert_eq!(
+            upstream_url(&base, Some("t=Alien"), &key),
+            "https://www.omdbapi.com/search?t=Alien&apikey=omdb-secret-42"
         );
     }
 }

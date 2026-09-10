@@ -46,8 +46,9 @@ use crate::state::AppState;
 /// rendering services in the application state.
 ///
 /// `external_api_enabled` mounts the external API proxy
-/// (`GET/POST /api/ext/{name}`), which is enabled by configuring at
-/// least one `[[external_api.endpoints]]` entry.
+/// (`GET/POST /api/ext/{name}` and `GET/POST /api/ext/{name}/{subpath}`),
+/// which is enabled by configuring at least one
+/// `[[external_api.endpoints]]` entry.
 ///
 /// `static_files` mounts the static file family (see
 /// [`static_files`]): while enabled, `GET /` serves the index file and

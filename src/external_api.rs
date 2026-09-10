@@ -5,9 +5,11 @@
 //! the moment the HTML arrives, and cross-origin `fetch` calls are also
 //! bound by the *target's* CORS policy. The proxy solves both problems at
 //! once: pages call a **named** endpoint on this server
-//! (`GET/POST /api/ext/{name}`, see [`crate::routes::external_api`]) and
-//! this module forwards the request upstream, injecting the configured
-//! secret headers that never leave the server.
+//! (`GET/POST /api/ext/{name}`, optionally with a deeper route tail —
+//! `GET/POST /api/ext/{name}/{subpath}`, see
+//! [`crate::routes::external_api`]) and this module forwards the request
+//! upstream, injecting the configured secret headers that never leave
+//! the server.
 //!
 //! | Responsibility                              | Where                        |
 //! |---------------------------------------------|------------------------------|

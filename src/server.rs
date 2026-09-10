@@ -235,7 +235,7 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
             .collect();
         tracing::info!(
             endpoints = %names.join(", "),
-            "external API proxy enabled (GET/POST /api/ext/<name>; secrets stay server-side)"
+            "external API proxy enabled (GET/POST /api/ext/<name>[/<subpath>]; secrets stay server-side)"
         );
     }
 

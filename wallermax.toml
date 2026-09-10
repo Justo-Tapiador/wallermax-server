@@ -141,6 +141,22 @@ response_limit_bytes = 262144
 #
 # [external_api.endpoints.query]
 # apikey = "${OMDB_API_KEY}"
+#
+# Everything after the endpoint name is a subpath joined onto `url`
+# with exactly one `/` — one entry covers a whole /api/v1/<resource>
+# style API (`.`/`..` segments answer 400; the tail is re-encoded
+# canonically, so it can only steer the path, never the host):
+#
+# GET /api/ext/xmdb/movies?q=Alien
+#   → https://xmdbapi.com/api/v1/movies?q=Alien&apiKey=...
+#
+# [[external_api.endpoints]]
+# name = "xmdb"
+# url = "https://xmdbapi.com/api/v1/"
+# auth_required = false
+#
+# [external_api.endpoints.query]
+# apiKey = "${XMDB_API_KEY}"
 
 [static]
 # Static file serving for otherwise unmatched paths.

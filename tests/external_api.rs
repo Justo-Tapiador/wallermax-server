@@ -67,7 +67,8 @@ impl Upstream {
             .route(
                 "/teapot",
                 get(|| async { (StatusCode::IM_A_TEAPOT, "short and stout") }),
-            );
+            )
+            .route("/{*rest}", get(echo_path));
 
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("upstream serves");
@@ -100,6 +101,12 @@ async fn see_headers(headers: HeaderMap) -> Json<Value> {
 /// Echoes the query string the proxy appended.
 async fn echo_query(uri: Uri) -> Json<Value> {
     Json(json!({"query": uri.query()}))
+}
+
+/// Echoes the exact path (and query) the proxy requested upstream — the
+/// catch-all every subpath test talks to.
+async fn echo_path(uri: Uri) -> Json<Value> {
+    Json(json!({"path": uri.path(), "query": uri.query()}))
 }
 
 /// Echoes the body and media type the proxy forwarded.
@@ -430,11 +437,128 @@ async fn the_family_mounts_only_while_endpoints_exist() {
         .expect("JSON index");
     let endpoints = index["endpoints"].as_array().expect("endpoints array");
     assert!(
-        endpoints
-            .iter()
-            .any(|entry| entry.as_str().unwrap() == "GET/POST /api/ext/{name} (external API proxy)"),
+        endpoints.iter().any(|entry| entry.as_str().unwrap()
+            == "GET/POST /api/ext/{name}[/{subpath}] (external API proxy)"),
         "the proxy family is listed once configured: {endpoints:?}"
     );
+}
+
+#[tokio::test]
+async fn subpaths_are_appended_after_the_base_url() {
+    let upstream = Upstream::spawn().await;
+    // Trailing slash on purpose: the join must yield exactly one `/`.
+    let config = config_with_endpoint(
+        format!("{}/", upstream.base_url),
+        Vec::new(),
+        false,
+        262_144,
+    );
+    let server = TestServer::start_with_config(config).await;
+
+    let response = reqwest::get(server.url("/api/ext/svc/echo/deep/leaf?x=1"))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.expect("JSON body forwards");
+    assert_eq!(body["path"], "/echo/deep/leaf");
+    assert_eq!(body["query"], "x=1");
+}
+
+#[tokio::test]
+async fn subpaths_work_without_a_trailing_slash_on_the_base() {
+    let upstream = Upstream::spawn().await;
+    let config = config_with_endpoint(upstream.base_url.clone(), Vec::new(), false, 262_144);
+    let server = TestServer::start_with_config(config).await;
+
+    let response = reqwest::get(server.url("/api/ext/svc/deep"))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.expect("JSON body forwards");
+    assert_eq!(body["path"], "/deep");
+    assert_eq!(body["query"], Value::Null);
+}
+
+#[tokio::test]
+async fn subpath_dot_segments_answer_400() {
+    let upstream = Upstream::spawn().await;
+    let config = config_with_endpoint(upstream.base_url.clone(), Vec::new(), false, 262_144);
+    let server = TestServer::start_with_config(config).await;
+
+    // `%2e%2e` alone never reaches the server: well-behaved clients
+    // (browsers, reqwest) normalize dot segments away while parsing the
+    // URL. A `/` smuggled as `%2F` defeats that client-side collapse —
+    // the path extractor decodes it, `..` becomes a real segment, and
+    // the proxy must still refuse it (raw-HTTP clients can send the
+    // plain `..` form too).
+    let response = reqwest::get(server.url("/api/ext/svc/word%2F.."))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), 400);
+    let body: Value = response.json().await.expect("JSON envelope");
+    assert_eq!(body["error"]["code"], "BAD_REQUEST");
+}
+
+#[tokio::test]
+async fn subpaths_pair_with_fixed_query_parameters() {
+    let upstream = Upstream::spawn().await;
+    let config = config_with_endpoint_query(
+        format!("{}/api/v1", upstream.base_url),
+        vec![("apikey", "k-42")],
+    );
+    let server = TestServer::start_with_config(config).await;
+
+    // subpath after the base, keyParam after the query — both at once.
+    let response = reqwest::get(server.url("/api/ext/svc/movies?q=Alien"))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.expect("JSON body forwards");
+    assert_eq!(body["path"], "/api/v1/movies");
+    assert_eq!(body["query"], "q=Alien&apikey=k-42");
+}
+
+#[tokio::test]
+async fn subpaths_travel_percent_encoded() {
+    let upstream = Upstream::spawn().await;
+    let config = config_with_endpoint(upstream.base_url.clone(), Vec::new(), false, 262_144);
+    let server = TestServer::start_with_config(config).await;
+
+    // The extractor decodes `%C3%A9`/`%20`; the proxy re-encodes the
+    // subpath canonically before it goes upstream.
+    let response = reqwest::get(server.url("/api/ext/svc/echo/caf%C3%A9%20au%20lait"))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.expect("JSON body forwards");
+    assert_eq!(body["path"], "/echo/caf%C3%A9%20au%20lait");
+}
+
+#[tokio::test]
+async fn plain_endpoint_calls_still_work_alongside_the_subpath_route() {
+    // The `/api/ext/{name}` contract of v0.12.0 is untouched by the
+    // addition of the `/api/ext/{name}/{*subpath}` route.
+    let upstream = Upstream::spawn().await;
+    let config = config_with_endpoint(
+        format!("{}/ok", upstream.base_url),
+        Vec::new(),
+        false,
+        262_144,
+    );
+    let server = TestServer::start_with_config(config).await;
+
+    let response = reqwest::get(server.url("/api/ext/svc"))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.expect("JSON body forwards");
+    assert_eq!(body["ok"], true);
 }
 
 #[tokio::test]
