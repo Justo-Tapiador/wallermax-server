@@ -25,11 +25,18 @@
 //! - **Secrets stay in strings only as long as needed**: values are
 //!   resolved once at startup and never logged.
 //!
-//! Header values may reference the environment with `${VAR_NAME}` (the
-//! committed `wallermax.toml` can therefore ship placeholders; real keys
-//! live in the git-ignored `wallermax.local.toml` or in the process
-//! environment). A missing or invalid variable is a startup error, not a
-//! runtime surprise.
+//! Header values and query parameter values may reference the
+//! environment with `${VAR_NAME}` (the committed `wallermax.toml` can
+//! therefore ship placeholders; real keys live in the git-ignored
+//! `wallermax.local.toml` or in the process environment). A missing or
+//! invalid variable is a startup error, not a runtime surprise.
+//!
+//! Query parameters (the `query` map) are the `keyParam` pattern for
+//! upstreams that want the key in the URL instead of a header (OMDb's
+//! `apikey`, Google's `key`, ...). They are resolved once at startup
+//! like header values, and a configured name always replaces the same
+//! name arriving from the browser (see
+//! [`crate::routes::external_api`]).
 
 use std::collections::HashMap;
 
@@ -50,8 +57,8 @@ pub(crate) const RESERVED_HEADER_NAMES: [&str; 5] = [
 ];
 
 /// A fully resolved upstream: configuration plus startup-expanded header
-/// values, ready to serve requests without touching the environment
-/// again.
+/// and query values, ready to serve requests without touching the
+/// environment again.
 #[derive(Debug, Clone)]
 pub struct ResolvedEndpoint {
     /// Upstream URL exactly as configured (query forwarding is appended
@@ -62,6 +69,10 @@ pub struct ResolvedEndpoint {
     pub auth_required: bool,
     /// Headers to attach to every upstream call, in configuration order.
     pub headers: Vec<(HeaderName, HeaderValue)>,
+    /// Fixed query parameters appended to every upstream call, in
+    /// configuration (alphabetical) order. Names here win over the same
+    /// names arriving from the browser.
+    pub query: Vec<(String, String)>,
 }
 
 /// The shared proxy state: one connection-pooled client and the endpoint
@@ -82,16 +93,17 @@ pub struct ExternalApi {
 
 impl ExternalApi {
     /// Resolves the whole `[external_api]` section: expands `${ENV}`
-    /// references in header values, validates the expanded values as HTTP
-    /// header values and builds the shared client.
+    /// references in header and query values, validates the expanded
+    /// header values as HTTP header values and builds the shared client.
     ///
     /// # Errors
     ///
     /// Fails on the first header value whose `${VAR}` is not set, whose
-    /// expansion is not a valid header value, or whose name is reserved.
-    /// Startup treats this as fatal; [`crate::state`] treats it as
-    /// "feature disabled" with an error log for programmatically built
-    /// states that skipped [`crate::config::AppConfig::load`] validation.
+    /// expansion is not a valid header value, or whose name is reserved;
+    /// and on the first query value whose `${VAR}` is not set. Startup
+    /// treats this as fatal; [`crate::state`] treats it as "feature
+    /// disabled" with an error log for programmatically built states that
+    /// skipped [`crate::config::AppConfig::load`] validation.
     pub fn resolve(config: &ExternalApiConfig) -> Result<Self, String> {
         if config.endpoints.is_empty() {
             return Ok(Self::disabled());
@@ -132,12 +144,27 @@ impl ExternalApi {
                 })?;
                 headers.push((name, value));
             }
+            let mut query = Vec::with_capacity(endpoint.query.len());
+            for (name, value) in &endpoint.query {
+                let expanded = expand_env(value).map_err(|error| {
+                    format!(
+                        "endpoint `{}` query parameter `{name}`: {error}",
+                        endpoint.name
+                    )
+                })?;
+                // No further validation: values are percent-encoded when
+                // the query string is serialized per request, so any
+                // string is safe to carry (there is no header-injection
+                // surface to guard).
+                query.push((name.clone(), expanded));
+            }
             endpoints.insert(
                 endpoint.name.clone(),
                 ResolvedEndpoint {
                     url: endpoint.url.clone(),
                     auth_required: endpoint.auth_required,
                     headers,
+                    query,
                 },
             );
         }
@@ -222,6 +249,14 @@ mod tests {
     use super::*;
 
     fn endpoint_config(name: &str, headers: &[(&str, &str)]) -> ExternalApiConfig {
+        endpoint_config_with_query(name, headers, &[])
+    }
+
+    fn endpoint_config_with_query(
+        name: &str,
+        headers: &[(&str, &str)],
+        query: &[(&str, &str)],
+    ) -> ExternalApiConfig {
         let mut config = ExternalApiConfig::default();
         config
             .endpoints
@@ -230,6 +265,10 @@ mod tests {
                 url: String::from("https://api.example.com/v1"),
                 auth_required: false,
                 headers: headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                query: query
                     .iter()
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
@@ -336,5 +375,37 @@ mod tests {
         assert!(api.client().is_none());
         let empty = ExternalApiConfig::default();
         assert!(!ExternalApi::resolve(&empty).unwrap().enabled());
+    }
+
+    #[test]
+    fn resolve_expands_query_values_in_keyparam_shape() {
+        set_var("WMS_F6_QKEY", "omdb-secret-42");
+        let config = endpoint_config_with_query("omdb", &[], &[("apikey", "${WMS_F6_QKEY}")]);
+        let api = ExternalApi::resolve(&config).expect("resolves");
+        let endpoint = api.endpoint("omdb").expect("endpoint present");
+        assert_eq!(
+            endpoint.query,
+            vec![(String::from("apikey"), String::from("omdb-secret-42"))]
+        );
+        remove_var("WMS_F6_QKEY");
+    }
+
+    #[test]
+    fn resolve_fails_on_missing_query_env_variable() {
+        remove_var("WMS_F6_QMISSING");
+        let config = endpoint_config_with_query("svc", &[], &[("key", "${WMS_F6_QMISSING}")]);
+        let error = ExternalApi::resolve(&config).unwrap_err();
+        assert!(
+            error.contains("WMS_F6_QMISSING") && error.contains("query parameter"),
+            "error names the variable and the parameter: {error}"
+        );
+    }
+
+    #[test]
+    fn endpoints_without_query_resolve_to_an_empty_map() {
+        let config = endpoint_config("svc", &[("X-Api-Key", "literal")]);
+        let api = ExternalApi::resolve(&config).expect("resolves");
+        let endpoint = api.endpoint("svc").expect("endpoint present");
+        assert!(endpoint.query.is_empty());
     }
 }

@@ -350,6 +350,16 @@ pub struct ExternalEndpointConfig {
     /// committed `wallermax.toml` can hold placeholders while real keys
     /// live in `wallermax.local.toml` or the process environment.
     pub headers: std::collections::BTreeMap<String, String>,
+    /// Fixed query parameters appended to every upstream call — the
+    /// `keyParam` shape for APIs that want the key in the URL (OMDb's
+    /// `apikey`, Google's `key`, ...). Values follow the same
+    /// `${VAR_NAME}` startup expansion as headers.
+    ///
+    /// A name configured here always wins over the same name arriving
+    /// from the browser: the proxy drops the client's pair and appends
+    /// its own resolved value, so the secret can be neither read from
+    /// the page nor shadowed by one.
+    pub query: std::collections::BTreeMap<String, String>,
 }
 
 /// SQLite persistence settings.
@@ -913,6 +923,30 @@ impl AppConfig {
                 if value.is_empty() {
                     return Err(ConfigError::Message(format!(
                         "`external_api` endpoint `{}` header `{name}` is empty",
+                        endpoint.name
+                    )));
+                }
+            }
+            for (name, value) in &endpoint.query {
+                // Conservative name shape: letters, digits, `_`, `-` and
+                // `.` cover every `keyParam` seen in the wild (`apikey`,
+                // `apiKey`, `access_token`, ...) and keep client pairs
+                // unambiguous to match at request time.
+                if name.is_empty()
+                    || !name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+                {
+                    return Err(ConfigError::Message(format!(
+                        "`external_api` endpoint `{}` has an invalid query parameter name \
+                         `{name}`; expected letters, digits, `_`, `-` or `.` (the \
+                         `apikey`/`key` shape)",
+                        endpoint.name
+                    )));
+                }
+                if value.is_empty() {
+                    return Err(ConfigError::Message(format!(
+                        "`external_api` endpoint `{}` query parameter `{name}` is empty",
                         endpoint.name
                     )));
                 }
@@ -1853,6 +1887,7 @@ mod tests {
                 .iter()
                 .map(|(key, value)| (key.to_string(), value.to_string()))
                 .collect(),
+            query: Default::default(),
         });
         config
     }
@@ -1883,6 +1918,7 @@ mod tests {
             url: String::from("https://b.example.com"),
             auth_required: false,
             headers: Default::default(),
+            query: Default::default(),
         });
         assert!(config.validate().is_err());
     }
@@ -1912,6 +1948,36 @@ mod tests {
 
         let config =
             external_api_config_with("svc", "https://api.example.com", &[("X-Api-Key", "value")]);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn external_api_rejects_bad_query_names_and_values() {
+        for name in ["", "api key", "api&key", "api/key", "añadió"] {
+            let mut config = external_api_config_with("svc", "https://api.example.com", &[]);
+            config.external_api.endpoints[0]
+                .query
+                .insert(name.to_owned(), String::from("value"));
+            assert!(
+                config.validate().is_err(),
+                "query name `{name}` must be rejected"
+            );
+        }
+
+        let mut config = external_api_config_with("svc", "https://api.example.com", &[]);
+        config.external_api.endpoints[0]
+            .query
+            .insert(String::from("apikey"), String::new());
+        assert!(config.validate().is_err(), "empty values are rejected");
+
+        // The keyParam shapes seen in the wild all pass: apikey, apiKey,
+        // key, access_token, api-key.
+        let mut config = external_api_config_with("svc", "https://api.example.com", &[]);
+        for name in ["apikey", "apiKey", "key", "access_token", "api-key"] {
+            config.external_api.endpoints[0]
+                .query
+                .insert(name.to_owned(), String::from("${SOME_API_KEY}"));
+        }
         assert!(config.validate().is_ok());
     }
 

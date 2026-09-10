@@ -126,6 +126,21 @@ response_limit_bytes = 262144
 #
 # [external_api.endpoints.headers]
 # X-Api-Key = "${WEATHER_API_KEY}"
+#
+# Fixed query parameters (the keyParam pattern) go under
+# [external_api.endpoints.query] — for upstreams that want the key in
+# the URL instead of a header (OMDb's `apikey`, Google's `key`, ...).
+# Values expand ${VAR} at startup exactly like header values, and a
+# name configured here always replaces the same name arriving from the
+# browser, so the page can neither read nor shadow the injected secret:
+#
+# [[external_api.endpoints]]
+# name = "omdb"
+# url = "https://www.omdbapi.com/"
+# auth_required = false
+#
+# [external_api.endpoints.query]
+# apikey = "${OMDB_API_KEY}"
 
 [static]
 # Static file serving for otherwise unmatched paths.

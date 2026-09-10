@@ -14,8 +14,12 @@
 //!   configured headers, `User-Agent` and `Accept`;
 //! - `auth_required = true` endpoints answer 401 without a valid Bearer
 //!   token or session cookie;
-//! - the incoming query string is appended to the configured URL (keys
-//!   belong in configured headers, never in client-visible URLs);
+//! - the incoming query string is appended to the configured URL; keys
+//!   belong in configured headers or in fixed query parameters (the
+//!   `keyParam` pattern), never in client-visible URLs — and a fixed
+//!   parameter name always replaces the same name arriving from the
+//!   browser, so the page can neither read nor shadow the injected
+//!   secret;
 //! - upstream bodies are capped by `external_api.response_limit_bytes`
 //!   and only text-ish media types (`application/json`, `*+json`,
 //!   `text/*`) are forwarded — this is a JSON proxy, not a media one;
@@ -49,17 +53,47 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// Composes the upstream URL: the configured address plus the incoming
-/// query string (joined with `?` or `&` as appropriate).
-fn upstream_url(base: &str, query: Option<&str>) -> String {
-    match query {
-        Some(query) if !query.is_empty() => {
-            if base.contains('?') {
-                format!("{base}&{query}")
-            } else {
-                format!("{base}?{query}")
+/// query string, with the endpoint's fixed query parameters appended.
+///
+/// Endpoints without fixed parameters keep the v0.12.0 contract: the
+/// incoming query string travels upstream untouched, byte for byte.
+/// Endpoints **with** fixed parameters (the `keyParam` pattern) parse
+/// the incoming pairs, drop any pair whose name the operator configured
+/// and re-serialize — the server-side value always wins, so a browser
+/// cannot shadow the injected key with one of its own.
+fn upstream_url(base: &str, query: Option<&str>, fixed: &[(String, String)]) -> String {
+    if fixed.is_empty() {
+        return match query {
+            Some(query) if !query.is_empty() => {
+                if base.contains('?') {
+                    format!("{base}&{query}")
+                } else {
+                    format!("{base}?{query}")
+                }
             }
-        }
-        _ => base.to_owned(),
+            _ => base.to_owned(),
+        };
+    }
+    let mut pairs: Vec<(String, String)> = query
+        .map(|query| {
+            url::form_urlencoded::parse(query.as_bytes())
+                .map(|(name, value)| (name.into_owned(), value.into_owned()))
+                .collect()
+        })
+        .unwrap_or_default();
+    pairs.retain(|(name, _)| !fixed.iter().any(|(fixed, _)| fixed == name));
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (name, value) in pairs {
+        serializer.append_pair(&name, &value);
+    }
+    for (name, value) in fixed {
+        serializer.append_pair(name, value);
+    }
+    let composed = serializer.finish();
+    if base.contains('?') {
+        format!("{base}&{composed}")
+    } else {
+        format!("{base}?{composed}")
     }
 }
 
@@ -151,7 +185,7 @@ async fn forward(
     let timeout = Duration::from_secs(state.config().external_api.timeout_secs);
     let limit = api.response_limit_bytes();
 
-    let url = upstream_url(&endpoint.url, query.as_deref());
+    let url = upstream_url(&endpoint.url, query.as_deref(), &endpoint.query);
     // `axum::http::Method` and `reqwest::Method` are the same `http`
     // type — no conversion needed. The client-level timeout already
     // bounds the whole call; the per-request timeout is belt and braces.
@@ -250,4 +284,110 @@ async fn forward(
         response.headers_mut().insert(header::CONTENT_TYPE, kind);
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upstream_url;
+
+    fn fixed(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn without_fixed_parameters_the_query_travels_untouched() {
+        // The v0.12.0 contract, byte for byte.
+        assert_eq!(
+            upstream_url(
+                "https://api.example.com/v1",
+                Some("city=Madrid&units=metric"),
+                &[],
+            ),
+            "https://api.example.com/v1?city=Madrid&units=metric"
+        );
+        assert_eq!(
+            upstream_url("https://api.example.com/v1", None, &[]),
+            "https://api.example.com/v1"
+        );
+        assert_eq!(
+            upstream_url("https://api.example.com/v1", Some(""), &[]),
+            "https://api.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn fixed_parameters_are_appended_after_the_incoming_ones() {
+        let key = fixed(&[("apikey", "omdb-secret-42")]);
+        assert_eq!(
+            upstream_url("https://www.omdbapi.com/", Some("t=Inception"), &key),
+            "https://www.omdbapi.com/?t=Inception&apikey=omdb-secret-42"
+        );
+    }
+
+    #[test]
+    fn a_client_pair_cannot_shadow_a_fixed_one() {
+        // The browser sends its own `apikey`; the proxy drops it and the
+        // configured value is the only one upstream sees (the
+        // `params.set()` semantics of the keyParam pattern).
+        let key = fixed(&[("apikey", "omdb-secret-42")]);
+        assert_eq!(
+            upstream_url(
+                "https://www.omdbapi.com/",
+                Some("apikey=spoof&t=Inception"),
+                &key,
+            ),
+            "https://www.omdbapi.com/?t=Inception&apikey=omdb-secret-42"
+        );
+    }
+
+    #[test]
+    fn fixed_parameters_travel_without_any_incoming_query() {
+        let key = fixed(&[("key", "google-key")]);
+        assert_eq!(
+            upstream_url(
+                "https://translation.googleapis.com/language/translate/v2",
+                None,
+                &key,
+            ),
+            "https://translation.googleapis.com/language/translate/v2?key=google-key"
+        );
+    }
+
+    #[test]
+    fn base_urls_that_already_carry_a_query_join_with_ampersand() {
+        let fixed_pairs = fixed(&[("apikey", "k")]);
+        assert_eq!(
+            upstream_url(
+                "https://api.example.com/v1?format=json",
+                Some("q=x"),
+                &fixed_pairs
+            ),
+            "https://api.example.com/v1?format=json&q=x&apikey=k"
+        );
+        assert_eq!(
+            upstream_url("https://api.example.com/v1?format=json", None, &fixed_pairs),
+            "https://api.example.com/v1?format=json&apikey=k"
+        );
+    }
+
+    #[test]
+    fn incoming_pairs_are_percent_encoded_on_the_way_out() {
+        // Re-encoding is part of the deal for endpoints with fixed
+        // parameters: parse-in, serialize-out keeps every pair
+        // well-formed even when the browser sends raw characters.
+        let key = fixed(&[("apikey", "k-42")]);
+        assert_eq!(
+            upstream_url("https://api.example.com/", Some("q=sea of monsters"), &key),
+            "https://api.example.com/?q=sea+of+monsters&apikey=k-42"
+        );
+        // Secret values with URL metacharacters survive the round trip.
+        let tricky = fixed(&[("token", "a&b=c d")]);
+        assert_eq!(
+            upstream_url("https://api.example.com/", None, &tricky),
+            "https://api.example.com/?token=a%26b%3Dc+d"
+        );
+    }
 }

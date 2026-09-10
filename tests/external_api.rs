@@ -131,6 +131,29 @@ fn config_with_endpoint(
                     .into_iter()
                     .map(|(name, value)| (name.to_owned(), value.to_owned()))
                     .collect(),
+                query: Default::default(),
+            }],
+        },
+        ..AppConfig::default()
+    }
+}
+
+/// Builds a config with one public endpoint carrying fixed query
+/// parameters (the `keyParam` pattern).
+fn config_with_endpoint_query(url: String, query: Vec<(&str, &str)>) -> AppConfig {
+    AppConfig {
+        external_api: ExternalApiConfig {
+            timeout_secs: 2,
+            response_limit_bytes: 262_144,
+            endpoints: vec![ExternalEndpointConfig {
+                name: String::from("svc"),
+                url,
+                auth_required: false,
+                headers: Default::default(),
+                query: query
+                    .into_iter()
+                    .map(|(name, value)| (name.to_owned(), value.to_owned()))
+                    .collect(),
             }],
         },
         ..AppConfig::default()
@@ -437,6 +460,71 @@ async fn env_referenced_secrets_reach_the_upstream() {
     assert_eq!(seen["x_api_key"], "env-injected-secret");
 }
 #[tokio::test]
+async fn fixed_query_parameters_reach_the_upstream() {
+    let upstream = Upstream::spawn().await;
+    let config = config_with_endpoint_query(
+        format!("{}/query", upstream.base_url),
+        vec![("apikey", "test-key-42")],
+    );
+    let server = TestServer::start_with_config(config).await;
+
+    let response = reqwest::get(server.url("/api/ext/svc?t=Inception"))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.expect("JSON body forwards");
+    assert_eq!(body["query"], "t=Inception&apikey=test-key-42");
+}
+
+#[tokio::test]
+async fn client_pairs_cannot_shadow_fixed_query_parameters() {
+    let upstream = Upstream::spawn().await;
+    let config = config_with_endpoint_query(
+        format!("{}/query", upstream.base_url),
+        vec![("apikey", "server-side-secret")],
+    );
+    let server = TestServer::start_with_config(config).await;
+
+    // The browser tries to smuggle its own apikey; the proxy drops it
+    // and only the configured value reaches the upstream.
+    let response = reqwest::get(server.url("/api/ext/svc?apikey=spoof&t=x"))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.expect("JSON body forwards");
+    let query = body["query"].as_str().expect("query echoes as a string");
+    assert_eq!(
+        query.matches("apikey=").count(),
+        1,
+        "exactly one apikey pair may reach the upstream: {query}"
+    );
+    assert_eq!(query, "t=x&apikey=server-side-secret");
+}
+
+#[tokio::test]
+async fn env_referenced_query_secrets_reach_the_upstream() {
+    // Unique name: tests run in parallel within one process, and the
+    // variable is read at server-build time.
+    std::env::set_var("WMS_F6_IT_QKEY", "env-query-secret");
+    let upstream = Upstream::spawn().await;
+    let config = config_with_endpoint_query(
+        format!("{}/query", upstream.base_url),
+        vec![("key", "${WMS_F6_IT_QKEY}")],
+    );
+    let server = TestServer::start_with_config(config).await;
+
+    let response = reqwest::get(server.url("/api/ext/svc?q=hello"))
+        .await
+        .expect("request succeeds");
+
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().await.expect("JSON body forwards");
+    assert_eq!(body["query"], "q=hello&key=env-query-secret");
+}
+
+#[tokio::test]
 async fn auth_required_endpoints_reject_anonymous_calls() {
     let upstream = Upstream::spawn().await;
     let (mut config, _db) = common::auth_config();
@@ -448,6 +536,7 @@ async fn auth_required_endpoints_reject_anonymous_calls() {
             url: format!("{}/ok", upstream.base_url),
             auth_required: true,
             headers: Default::default(),
+            query: Default::default(),
         }],
     };
     let server = TestServer::start_full(config).await;
@@ -473,6 +562,7 @@ async fn auth_required_endpoints_serve_logged_in_sessions() {
             url: format!("{}/ok", upstream.base_url),
             auth_required: true,
             headers: Default::default(),
+            query: Default::default(),
         }],
     };
     let server = TestServer::start_full(config).await;

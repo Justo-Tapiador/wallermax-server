@@ -81,9 +81,9 @@ upstream CORS entirely). See
 - **CORS** — exact-origin allowlist or wildcard, configurable preflight
   caching; disabled by default (browsers then deny all cross-origin reads).
 - **External API proxy** — `GET/POST /api/ext/{name}` forwards to
-  operator-configured upstreams with `${ENV}`-expanded secret headers, so
-  API keys never reach the browser and upstream CORS stops mattering
-  (v0.12.0).
+  operator-configured upstreams with `${ENV}`-expanded secret headers or
+  fixed query parameters (the `keyParam` pattern), so API keys never
+  reach the browser and upstream CORS stops mattering (v0.12.0).
 - **Request body limits** — early `Content-Length` rejection plus
   stream-level enforcement; `413` with the JSON error envelope.
 - **JSON-first** — consistent JSON success bodies and a consistent JSON error
@@ -351,6 +351,7 @@ each middleware's tuning values live in their own section.
 | `external_api.endpoints.url` | string | — | Absolute upstream `http`/`https` URL; the incoming query string is appended per call. |
 | `external_api.endpoints.auth_required` | bool | `false` | When `true`, calls need a Bearer token or session cookie; the rate limiter applies either way. |
 | `external_api.endpoints.headers` | table | `{}` | Headers attached to every upstream call; values may use `${VAR}` env references. |
+| `external_api.endpoints.query` | table | `{}` | Fixed query parameters appended to every call (the `keyParam` pattern); values may use `${VAR}`, and a configured name always replaces the same name arriving from the browser. |
 | `database.enabled` | bool | `false` (defaults) / `true` (wallermax.toml) | Mount the SQLite persistence layer (required by `[auth]`). |
 | `database.url` | string | `sqlite://wallermax.db?mode=rwc` | SQLite URL; `mode=rwc` creates the file, `sqlite::memory:` is ephemeral. |
 | `database.max_connections` | integer | `5` | Pool size (SQLite serializes writes; small is fine). |
@@ -1052,20 +1053,24 @@ not explicitly configured.
 
 ### Secrets via `${ENV}` references
 
-Header values may reference the environment with `${VAR_NAME}`,
-expanded once at startup. A missing variable, an unterminated `${`, an
-invalid name or an expansion containing control characters are all
-**startup errors** — a proxy that would silently run without its
-secrets is worse than no proxy, so the server refuses to boot instead
-(see the startup log for the exact endpoint and variable at fault).
-The committed `wallermax.toml` can therefore hold placeholders while
-real keys live in the git-ignored `wallermax.local.toml` or in the
-process environment:
+Header values and fixed query parameter values may reference the
+environment with `${VAR_NAME}`, expanded once at startup. A missing
+variable, an unterminated `${`, an invalid name or an expansion
+containing control characters (headers) are all **startup errors** — a
+proxy that would silently run without its secrets is worse than no
+proxy, so the server refuses to boot instead (see the startup log for
+the exact endpoint and variable at fault). The committed
+`wallermax.toml` can therefore hold placeholders while real keys live
+in the git-ignored `wallermax.local.toml` or in the process
+environment:
 
 ```toml
 # wallermax.local.toml (git-ignored) — real values, never committed
 [external_api.endpoints.headers]      # merged over wallermax.toml
 X-Api-Key = "real-key-from-the-dashboard"
+
+[external_api.endpoints.query]        # the keyParam equivalent
+apikey = "real-key-from-the-dashboard"
 ```
 
 Reserved header names (`host`, `content-length`, `connection`,
@@ -1076,12 +1081,52 @@ client headers — only the configured headers, `User-Agent`
 (`wallermax-server/<version>`) and `Accept` travel, so a session cookie
 can never leak to a third party through the proxy.
 
+### Keys in the query string (the `keyParam` pattern)
+
+Some upstreams want the key in the URL, not in a header: OMDB expects
+`?apikey=...`, Google Translate v2 expects `?key=...`, and a fair share
+of public APIs follow the same shape. The `[external_api.endpoints.query]`
+table covers them:
+
+```toml
+[[external_api.endpoints]]
+name = "omdb"
+url = "https://www.omdbapi.com/"
+auth_required = false
+
+[external_api.endpoints.query]
+apikey = "${OMDB_API_KEY}"
+```
+
+```js
+// the page asks for a movie; the apikey never appears in the browser
+fetch('/api/ext/omdb?t=Inception')
+  .then(r => r.json())
+  .then(data => /* OMDb's answer, key and all — server-side only */);
+```
+
+The parameter names follow the same conservative shape the rest of the
+config expects (letters, digits, `_`, `-`, `.` — `apikey`, `apiKey`,
+`access_token` all fit). A name configured under `query` **always wins**
+over the same name arriving from the browser: the proxy drops the
+client's pair and appends its own resolved value, so a page can neither
+read the secret nor shadow it with a value of its own. The secret rides
+in the server-to-server URL only; it is never echoed back to the
+browser (the upstream URL is not part of any response).
+
+While an endpoint carries fixed query parameters, the incoming query
+string is parsed and re-encoded on the way out (standard
+`application/x-www-form-urlencoded` rules: `+` for spaces,
+percent-encoding for the rest) — every pair stays well-formed no matter
+what the browser sends. Endpoints *without* fixed parameters keep the
+byte-for-byte passthrough of earlier releases.
+
 ### The request contract
 
 | Concern | Behaviour |
 |---------|-----------|
 | Methods | `GET` and `POST` pass through (the upstream sees the same method). |
-| Query string | Appended to the configured URL (`?city=Madrid` → upstream `...?city=Madrid`; `&` joins when the URL already has one). |
+| Query string | Appended to the configured URL (`?city=Madrid` → upstream `...?city=Madrid`; `&` joins when the URL already has one). With `query` parameters configured, incoming pairs are re-encoded and same-named pairs are dropped — the server-side value always wins. |
 | `POST` bodies | Forwarded as-is while bounded by `server.max_body_size_bytes`, and only for text media types (`application/json`, `text/*`); anything else answers `400`. |
 | Response status | Passes through verbatim — an upstream `429` reaches the browser as `429`. |
 | Response body | Capped by `external_api.response_limit_bytes`; an oversized answer becomes a `502` envelope (reading stops at the cap, so a huge upstream costs bounded memory). |
