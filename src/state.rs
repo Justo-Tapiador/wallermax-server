@@ -26,6 +26,7 @@ use axum::http::{HeaderName, HeaderValue};
 use crate::auth::JwtService;
 use crate::config::AppConfig;
 use crate::db::{PageRepository, UserRepository};
+use crate::external_api::ExternalApi;
 use crate::metrics::Metrics;
 use crate::proxy::{self, Cidr};
 use crate::rate_limit::RateLimiter;
@@ -250,6 +251,9 @@ struct StateInner {
     rate_limited_requests: AtomicU64,
     rate_limiter: RateLimiter,
     security_headers: Vec<(HeaderName, HeaderValue)>,
+    /// The resolved `[external_api]` proxy (endpoints plus client), or
+    /// an inert instance while no endpoints are configured.
+    external_api: ExternalApi,
     trusted_proxies: Vec<Cidr>,
     auth: Option<AuthContext>,
     metrics: Option<Metrics>,
@@ -279,6 +283,19 @@ impl AppState {
     /// Shared constructor for the public builders.
     fn build(config: AppConfig, auth: Option<AuthContext>, cms: Option<CmsContext>) -> Self {
         let security_headers = config.security_headers.header_pairs();
+        // The `[external_api]` resolution fails only for states built
+        // programmatically past `AppConfig::load` (file-backed startup
+        // already validated and resolved the section). Instead of
+        // panicking, the feature is disabled loudly — `build_state`
+        // double-checks and turns this into a hard startup error for
+        // the real binary.
+        let external_api = ExternalApi::resolve(&config.external_api).unwrap_or_else(|error| {
+            tracing::error!(
+                %error,
+                "external API proxy disabled: endpoints failed to resolve"
+            );
+            ExternalApi::disabled()
+        });
         let rate_limiter = RateLimiter::new(
             config.rate_limit.capacity,
             config.rate_limit.refill_per_second,
@@ -325,6 +342,7 @@ impl AppState {
                 rate_limited_requests: AtomicU64::new(0),
                 rate_limiter,
                 security_headers,
+                external_api,
                 trusted_proxies,
                 auth,
                 metrics,
@@ -347,6 +365,19 @@ impl AppState {
     /// Returns the security header pairs applied to every response.
     pub fn security_headers(&self) -> &[(HeaderName, HeaderValue)] {
         &self.inner.security_headers
+    }
+
+    /// Returns the resolved `[external_api]` proxy state (endpoints,
+    /// secrets and shared client); inert while no endpoints are
+    /// configured.
+    pub fn external_api(&self) -> &ExternalApi {
+        &self.inner.external_api
+    }
+
+    /// Whether the external API proxy routes are mounted (at least one
+    /// `[[external_api.endpoints]]` entry is configured and resolved).
+    pub fn external_api_enabled(&self) -> bool {
+        self.inner.external_api.enabled()
     }
 
     /// Returns the trusted proxy networks used for client IP resolution.

@@ -32,6 +32,7 @@
 //! | [`session`]          | Browser session cookie (`wallermax_session`)               |
 //! | [`metrics`]          | Prometheus registry and exposition                        |
 //! | [`extractors`]       | `AuthUser` / `AdminUser` / `JsonBody` extractors           |
+//! | [`external_api`]     | `[external_api]` proxy state, `${ENV}` header resolution   |
 //! | [`template_engine`]  | Sandboxed `.jhs` template rendering (`[templates]`)         |
 //! | [`routes`]           | Route modules (`/`, `/api`, `/health`, auth, admin, CMS)   |
 //! | [`middleware`]       | Composable request/response middleware                     |
@@ -53,6 +54,7 @@ pub mod auth;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod external_api;
 pub mod extractors;
 pub mod logging;
 pub mod metrics;

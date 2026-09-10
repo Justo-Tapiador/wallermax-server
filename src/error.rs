@@ -80,6 +80,14 @@ pub enum AppError {
         /// Generic explanation that is safe to expose to the client.
         message: String,
     },
+    /// An upstream service failed or answered unusable data while being
+    /// proxied through the `[external_api]` family (502). Messages stay
+    /// generic on purpose: upstream URLs, header values and transport
+    /// error details are logged server-side, never shipped to clients.
+    BadGateway {
+        /// Generic explanation that is safe to expose to the client.
+        message: String,
+    },
 }
 
 impl AppError {
@@ -164,6 +172,13 @@ impl AppError {
         }
     }
 
+    /// Builds a 502 error for an `[external_api]` upstream failure.
+    pub fn bad_gateway(message: impl Into<String>) -> Self {
+        Self::BadGateway {
+            message: message.into(),
+        }
+    }
+
     /// The HTTP status this error renders as (browsers get the same
     /// status the JSON envelope would answer with).
     pub fn status_code(&self) -> StatusCode {
@@ -178,6 +193,7 @@ impl AppError {
             AppError::Forbidden { .. } => StatusCode::FORBIDDEN,
             AppError::Conflict { .. } => StatusCode::CONFLICT,
             AppError::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::BadGateway { .. } => StatusCode::BAD_GATEWAY,
         }
     }
 
@@ -193,7 +209,8 @@ impl AppError {
             | AppError::Unauthorized { message }
             | AppError::Forbidden { message }
             | AppError::Conflict { message }
-            | AppError::Internal { message } => message,
+            | AppError::Internal { message }
+            | AppError::BadGateway { message } => message,
         }
     }
 
@@ -225,6 +242,7 @@ impl AppError {
             AppError::Internal { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", None)
             }
+            AppError::BadGateway { .. } => (StatusCode::BAD_GATEWAY, "BAD_GATEWAY", None),
         };
         let message = match self {
             AppError::NotFound { message }
@@ -236,7 +254,8 @@ impl AppError {
             | AppError::Unauthorized { message }
             | AppError::Forbidden { message }
             | AppError::Conflict { message }
-            | AppError::Internal { message } => message,
+            | AppError::Internal { message }
+            | AppError::BadGateway { message } => message,
         };
 
         let mut response = (
@@ -410,5 +429,21 @@ mod tests {
         let json = body_json(response).await;
         assert_eq!(json["error"]["code"], "CONFLICT");
         assert_eq!(json["error"]["message"], "username is already taken");
+    }
+
+    #[tokio::test]
+    async fn bad_gateway_renders_json_502() {
+        let response =
+            AppError::bad_gateway("upstream did not answer within the configured timeout")
+                .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+        let json = body_json(response).await;
+        assert_eq!(json["error"]["code"], "BAD_GATEWAY");
+        assert_eq!(
+            json["error"]["message"],
+            "upstream did not answer within the configured timeout"
+        );
     }
 }

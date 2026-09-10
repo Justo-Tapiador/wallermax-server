@@ -43,6 +43,9 @@ const ENV_SEPARATOR: &str = "__";
 /// Maximum accepted request body size: 1 MiB.
 const DEFAULT_MAX_BODY_SIZE_BYTES: usize = 1_048_576;
 
+/// Upper bound for `external_api.response_limit_bytes`: 16 MiB.
+const MAX_EXTERNAL_API_RESPONSE_BYTES: usize = 16 * 1_048_576;
+
 /// Root application configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -61,6 +64,8 @@ pub struct AppConfig {
     pub cors: CorsConfig,
     /// Security response header values.
     pub security_headers: SecurityHeadersConfig,
+    /// Server-side proxy for external APIs (the `[external_api]` section).
+    pub external_api: ExternalApiConfig,
     /// SQLite persistence layer.
     pub database: DatabaseConfig,
     /// JWT authentication and user accounts.
@@ -292,6 +297,59 @@ impl Default for SecurityHeadersConfig {
             strict_transport_security: String::from("max-age=31536000; includeSubDomains"),
         }
     }
+}
+
+/// Server-side proxy for external APIs (v0.12.0): browsers call named
+/// endpoints on this server and it forwards upstream, keeping secret
+/// headers out of the browser (and sidestepping the upstream's CORS
+/// policy, which does not apply server-to-server).
+///
+/// Enabled implicitly by configuring at least one
+/// `[[external_api.endpoints]]` entry; with no endpoints the route
+/// family is not mounted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExternalApiConfig {
+    /// Per-call upstream timeout in seconds. Keep it below
+    /// `server.request_timeout_secs` so the proxy answers first.
+    pub timeout_secs: u64,
+    /// Maximum forwarded upstream body size in bytes (protects the
+    /// server from an upstream that answers with something enormous).
+    pub response_limit_bytes: usize,
+    /// Named upstreams; the browser-visible path segment is the `name`.
+    pub endpoints: Vec<ExternalEndpointConfig>,
+}
+
+impl Default for ExternalApiConfig {
+    fn default() -> Self {
+        Self {
+            timeout_secs: 8,
+            response_limit_bytes: 262_144,
+            endpoints: Vec::new(),
+        }
+    }
+}
+
+/// One named upstream of the `[external_api]` proxy.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExternalEndpointConfig {
+    /// Endpoint name; becomes the path segment `/api/ext/{name}`. The
+    /// same slug shape the CMS enforces (lowercase letters, digits,
+    /// single dashes).
+    pub name: String,
+    /// Absolute upstream URL (scheme `http` or `https`). The incoming
+    /// query string is forwarded on top of it.
+    pub url: String,
+    /// Whether calls require an authenticated user (Bearer token or
+    /// browser session). `false` lets public pages use the endpoint;
+    /// the global rate limiter still applies either way.
+    pub auth_required: bool,
+    /// Headers attached to every upstream call. Values may reference the
+    /// environment with `${VAR_NAME}`, expanded once at startup — the
+    /// committed `wallermax.toml` can hold placeholders while real keys
+    /// live in `wallermax.local.toml` or the process environment.
+    pub headers: std::collections::BTreeMap<String, String>,
 }
 
 /// SQLite persistence settings.
@@ -771,6 +829,7 @@ impl AppConfig {
         self.validate_rate_limit()?;
         self.validate_cors()?;
         self.validate_security_headers()?;
+        self.validate_external_api()?;
         self.validate_database()?;
         self.validate_auth()?;
         self.validate_cms()?;
@@ -779,6 +838,86 @@ impl AppConfig {
         self.validate_metrics()?;
         self.validate_tls()?;
         self.validate_trusted_proxies()?;
+        Ok(())
+    }
+
+    /// Validates the `[external_api]` section.
+    ///
+    /// Static shape only (names, URLs, limits, header names): the
+    /// `${ENV}` expansion and the resulting header values are resolved
+    /// when the state is built (see [`crate::external_api`]).
+    fn validate_external_api(&self) -> Result<(), ConfigError> {
+        if self.external_api.endpoints.is_empty() {
+            return Ok(());
+        }
+        if self.external_api.timeout_secs == 0 || self.external_api.timeout_secs > 60 {
+            return Err(ConfigError::Message(String::from(
+                "`external_api.timeout_secs` must be between 1 and 60 (and below \
+                 `server.request_timeout_secs` so the proxy answers before the global \
+                 request timeout)",
+            )));
+        }
+        if self.external_api.response_limit_bytes == 0
+            || self.external_api.response_limit_bytes > MAX_EXTERNAL_API_RESPONSE_BYTES
+        {
+            return Err(ConfigError::Message(format!(
+                "`external_api.response_limit_bytes` must be between 1 and \
+                 {MAX_EXTERNAL_API_RESPONSE_BYTES} bytes"
+            )));
+        }
+        let mut seen = std::collections::HashSet::with_capacity(self.external_api.endpoints.len());
+        for endpoint in &self.external_api.endpoints {
+            if !crate::util::valid_slug(&endpoint.name) {
+                return Err(ConfigError::Message(format!(
+                    "invalid `external_api` endpoint name `{}`; expected the same slug shape \
+                     the CMS enforces: 1-64 characters of lowercase letters, digits and \
+                     single dashes",
+                    endpoint.name
+                )));
+            }
+            if !seen.insert(endpoint.name.as_str()) {
+                return Err(ConfigError::Message(format!(
+                    "duplicate `external_api` endpoint name `{}`",
+                    endpoint.name
+                )));
+            }
+            let url = reqwest::Url::parse(&endpoint.url).map_err(|_| {
+                ConfigError::Message(format!(
+                    "`external_api` endpoint `{}` has an invalid URL `{}`",
+                    endpoint.name, endpoint.url
+                ))
+            })?;
+            if url.scheme() != "http" && url.scheme() != "https" {
+                return Err(ConfigError::Message(format!(
+                    "`external_api` endpoint `{}` URL must use http or https (got `{}`)",
+                    endpoint.name,
+                    url.scheme()
+                )));
+            }
+            for (name, value) in &endpoint.headers {
+                if crate::external_api::RESERVED_HEADER_NAMES
+                    .contains(&name.to_ascii_lowercase().as_str())
+                {
+                    return Err(ConfigError::Message(format!(
+                        "`external_api` endpoint `{}` sets reserved header `{name}`; the HTTP \
+                         client owns it",
+                        endpoint.name
+                    )));
+                }
+                if HeaderName::from_bytes(name.as_bytes()).is_err() {
+                    return Err(ConfigError::Message(format!(
+                        "`external_api` endpoint `{}` has an invalid header name `{name}`",
+                        endpoint.name
+                    )));
+                }
+                if value.is_empty() {
+                    return Err(ConfigError::Message(format!(
+                        "`external_api` endpoint `{}` header `{name}` is empty",
+                        endpoint.name
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1660,6 +1799,138 @@ mod tests {
 
         let mut config = AppConfig::default();
         config.server.trusted_proxies = vec![String::from("10.0.0.0/33")];
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn external_api_defaults_to_disabled() {
+        let config = AppConfig::default();
+        assert!(config.external_api.endpoints.is_empty());
+        assert_eq!(config.external_api.timeout_secs, 8);
+        assert_eq!(config.external_api.response_limit_bytes, 262_144);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn external_api_endpoints_parse_from_toml() {
+        let config = from_toml(
+            r#"
+            [external_api]
+            timeout_secs = 5
+            response_limit_bytes = 4096
+
+            [[external_api.endpoints]]
+            name = "weather"
+            url = "https://api.example.com/data"
+            auth_required = true
+
+            [external_api.endpoints.headers]
+            X-Api-Key = "${WEATHER_API_KEY}"
+            "#,
+        );
+
+        assert_eq!(config.external_api.timeout_secs, 5);
+        assert_eq!(config.external_api.response_limit_bytes, 4096);
+        assert_eq!(config.external_api.endpoints.len(), 1);
+        let endpoint = &config.external_api.endpoints[0];
+        assert_eq!(endpoint.name, "weather");
+        assert_eq!(endpoint.url, "https://api.example.com/data");
+        assert!(endpoint.auth_required);
+        assert_eq!(
+            endpoint.headers.get("X-Api-Key").map(String::as_str),
+            Some("${WEATHER_API_KEY}")
+        );
+        assert!(config.validate().is_ok());
+    }
+
+    fn external_api_config_with(name: &str, url: &str, headers: &[(&str, &str)]) -> AppConfig {
+        let mut config = AppConfig::default();
+        config.external_api.endpoints.push(ExternalEndpointConfig {
+            name: name.to_owned(),
+            url: url.to_owned(),
+            auth_required: false,
+            headers: headers
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        });
+        config
+    }
+
+    #[test]
+    fn external_api_rejects_bad_endpoint_names() {
+        for name in [
+            "",
+            "UPPER",
+            "-lead",
+            "trail-",
+            "a--b",
+            "with space",
+            "with/slash",
+        ] {
+            let config = external_api_config_with(name, "https://api.example.com", &[]);
+            assert!(config.validate().is_err(), "name `{name}` must be rejected");
+        }
+        let config = external_api_config_with("weather-2", "https://api.example.com", &[]);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn external_api_rejects_duplicate_names() {
+        let mut config = external_api_config_with("weather", "https://a.example.com", &[]);
+        config.external_api.endpoints.push(ExternalEndpointConfig {
+            name: String::from("weather"),
+            url: String::from("https://b.example.com"),
+            auth_required: false,
+            headers: Default::default(),
+        });
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn external_api_rejects_non_http_urls() {
+        for url in ["", "not a url", "ftp://example.com", "file:///etc/passwd"] {
+            let config = external_api_config_with("svc", url, &[]);
+            assert!(config.validate().is_err(), "url `{url}` must be rejected");
+        }
+        let config = external_api_config_with("svc", "http://intranet.local/api", &[]);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn external_api_rejects_reserved_and_invalid_headers() {
+        let config =
+            external_api_config_with("svc", "https://api.example.com", &[("Cookie", "session=1")]);
+        assert!(config.validate().is_err());
+
+        let config =
+            external_api_config_with("svc", "https://api.example.com", &[("X Api Key", "value")]);
+        assert!(config.validate().is_err());
+
+        let config = external_api_config_with("svc", "https://api.example.com", &[("X-Key", "")]);
+        assert!(config.validate().is_err());
+
+        let config =
+            external_api_config_with("svc", "https://api.example.com", &[("X-Api-Key", "value")]);
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn external_api_rejects_out_of_range_limits() {
+        let mut config = external_api_config_with("svc", "https://api.example.com", &[]);
+        config.external_api.timeout_secs = 0;
+        assert!(config.validate().is_err());
+
+        let mut config = external_api_config_with("svc", "https://api.example.com", &[]);
+        config.external_api.timeout_secs = 61;
+        assert!(config.validate().is_err());
+
+        let mut config = external_api_config_with("svc", "https://api.example.com", &[]);
+        config.external_api.response_limit_bytes = 0;
+        assert!(config.validate().is_err());
+
+        let mut config = external_api_config_with("svc", "https://api.example.com", &[]);
+        config.external_api.response_limit_bytes = 16 * 1_048_576 + 1;
         assert!(config.validate().is_err());
     }
 }

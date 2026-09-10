@@ -75,6 +75,10 @@ async fn index(State(state): State<AppState>) -> Json<IndexResponse> {
         ]);
     }
 
+    if state.external_api_enabled() {
+        endpoints.push("GET/POST /api/ext/{name} (external API proxy)");
+    }
+
     Json(IndexResponse {
         service: env!("CARGO_PKG_NAME"),
         version: env!("CARGO_PKG_VERSION"),

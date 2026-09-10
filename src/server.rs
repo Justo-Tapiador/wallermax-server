@@ -48,6 +48,7 @@ pub fn build_app(config: &AppConfig, state: AppState) -> Router {
         &config.static_files,
         &config.metrics,
         state.cms_enabled(),
+        state.external_api_enabled(),
     );
     build_app_with_routes(config, state, router)
 }
@@ -105,7 +106,9 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
     }
 
     if !config.database.enabled {
-        return Ok(AppState::new(config.clone()));
+        let state = AppState::new(config.clone());
+        ensure_external_api_resolved(config, &state)?;
+        return Ok(state);
     }
 
     let pool = db::connect(&config.database).await.map_err(|error| {
@@ -216,7 +219,41 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
         }
     }
 
+    // Endpoints that failed to resolve (a `${ENV}` variable that is not
+    // set, a header value the HTTP layer rejects) disable the proxy in
+    // `AppState::build` with an error log — for the real binary that
+    // silent degradation is turned into a hard startup failure instead:
+    // a proxy running without its secrets is worse than no proxy.
+    ensure_external_api_resolved(config, &state)?;
+
+    if state.external_api_enabled() {
+        let names: Vec<&str> = config
+            .external_api
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.name.as_str())
+            .collect();
+        tracing::info!(
+            endpoints = %names.join(", "),
+            "external API proxy enabled (GET/POST /api/ext/<name>; secrets stay server-side)"
+        );
+    }
+
     Ok(state)
+}
+
+/// Turns a resolved-away `[external_api]` section into a hard startup
+/// failure (see `build_state`): `AppState::build` already logged the
+/// exact cause, so the error only points at the log.
+fn ensure_external_api_resolved(config: &AppConfig, state: &AppState) -> Result<(), ServerError> {
+    if !config.external_api.endpoints.is_empty() && !state.external_api_enabled() {
+        return Err(String::from(
+            "external_api endpoints are configured but failed to resolve; check the \
+             startup log for the exact header or ${ENV} variable at fault",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Runs the server until a shutdown signal is received.

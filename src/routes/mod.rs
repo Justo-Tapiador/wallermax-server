@@ -15,6 +15,7 @@ pub mod admin;
 pub mod auth;
 pub mod cms;
 pub mod echo;
+pub mod external_api;
 pub mod health;
 pub mod index;
 pub mod metrics;
@@ -44,6 +45,10 @@ use crate::state::AppState;
 /// `/perfil/password`), which additionally requires the template
 /// rendering services in the application state.
 ///
+/// `external_api_enabled` mounts the external API proxy
+/// (`GET/POST /api/ext/{name}`), which is enabled by configuring at
+/// least one `[[external_api.endpoints]]` entry.
+///
 /// `static_files` mounts the static file family (see
 /// [`static_files`]): while enabled, `GET /` serves the index file and
 /// unmatched paths resolve against the static root instead of the JSON
@@ -54,6 +59,7 @@ pub fn routes(
     static_files: &StaticConfig,
     metrics: &MetricsConfig,
     cms_enabled: bool,
+    external_api_enabled: bool,
 ) -> Router<AppState> {
     let mut router = Router::new()
         .merge(index::routes())
@@ -69,6 +75,10 @@ pub fn routes(
 
     if cms_enabled {
         router = router.merge(cms::routes());
+    }
+
+    if external_api_enabled {
+        router = router.merge(external_api::routes());
     }
 
     if metrics.enabled {

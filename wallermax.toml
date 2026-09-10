@@ -91,6 +91,42 @@ referrer_policy = "no-referrer"
 content_security_policy = "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 strict_transport_security = "max-age=31536000; includeSubDomains"
 
+[external_api]
+# Server-side proxy for external APIs (v0.12.0). Browsers call named
+# endpoints on this server (GET/POST /api/ext/<name>) and it forwards
+# the request upstream with the configured headers attached — API keys
+# never reach the browser, and the upstream's CORS policy stops
+# mattering (server-to-server calls are not bound by it).
+#
+# The family mounts only while at least one endpoint is configured;
+# with no endpoints (the default below) /api/ext/... answers the JSON 404.
+# Per-call upstream timeout in seconds. Keep it below
+# server.request_timeout_secs so the proxy answers the browser with its
+# own 502 before the global request timeout truncates the call.
+timeout_secs = 8
+
+# Maximum forwarded upstream body in bytes. An upstream answering with
+# more than this becomes a 502 (reading stops at the cap, so memory
+# stays bounded).
+response_limit_bytes = 262144
+
+# Named upstreams — one entry is one route. `name` follows the CMS slug
+# rules (lowercase, digits, single dashes) and becomes the path segment;
+# the incoming query string is appended to `url` on every call.
+# `auth_required = true` demands a valid Bearer token or session cookie.
+# Header values may reference the environment with ${VAR}, expanded once
+# at startup — a missing variable is a startup error, and the committed
+# file can hold placeholders while real keys live in
+# wallermax.local.toml (git-ignored) or the process environment.
+#
+# [[external_api.endpoints]]
+# name = "weather"
+# url = "https://api.weather.example.com/v1/current"
+# auth_required = false
+#
+# [external_api.endpoints.headers]
+# X-Api-Key = "${WEATHER_API_KEY}"
+
 [static]
 # Static file serving for otherwise unmatched paths.
 # While enabled: GET / answers with public/index.html, other paths resolve
@@ -359,7 +395,7 @@ enabled = true
 # validated at startup exactly like the panel forms validate it.
 # Override with WALLERMAX_CMS__DEFAULT_PAGE.
 #
-# default_page = "inicio"
+default_page = "inicio"
 
 [metrics]
 # Prometheus exposition endpoint: scrapes return every collected metric

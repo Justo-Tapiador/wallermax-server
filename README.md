@@ -27,10 +27,15 @@ auto | boa | sidecar`), and v0.10.1 exposes the live backend through
 `GET /health` and the `wallermax_template_backend` metric. v0.11.0 gives
 the CMS the homepage: `[cms] default_page` renders a database-backed page
 at `GET /` — ahead of the static index file, with the `/p/<slug>` draft
-gating and a graceful fallback. See
+gating and a graceful fallback. v0.12.0 adds the server-side external
+API proxy: `GET/POST /api/ext/{name}` forwards to operator-named
+upstreams, injecting API keys the browser never sees (and sidestepping
+upstream CORS entirely). See
 [README-jhs-engine.md](README-jhs-engine.md),
 [Template backends](#template-backends-boa-and-the-node-sidecar-v0100),
-[The CMS](#the-cms-v080) and the [roadmap](#roadmap).
+[The CMS](#the-cms-v080),
+[External API proxy](#external-api-proxy-v0120) and the
+[roadmap](#roadmap).
 
 ## Table of contents
 
@@ -45,6 +50,7 @@ gating and a graceful fallback. See
 - [Refresh tokens](#refresh-tokens)
 - [Browser sessions (v0.7.0)](#browser-sessions-v070)
 - [The CMS (v0.8.0)](#the-cms-v080)
+- [External API proxy (v0.12.0)](#external-api-proxy-v0120)
 - [Prometheus metrics](#prometheus-metrics)
 - [TLS (HTTPS)](#tls-https)
 - [Trusted proxies and client IPs](#trusted-proxies-and-client-ips)
@@ -74,6 +80,10 @@ gating and a graceful fallback. See
   `X-RateLimit-*` headers), bounded memory with stale-bucket sweeping.
 - **CORS** — exact-origin allowlist or wildcard, configurable preflight
   caching; disabled by default (browsers then deny all cross-origin reads).
+- **External API proxy** — `GET/POST /api/ext/{name}` forwards to
+  operator-configured upstreams with `${ENV}`-expanded secret headers, so
+  API keys never reach the browser and upstream CORS stops mattering
+  (v0.12.0).
 - **Request body limits** — early `Content-Length` rejection plus
   stream-level enforcement; `413` with the JSON error envelope.
 - **JSON-first** — consistent JSON success bodies and a consistent JSON error
@@ -150,7 +160,7 @@ gating and a graceful fallback. See
   matrix, Docker build with in-container smoke test).
 - **Storage-agnostic** — handlers depend on the `UserRepository` trait, not
   on SQLite; the engine can be swapped without touching HTTP code.
-- **Tested** — 421 tests: unit tests per module plus end-to-end integration
+- **Tested** — 453 tests: unit tests per module plus end-to-end integration
   tests that boot the *real* server (plain HTTP and HTTPS) and speak HTTP
   to it — including a cookie-jar "browser" battery for the CMS and the
   Node sidecar battery (spawn, selftest, parity, hard-kill, respawn)
@@ -334,6 +344,13 @@ each middleware's tuning values live in their own section.
 | `cors.allowed_origins` | list | `[]` | Allowed origins, e.g. `["https://app.example.com"]` or `["*"]`. |
 | `cors.max_age_secs` | integer | `3600` | Preflight response caching time. |
 | `security_headers.*` | string | see file | One key per header (`nosniff`, `DENY`, ...); empty value omits the header. |
+| `external_api.timeout_secs` | integer | `8` | Per-call upstream timeout; must be 1-60 and below `server.request_timeout_secs`. |
+| `external_api.response_limit_bytes` | integer | `262144` | Cap on forwarded upstream bodies (1-16777216); oversized answers become `502`. |
+| `external_api.endpoints` | list of tables | `[]` | Named upstreams; one entry = one route. Empty (the default) keeps the whole family unmounted. |
+| `external_api.endpoints.name` | string | — | Route segment `/api/ext/{name}`; slug rules (lowercase, digits, single dashes), unique. |
+| `external_api.endpoints.url` | string | — | Absolute upstream `http`/`https` URL; the incoming query string is appended per call. |
+| `external_api.endpoints.auth_required` | bool | `false` | When `true`, calls need a Bearer token or session cookie; the rate limiter applies either way. |
+| `external_api.endpoints.headers` | table | `{}` | Headers attached to every upstream call; values may use `${VAR}` env references. |
 | `database.enabled` | bool | `false` (defaults) / `true` (wallermax.toml) | Mount the SQLite persistence layer (required by `[auth]`). |
 | `database.url` | string | `sqlite://wallermax.db?mode=rwc` | SQLite URL; `mode=rwc` creates the file, `sqlite::memory:` is ephemeral. |
 | `database.max_connections` | integer | `5` | Pool size (SQLite serializes writes; small is fine). |
@@ -573,6 +590,7 @@ embeds whitelisted — nothing open to the whole internet.
 | `GET` | `/health` | — | Liveness probe (version + the live `template_backend`). |
 | `GET` | `/api/stats` | — | Runtime metrics (+ `registered_users` while auth is on). |
 | `POST` | `/api/echo` | — | Debug utility: reads and describes the request body. |
+| `GET`/`POST` | `/api/ext/{name}` | per endpoint | External API proxy (v0.12.0): forward to the named configured upstream — see [External API proxy](#external-api-proxy-v0120). |
 | `POST` | `/api/auth/register` | — | Create an account; the **first** one becomes the admin. JSON **and** form bodies: JSON answers `201`, the form path logs the fresh account in (cookie + `303`). |
 | `POST` | `/api/auth/login` | — | Exchange credentials for a Bearer token (+ refresh token while enabled). JSON **and** `x-www-form-urlencoded` bodies; both set the session cookie (form posts answer `303`). |
 | `GET` | `/api/auth/me` | Bearer / cookie | The caller's profile (fresh from the repository). |
@@ -589,8 +607,9 @@ embeds whitelisted — nothing open to the whole internet.
 
 The auth and admin families are mounted only while `[auth]` is enabled;
 the CMS family additionally requires `[database]`, `[auth]` and
-`[templates]`; otherwise those paths answer with the standard JSON `404`.
-The same applies
+`[templates]`; the external API proxy mounts while at least one
+`[[external_api.endpoints]]` entry is configured and resolves; otherwise
+those paths answer with the standard JSON `404`. The same applies
 to the static family (`[static]`), the metrics endpoint (`[metrics]`) and
 the refresh/logout endpoints (`auth.refresh_tokens_enabled`).
 
@@ -983,6 +1002,114 @@ with local repository access to the machine that runs the server. That
 is the deliberate separation between the *CMS administrator* and the
 *server operator*.
 
+## External API proxy (v0.12.0)
+
+Browsers cannot keep a secret, and cross-origin `fetch` calls are bound
+by the *target's* CORS policy. Both problems bite the moment a page
+needs a third-party API: embedding the API key in the page publishes it
+to every visitor, and the upstream may answer no CORS headers at all
+(the browser then refuses to even read the response). The
+`[external_api]` proxy solves both at once — the page calls a **named**
+endpoint on this server and the server forwards the request upstream
+with the secrets attached:
+
+```toml
+[external_api]
+timeout_secs = 8
+response_limit_bytes = 262144
+
+[[external_api.endpoints]]
+name = "weather"
+url = "https://api.weather.example.com/v1/current"
+auth_required = false
+
+[external_api.endpoints.headers]
+X-Api-Key = "${WEATHER_API_KEY}"
+Accept = "application/json"
+```
+
+```js
+// any page (a .jhs view, a CMS page body):
+fetch('/api/ext/weather?city=Madrid')
+  .then(r => r.json())
+  .then(data => /* the upstream JSON, verbatim */);
+```
+
+The browser only ever talks to this origin, so upstream CORS stops
+mattering entirely; the `X-Api-Key` header travels server-to-server and
+never appears in any markup, script or dev-tools panel.
+
+The family mounts only while at least one
+`[[external_api.endpoints]]` entry is configured — the default
+configuration has none, and `/api/ext/...` then answers the standard
+JSON `404`. One entry is one route: `name` becomes the path segment
+(`GET/POST /api/ext/{name}`), validated with the same slug rules the
+CMS enforces (lowercase letters, digits, single dashes; unique). The
+`url` must be an absolute `http`/`https` address and is **operator
+territory**: the client picks a *name*, never a URL, so there is no
+SSRF surface — no request can be steered towards an address that was
+not explicitly configured.
+
+### Secrets via `${ENV}` references
+
+Header values may reference the environment with `${VAR_NAME}`,
+expanded once at startup. A missing variable, an unterminated `${`, an
+invalid name or an expansion containing control characters are all
+**startup errors** — a proxy that would silently run without its
+secrets is worse than no proxy, so the server refuses to boot instead
+(see the startup log for the exact endpoint and variable at fault).
+The committed `wallermax.toml` can therefore hold placeholders while
+real keys live in the git-ignored `wallermax.local.toml` or in the
+process environment:
+
+```toml
+# wallermax.local.toml (git-ignored) — real values, never committed
+[external_api.endpoints.headers]      # merged over wallermax.toml
+X-Api-Key = "real-key-from-the-dashboard"
+```
+
+Reserved header names (`host`, `content-length`, `connection`,
+`transfer-encoding`, `cookie`) are rejected at validation — the HTTP
+client owns them. Nothing from the incoming request is forwarded
+upstream either: no cookies, no `Authorization` header, no arbitrary
+client headers — only the configured headers, `User-Agent`
+(`wallermax-server/<version>`) and `Accept` travel, so a session cookie
+can never leak to a third party through the proxy.
+
+### The request contract
+
+| Concern | Behaviour |
+|---------|-----------|
+| Methods | `GET` and `POST` pass through (the upstream sees the same method). |
+| Query string | Appended to the configured URL (`?city=Madrid` → upstream `...?city=Madrid`; `&` joins when the URL already has one). |
+| `POST` bodies | Forwarded as-is while bounded by `server.max_body_size_bytes`, and only for text media types (`application/json`, `text/*`); anything else answers `400`. |
+| Response status | Passes through verbatim — an upstream `429` reaches the browser as `429`. |
+| Response body | Capped by `external_api.response_limit_bytes`; an oversized answer becomes a `502` envelope (reading stops at the cap, so a huge upstream costs bounded memory). |
+| Media types | Only `application/json`, `application/*+json` and `text/*` are forwarded (parameters like `; charset=utf-8` included); binary answers become `502` — this is a JSON proxy, not a media one. |
+| Auth | `auth_required = true` endpoints demand a valid Bearer token or session cookie (`401` otherwise); public endpoints still go through the global rate limiter and every middleware. |
+| Failures | Transport errors and timeouts render as `502` envelopes with generic messages; the endpoint name and exact cause are logged server-side only. |
+
+The usual pipeline still wraps every call: rate limiting (per client
+IP, `429` + `Retry-After`), the request timeout, the request id, and
+the security headers — the CSP of the page that made the call governs
+what the browser may do with the answer, exactly as with any same-origin
+response.
+
+### Operating notes
+
+Keep `external_api.timeout_secs` below
+`server.request_timeout_secs` (the default 8 vs 15) so the proxy
+answers the browser with its own `502` before the global timeout
+truncates the request. Each call holds one connection from the pooled
+`reqwest` client while waiting upstream, so `endpoints * workers` is
+the rough worst case for concurrent upstream calls. The proxy is
+stateless: no retry logic, no caching, no circuit breaker — if an
+upstream flaps, the browser sees the flapping, which is usually the
+honest answer for a dashboard-style consumer. Enabling `[cors]` for
+other origins is *not* needed for the proxy itself (the calls are
+same-origin by design); it only matters when a *different* site must
+call this server directly.
+
 ## Prometheus metrics
 
 Flip `[metrics] enabled = true` (on in the shipped `wallermax.toml`) and
@@ -1163,6 +1290,7 @@ through `[middleware]` in the configuration.
 | `src/error.rs` | `AppError` model → consistent JSON error envelope. |
 | `src/rate_limit.rs` | Token-bucket rate limiter (per client IP). |
 | `src/proxy.rs` | Trusted proxies, CIDR matching, `X-Forwarded-For` resolution. |
+| `src/external_api.rs` | `[external_api]` proxy state: endpoint table, `${ENV}` header resolution, pooled upstream client. |
 | `src/auth.rs` | Argon2id hashing, JWT access tokens, refresh token primitives. |
 | `src/db.rs` | SQLite pool, embedded migrations, `UserRepository` trait + impl. |
 | `src/metrics.rs` | Prometheus registry and exposition. |
@@ -1361,7 +1489,7 @@ wallermax-server/
 
 ```console
 $ cargo test
-running 234 tests ... ok      # unit tests (config, state, error, limiter,
+running 252 tests ... ok      # unit tests (config, state, error, limiter,
                                #   proxy CIDRs, auth + refresh primitives,
                                #   repository incl. refresh token store and
                                #   the page repository, metrics registry
@@ -1370,7 +1498,9 @@ running 234 tests ... ok      # unit tests (config, state, error, limiter,
                                #   engine + parser + include() + session
                                #   cookie helpers, login helpers, CMS
                                #   validation helpers incl. the
-                               #   default_page slug rule, sidecar client)
+                               #   default_page slug rule, sidecar client,
+                               #   external_api config validation +
+                               #   ${ENV} expansion)
 running 5 tests ... ok          # config_env: environment override semantics
                                #   (incl. cms.default_page)
 running 30 tests ... ok         # auth: register/login/profile/admin flows,
@@ -1393,6 +1523,15 @@ running 12 tests ... ok         # refresh_tokens: rotation, reuse detection,
                                #   expiry, disabled mode, multi-rotation
 running 11 tests ... ok         # http_api: real server + real HTTP requests
                                #   (+ the health probe's template_backend)
+running 14 tests ... ok         # external_api: the proxy battery — a stub
+                               #   upstream on an ephemeral port: JSON/text
+                               #   pass-through with statuses and media
+                               #   types, configured headers travel while
+                               #   client headers do not, query and POST
+                               #   forwarding, ${ENV} secrets, auth_required
+                               #   gating (401 vs session), oversized and
+                               #   binary answers becoming 502, upstream
+                               #   timeouts, the unmounted default
 running 15 tests ... ok         # security: rate limit, CORS, body limit, ...
 running 8 tests ... ok          # metrics: exposition format, headers, path,
                                #   scrape exemption, registered users gauge,
@@ -1417,7 +1556,7 @@ running 11 tests ... ok         # sidecar: the Node sidecar battery — spawn
                                #   node on PATH)
 ```
 
-**421 tests total**, all of them plain `cargo test` (no docker, no
+**453 tests total**, all of them plain `cargo test` (no docker, no
 network). The sidecar battery needs `node` on `PATH` and skips
 gracefully otherwise — mirroring the `auto` backend's fallback. The
 integration tests boot the exact same application the
