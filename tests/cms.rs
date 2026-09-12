@@ -32,6 +32,22 @@ fn cms_config() -> (AppConfig, common::TempDbGuard) {
     (config, db)
 }
 
+/// `cms_config()` with an **empty** static root: `GET /` falls through
+/// to the dynamic view chain (the CMS pages home, or `views/index.jhs`
+/// when the CMS is off) whatever the repository's own `public/` ships.
+///
+/// The sample site now serves a static homepage from `public/index.html`
+/// with `[cms] default_page` disabled, so the home-route tests below pin
+/// their own static root: they verify server behaviour, not the layout
+/// of the shipped sample site. (The import battery keeps the real
+/// `public/` on purpose — it imports the shipped `hello.jhs` demo.)
+fn dynamic_home_config(marker: &str) -> (AppConfig, common::TempDbGuard, StaticRootGuard) {
+    let (mut config, db) = cms_config();
+    let root = StaticRootGuard::empty(marker);
+    config.static_files.root_dir = root.root_dir();
+    (config, db, root)
+}
+
 /// A cookie-storing client: `Set-Cookie` in, `Cookie` out — a browser.
 /// Redirects stay manual so each hop can be asserted.
 fn browser_client() -> reqwest::Client {
@@ -291,7 +307,7 @@ async fn editors_manage_content_but_not_accounts() {
 
 #[tokio::test]
 async fn the_home_lists_published_pages_for_everyone() {
-    let (config, _db) = cms_config();
+    let (config, _db, _root) = dynamic_home_config("home-listing");
     let server = TestServer::start_full(config).await;
     register_admin(&server, "root-admin", "sup3r-secret!").await;
     let admin = login_browser(&server, "root-admin", "sup3r-secret!").await;
@@ -305,7 +321,7 @@ async fn the_home_lists_published_pages_for_everyone() {
     )
     .await;
 
-    // The static index is gone in v0.8.0: `/` falls through to the
+    // No static index in this fixture: `/` falls through to the
     // dynamic view with the shared header and the page listing.
     let response = reqwest::get(server.url("/")).await.expect("home request");
     assert_eq!(response.status(), 200);
@@ -407,6 +423,21 @@ impl StaticRootGuard {
         std::fs::create_dir_all(&dir).expect("temp static root");
         std::fs::write(dir.join("index.html"), format!("<h1>{marker}</h1>"))
             .expect("index fixture");
+        Self { dir }
+    }
+
+    /// An empty static root: no index file, so `/` never stops at the
+    /// static layer and falls through to the dynamic view chain —
+    /// regardless of any homepage the repository's own `public/` ships.
+    fn empty(marker: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "wallermax-cms-root-{}-{marker}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp static root");
+        // A leftover index from a crashed run would defeat the fixture's
+        // whole point: this root must ship no index file.
+        let _ = std::fs::remove_file(dir.join("index.html"));
         Self { dir }
     }
 
@@ -588,7 +619,7 @@ async fn default_page_draft_follows_the_p_gating() {
 
 #[tokio::test]
 async fn default_page_is_ignored_while_the_cms_is_disabled() {
-    let (mut config, _db) = cms_config();
+    let (mut config, _db, _root) = dynamic_home_config("cms-disabled");
     config.cms.enabled = false;
     config.cms.default_page = Some(String::from("inicio"));
     let server = TestServer::start_full(config).await;
@@ -1147,7 +1178,7 @@ async fn deleting_an_account_kills_its_refresh_tokens() {
 
 #[tokio::test]
 async fn the_full_browser_circle_login_logout_modal() {
-    let (config, _db) = cms_config();
+    let (config, _db, _root) = dynamic_home_config("browser-circle");
     let server = TestServer::start_full(config).await;
     register_admin(&server, "root-admin", "sup3r-secret!").await;
 
@@ -1275,7 +1306,7 @@ async fn form_registration_logs_the_fresh_account_in() {
 
 #[tokio::test]
 async fn form_registration_failures_bounce_back_with_the_error() {
-    let (config, _db) = cms_config();
+    let (config, _db, _root) = dynamic_home_config("register-bounce");
     let server = TestServer::start_full(config).await;
     register_admin(&server, "root-admin", "sup3r-secret!").await;
 
