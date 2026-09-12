@@ -321,10 +321,10 @@ mod tests {
         // day, the F10 probe minute and a Gregorian century turn).
         for seconds in [
             0,
-            951_782_400,     // 2000-02-29 00:00
-            1_709_164_800,   // 2024-02-29 00:00
-            1_789_226_100,   // 2026-09-12 15:15:00 (the F10 probe minute)
-            4_102_444_800,   // 2100-01-01 00:00 (a non-leap century turn)
+            951_782_400,   // 2000-02-29 00:00
+            1_709_164_800, // 2024-02-29 00:00
+            1_789_226_100, // 2026-09-12 15:15:00 (the F10 probe minute)
+            4_102_444_800, // 2100-01-01 00:00 (a non-leap century turn)
         ] {
             assert_eq!(seconds % 60, 0, "the samples are minute-aligned");
             let formatted = format_datetime_local(seconds);
