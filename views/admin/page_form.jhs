@@ -15,13 +15,15 @@
       <a class="btn btn-fantasma" href="/admin/pages">Volver al listado</a>
 <?jhs if (!form.is_new) { ?>
       <a class="btn btn-fantasma" href="/p/<?= form.slug ?>">Ver la página</a>
+      <a class="btn btn-fantasma" href="/admin/pages/<?= form.id ?>/history">Historial</a>
 <?jhs } ?>
     </div>
 
-<?jhs if (query.ok == "creada" || query.ok == "guardada" || query.ok == "importada") { ?>
+<?jhs if (query.ok == "creada" || query.ok == "guardada" || query.ok == "importada" || query.ok == "restaurada") { ?>
     <p class="aviso aviso-ok">
 <?jhs if (query.ok == "creada") { ?>Página creada como borrador: revisa el contenido y marca «Publicada» cuando esté lista.
 <?jhs } else if (query.ok == "importada") { ?>Contenido importado como borrador: revísalo y publícalo cuando quieras.
+<?jhs } else if (query.ok == "restaurada") { ?>Revisión restaurada: el contenido ha vuelto y la restauración misma queda registrada como una revisión nueva (reversible, como todo).
 <?jhs } else { ?>Cambios guardados.<?jhs } ?>
     </p>
 <?jhs } ?>
@@ -109,6 +111,27 @@
         <div class="campo campo-check">
           <input id="publicada" type="checkbox" name="is_published" value="on"<?= form.is_published ? " checked" : "" ?>>
           <label for="publicada">Publicada (visible en /p y en el listado público)</label>
+          <p class="ayuda">Marcada = pública ahora mismo. Si la página se publicó sola al
+             llegar su fecha programada, verás el cuadro ya marcado: es la visibilidad
+             real, no solo el interruptor guardado.</p>
+        </div>
+        <div class="campo">
+          <label for="programada">Programar publicación (UTC)</label>
+          <input id="programada" type="datetime-local" name="publish_at" value="<?= form.publish_at ?>">
+          <p class="ayuda">Borrador + fecha futura: la página se publica sola al llegar el
+             momento, sin tareas programadas ni reinicios — la visibilidad se decide en
+             cada lectura. Se interpreta en UTC (la hora del servidor). Una fecha pasada
+             se descarta al guardar, y una página marcada como «Publicada» ignora el
+             campo.</p>
+        </div>
+        <div class="campo">
+          <label for="nota">Nota de revisión (opcional)</label>
+          <input id="nota" type="text" name="revision_note" maxlength="200"
+                 placeholder="Qué has cambiado — se guarda con el historial"
+                 value="<?= form.revision_note ?>">
+          <p class="ayuda">Cada guardado — crear, editar, restaurar — deja una revisión del
+             contenido; la nota acompaña a esa entrada en el
+             <a href="<?= form.is_new ? "/admin/pages" : "/admin/pages/" + form.id + "/history" ?>">historial</a>.</p>
         </div>
       </section>
 

@@ -455,12 +455,82 @@ unset simply omits the element. Both are public information like the
 `/p` index, so the switch defaults to on: `[cms] feed = false` turns
 them into 404s.
 
+## History: revisions and scheduled publishing (F11)
+
+Edits are cheap to make and expensive to regret. F11 records every
+save and lets time do the publishing — both server-side, both
+JavaScript-free:
+
+| Route | Who | What |
+|---|---|---|
+| `GET /admin/pages/{id}/history` | editor/admin | The revision list: newest first, authors and notes included. |
+| `GET /admin/pages/{id}/history/{revision}` | editor/admin | One snapshot in full — the body as escaped source. |
+| `POST /admin/pages/{id}/history/{revision}/restore` | editor/admin | Copy the snapshot back onto the page, as a new revision. |
+
+### Every save is a snapshot
+
+Creating, editing, restoring — each lands the page row **and** its
+revision in one SQLite transaction, so a page without history (or
+history without a page) cannot exist. The snapshot carries every
+editable field (title, slug, body, format, parent, position, SEO)
+plus the state as saved, the editor who saved, and their optional
+one-line note — the «qué cambió» the form now offers. Deleting a page
+deletes its revisions; deleting an editor keeps them
+(`ON DELETE SET NULL`, like the page's own author link). The
+snapshot's `parent_id` deliberately carries no foreign key: it
+records where the page hung *at the time*, and the parent it names
+may legitimately be gone years later — the restore route
+re-validates it against today's tree instead.
+
+`[cms] max_revisions` (25 by default, `0` = unlimited) prunes the
+oldest snapshots **inside the same write** — history never exceeds
+the cap, not even for a moment.
+
+### Restoring is append-only
+
+Restoring copies an old snapshot onto the page as a **new** revision,
+noted «Restaurada desde la revisión N.» — the restore itself is
+recorded, and reversible like everything else. Content only, never
+state: the live `is_published` flag and schedule are the editor's
+current call, so a restore never publishes or unpublishes anything.
+Today's world is re-validated before anything moves — a slug another
+page has taken since, or a parent that no longer exists (or now
+hangs below the restored page), bounce back as inline form errors
+without appending a revision.
+
+The revision detail page shows the body as **escaped source**: a
+revision is never executed, not even for the editor reading it.
+Restoring is what puts content back into the normal, previewable
+pipeline.
+
+### Scheduled publishing: the reads decide
+
+A draft with a future `publish_at` becomes publicly visible the
+moment the clock passes it — there is no background task, no cron,
+nothing to keep running: every public read (the `/p` index,
+`/p/{slug}`, the FTS5 search, both feeds, the sitemap, the menu
+resolution) evaluates «published = the flag is set **or** the
+schedule has elapsed» at query time. A page goes live exactly on the
+second and behaves identically after a restart — the flag stored in
+the database never has to flip.
+
+The panel speaks the same truth: while pending, the page badges
+«programada» and editors see a banner with the exact moment; once
+elapsed, the badges and the edit form's checkbox say «publicada»,
+because that is what a visitor sees. Saving normalizes the column: a
+published page carries no schedule (the flag is the whole truth),
+and a date already in the past is spent and dropped — unchecking
+«Publicada» on a formerly scheduled page unpublishes for real
+instead of resurrecting the old date. The field is UTC
+(`datetime-local`), the panel clock every `*_h` field already
+displays.
+
 ## Configuration
 
-Two keys from F7, two from F9, two from F10 (all optional) — and
-**F8 adds zero keys**: the body mode is per-page state in the
-database, not server configuration, so the `wallermax.toml` boundary
-stayed untouched through it.
+Two keys from F7, two from F9, two from F10, one from F11 (all
+optional) — and **F8 adds zero keys**: the body mode is per-page
+state in the database, not server configuration, so the
+`wallermax.toml` boundary stayed untouched through it.
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|
@@ -470,14 +540,16 @@ stayed untouched through it.
 | `cms.media_max_bytes` | bytes | `524288` | Cap on one uploaded file; the upload is streamed and refused past the cap. |
 | `cms.index_page_size` | int | `10` | Rows per page of the public listings (`/p` and `/buscar`); validated 1–100 (F10). |
 | `cms.feed` | bool | `true` | Serve `GET /feed.xml` and `GET /atom.xml` with the published pages (F10). |
+| `cms.max_revisions` | int | `25` | Snapshots kept per page (F11): every save appends one and prunes the oldest beyond the cap, in the same write. `0` = unlimited; validated 0–1000. |
 
 Environment overrides: `WALLERMAX_CMS__SITEMAP`,
 `WALLERMAX_CMS__SITE_URL`, `WALLERMAX_CMS__MEDIA_DIR`,
 `WALLERMAX_CMS__MEDIA_MAX_BYTES`, `WALLERMAX_CMS__INDEX_PAGE_SIZE`,
-`WALLERMAX_CMS__FEED`. The keys are validated while the CMS
-is off too — a typo'd `site_url`, an out-of-range `media_max_bytes`
-(1 KiB .. 64 MiB) or an out-of-range `index_page_size` (1–100)
-is a startup error regardless of the switch.
+`WALLERMAX_CMS__FEED`, `WALLERMAX_CMS__MAX_REVISIONS`. The keys are
+validated while the CMS is off too — a typo'd `site_url`, an
+out-of-range `media_max_bytes` (1 KiB .. 64 MiB), an out-of-range
+`index_page_size` (1–100) or an out-of-range `max_revisions`
+(0–1000) is a startup error regardless of the switch.
 
 **The one interplay worth knowing** (F9): the default `512 KiB`
 `media_max_bytes` fits under the default 1 MiB
@@ -537,6 +609,21 @@ the keys are out of step.
   `xml_escape`, only published rows are ever listed, and the origin
   is the validated `site_url` or the Host header — no
   request-controlled path or query reaches the XML.
+- **Revisions are inert by construction** (F11): a snapshot's body is
+  only ever rendered as escaped source — the detail view prints it
+  through `<?= ?>`, never `raw()`, never the engine. A revision
+  becomes live content again only by being restored onto the page,
+  which feeds it back through the normal, validated, previewable
+  editor pipeline — the trust domain of page bodies is unchanged.
+- **The restore re-validates today's tree** (F11): the slug must be
+  free, the snapshot's parent must exist and not create a cycle — a
+  stale snapshot cannot steal a URL or wedge the hierarchy, and a
+  failed restore appends nothing.
+- **Scheduling adds no moving part** (F11): visibility is computed at
+  read time inside the very SQL the public routes already ran; there
+  is no task to kill, no race with the writer, and the public queries
+  gained no new parameters. The column is normalized on save, so a
+  spent schedule cannot silently resurrect a page.
 
 ## The CMS roadmap
 
@@ -554,8 +641,8 @@ the same discipline as the phases before it:
   visitor's words defanged into inert phrases), paginated listings
   (`/p`, search results, the media grid) and RSS/Atom feeds — this
   document.
-- **F11 — history**: page revisions with restore, scheduled
-  publishing.
+- **F11 — history** (done): page revisions with restore, scheduled
+  publishing — this document.
 
 Each phase ships as one patch with tests and this document updated;
 nothing lands half-featured.

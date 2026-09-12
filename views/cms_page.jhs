@@ -21,7 +21,8 @@
     <article class="tarjeta">
 <?jhs if (!page.is_published) { ?>
       <p class="aviso aviso-info">Borrador: solo lo ven los editores; el
-         público recibe un 404 hasta que se publique.</p>
+         público recibe un 404 hasta que se publique.<?jhs if (page.scheduled_for_h) { ?>
+         Se publicará automáticamente el <?= page.scheduled_for_h ?> (UTC).<?jhs } ?></p>
 <?jhs } ?>
       <h1><?= page.title ?></h1>
 <?jhs if (page.breadcrumbs && page.breadcrumbs.length) { ?>

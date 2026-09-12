@@ -70,6 +70,17 @@ const MAX_INDEX_PAGE_SIZE: u32 = 100;
 /// public listings (`GET /p` and the search results).
 const DEFAULT_INDEX_PAGE_SIZE: u32 = 10;
 
+/// Highest accepted `[cms] max_revisions` (F11): a page's history is
+/// pruned on every save, so the ceiling only guards a typo — a
+/// thousand revisions per page is already an archive.
+const MAX_MAX_REVISIONS: u32 = 1_000;
+
+/// Default `[cms] max_revisions` (F11): twenty-five snapshots per
+/// page, the classic CMS history depth — enough to walk back a
+/// morning of bad edits without unbounded growth. `0` keeps every
+/// revision.
+const DEFAULT_MAX_REVISIONS: u32 = 25;
+
 /// Root application configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -597,6 +608,15 @@ pub struct CmsConfig {
     ///
     /// `WALLERMAX_CMS__FEED` overrides the file value.
     pub feed: bool,
+    /// How many revisions each page keeps (F11): every save — create,
+    /// edit, restore — appends a snapshot of the editable fields to
+    /// `page_revisions`, and the oldest beyond this cap are pruned in
+    /// the same write. `0` keeps every revision (unbounded growth is
+    /// the operator's call); the history list always shows the newest
+    /// ones.
+    ///
+    /// `WALLERMAX_CMS__MAX_REVISIONS` overrides the file value.
+    pub max_revisions: u32,
 }
 
 impl Default for CmsConfig {
@@ -613,6 +633,7 @@ impl Default for CmsConfig {
             media_max_bytes: DEFAULT_MEDIA_MAX_BYTES,
             index_page_size: DEFAULT_INDEX_PAGE_SIZE,
             feed: true,
+            max_revisions: DEFAULT_MAX_REVISIONS,
         }
     }
 }
@@ -1223,6 +1244,14 @@ impl AppConfig {
                 MIN_INDEX_PAGE_SIZE, MAX_INDEX_PAGE_SIZE, self.cms.index_page_size
             )));
         }
+        // The revision cap is likewise switch-independent (F11): a
+        // typo'd history depth is a mistake regardless of the switch.
+        if self.cms.max_revisions > MAX_MAX_REVISIONS {
+            return Err(ConfigError::Message(format!(
+                "`cms.max_revisions` must be between 0 (unlimited) and {} (got {})",
+                MAX_MAX_REVISIONS, self.cms.max_revisions
+            )));
+        }
         if !self.cms.enabled {
             return Ok(());
         }
@@ -1668,6 +1697,21 @@ mod tests {
 
         let mut config = AppConfig::default();
         config.cms.index_page_size = 100;
+        config.validate().expect("the inclusive upper edge is fine");
+    }
+
+    #[test]
+    fn cms_max_revisions_is_capped() {
+        let mut config = AppConfig::default();
+        config.cms.max_revisions = 1_001;
+        assert!(config.validate().is_err(), "1_001 rejected");
+
+        let mut config = AppConfig::default();
+        config.cms.max_revisions = 0;
+        config.validate().expect("0 means unlimited and is fine");
+
+        let mut config = AppConfig::default();
+        config.cms.max_revisions = 1_000;
         config.validate().expect("the inclusive upper edge is fine");
     }
 

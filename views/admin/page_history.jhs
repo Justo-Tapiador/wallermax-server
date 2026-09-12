@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Historial — <?= page.title ?> — CMS wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+    <div class="panel-barra">
+      <h1>Historial de «<?= page.title ?>»</h1>
+      <a class="btn btn-fantasma" href="/admin/pages">Volver al listado</a>
+      <a class="btn btn-fantasma" href="/admin/pages/<?= page.id ?>/edit">Editar la página</a>
+    </div>
+
+    <section class="tarjeta">
+<?jhs if (revisiones && revisiones.length) { ?>
+      <p class="ayuda">Cada guardado — crear, editar o restaurar — deja aquí una revisión con
+         el contenido tal como se guardó, de la más reciente a la más antigua. Restaurar
+         copia una revisión sobre la página y queda registrada como una revisión nueva:
+         el historial nunca pierde nada por restaurar. Cuántas se conservan lo configura
+         el servidor (<code>cms.max_revisions</code>).</p>
+      <ul class="lista">
+<?jhs revisiones.forEach(function (revision) { ?>
+        <li>
+          <div class="principal">
+            <a href="/admin/pages/<?= page.id ?>/history/<?= revision.revision ?>">Revisión <?= revision.revision ?><?= revision.is_current ? " — actual" : "" ?></a>
+            <div class="secundario">
+              <?= revision.created_at_h ?><?jhs if (revision.edited_by_name) { ?> · por <?= revision.edited_by_name ?><?jhs } ?> · /p/<?= revision.slug ?>
+            </div>
+<?jhs if (revision.note) { ?>
+            <p class="fragmento"><?= revision.note ?></p>
+<?jhs } ?>
+          </div>
+<?jhs if (revision.estado == "publicada") { ?>
+          <span class="publicado">publicada</span>
+<?jhs } else if (revision.estado == "programada") { ?>
+          <span class="borrador">programada<?= revision.publish_at_h ? " · " + revision.publish_at_h : "" ?></span>
+<?jhs } else { ?>
+          <span class="borrador">borrador</span>
+<?jhs } ?>
+          <div class="acciones">
+            <a class="btn btn-fantasma" href="/admin/pages/<?= page.id ?>/history/<?= revision.revision ?>">Ver la revisión</a>
+          </div>
+        </li>
+<?jhs }); ?>
+      </ul>
+<?jhs } else { ?>
+      <p class="vacio">Esta página todavía no tiene revisiones guardadas.</p>
+<?jhs } ?>
+    </section>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

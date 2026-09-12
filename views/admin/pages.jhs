@@ -48,13 +48,16 @@
             <p class="fragmento"><?jhs pagina.fragmento.forEach(function (segmento) { ?><?jhs if (segmento.hit) { ?><mark><?= segmento.texto ?></mark><?jhs } else { ?><?= segmento.texto ?><?jhs } ?><?jhs }); ?></p>
             <div class="secundario">/p/<?= pagina.slug ?> · actualizada <?= pagina.updated_at_h ?></div>
           </div>
-<?jhs if (pagina.is_published) { ?>
+<?jhs if (pagina.estado == "publicada") { ?>
           <span class="publicado">publicada</span>
+<?jhs } else if (pagina.estado == "programada") { ?>
+          <span class="borrador">programada<?= pagina.publish_at_h ? " · " + pagina.publish_at_h : "" ?></span>
 <?jhs } else { ?>
           <span class="borrador">borrador</span>
 <?jhs } ?>
           <div class="acciones">
             <a class="btn btn-fantasma" href="/admin/pages/<?= pagina.id ?>/edit">Editar</a>
+            <a class="btn btn-fantasma" href="/admin/pages/<?= pagina.id ?>/history">Historial</a>
             <form method="post" action="/admin/pages/<?= pagina.id ?>/delete">
               <button class="btn btn-peligro" type="submit">Borrar</button>
             </form>
@@ -76,13 +79,16 @@
             <a href="/p/<?= pagina.slug ?>"><?= pagina.title ?></a>
             <div class="secundario">/p/<?= pagina.slug ?> · actualizada <?= pagina.updated_at_h ?></div>
           </div>
-<?jhs if (pagina.is_published) { ?>
+<?jhs if (pagina.estado == "publicada") { ?>
           <span class="publicado">publicada</span>
+<?jhs } else if (pagina.estado == "programada") { ?>
+          <span class="borrador">programada<?= pagina.publish_at_h ? " · " + pagina.publish_at_h : "" ?></span>
 <?jhs } else { ?>
           <span class="borrador">borrador</span>
 <?jhs } ?>
           <div class="acciones">
             <a class="btn btn-fantasma" href="/admin/pages/<?= pagina.id ?>/edit">Editar</a>
+            <a class="btn btn-fantasma" href="/admin/pages/<?= pagina.id ?>/history">Historial</a>
             <form method="post" action="/admin/pages/<?= pagina.id ?>/delete">
               <button class="btn btn-peligro" type="submit">Borrar</button>
             </form>

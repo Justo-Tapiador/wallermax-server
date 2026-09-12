@@ -169,7 +169,12 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
                 .into());
             }
             Some(CmsContext {
-                pages: Arc::new(SqlitePageRepository::new(pool.clone())),
+                // F11: the repository carries the revision cap the
+                // history prunes to on every save.
+                pages: Arc::new(SqlitePageRepository::new(
+                    pool.clone(),
+                    config.cms.max_revisions,
+                )),
                 menus: Arc::new(SqliteMenuRepository::new(pool.clone())),
                 media: Arc::new(SqliteMediaRepository::new(pool)),
                 media_root,

@@ -662,6 +662,15 @@ pub struct NewPage {
     /// Optional social/`og:image` URL — a site path or an absolute URL
     /// (F7; the media library lands in a later phase).
     pub og_image: Option<String>,
+    /// Scheduled publication moment, unix seconds UTC (F11): a draft
+    /// with a future `publish_at` becomes publicly visible the moment
+    /// the clock passes it — visibility is evaluated at read time, no
+    /// background task. `None` = no schedule; the handlers normalize
+    /// (a published page never carries one).
+    pub publish_at: Option<i64>,
+    /// Optional editor note recorded with the page's first revision
+    /// (F11) — "what changed", shown in the history list.
+    pub revision_note: Option<String>,
 }
 
 /// Field updates for an existing CMS page, addressed by id. A `None`
@@ -689,6 +698,18 @@ pub struct PageUpdate {
     pub meta_description: Option<String>,
     /// New `og:image`, or `None` to clear it.
     pub og_image: Option<String>,
+    /// The schedule as saved (F11) — already normalized by the handler
+    /// (published pages carry `None`, and a draft's schedule only
+    /// survives while it is still in the future). Stated like every
+    /// other field, not "keep the current one".
+    pub publish_at: Option<i64>,
+    /// Who is saving (F11): the audit link the appended revision
+    /// keeps. `pages.created_by` stays the original author; the
+    /// revisions record every editor along the way.
+    pub edited_by: Option<i64>,
+    /// Optional editor note ("what changed") stored on the revision
+    /// this save appends (F11).
+    pub revision_note: Option<String>,
 }
 
 /// A persisted CMS page row (see `migrations/0003_*` and `0004_*`).
@@ -701,6 +722,11 @@ pub struct PageRecord {
     /// How `content` is interpreted (F8).
     pub body_format: BodyFormat,
     pub is_published: bool,
+    /// Scheduled publication moment, unix seconds UTC (F11): `None`
+    /// on published pages and plain drafts; a future value makes the
+    /// page publicly visible the moment it elapses (read-time
+    /// visibility — the flag alone never has to flip).
+    pub publish_at: Option<i64>,
     pub created_by: Option<i64>,
     /// Creation time, unix seconds.
     pub created_at: i64,
@@ -722,6 +748,10 @@ pub struct PageSummary {
     pub slug: String,
     pub title: String,
     pub is_published: bool,
+    /// The schedule (F11), for the admin badges: a future value reads
+    /// as "programada"; a spent one only appears while nobody has
+    /// re-saved the page since it elapsed.
+    pub publish_at: Option<i64>,
     pub updated_at: i64,
     /// Parent page id; `None` = top level (F7).
     pub parent_id: Option<i64>,
@@ -739,6 +769,9 @@ pub struct SearchHit {
     pub slug: String,
     pub title: String,
     pub is_published: bool,
+    /// The hit's schedule (F11) — the admin filter's state badge;
+    /// public results are visible by construction and never render it.
+    pub publish_at: Option<i64>,
     pub updated_at: i64,
     /// Body snippet around the hits, markers included.
     pub fragment: String,
@@ -756,6 +789,56 @@ pub struct FeedEntry {
     pub updated_at: i64,
     /// Per-page SEO description; feeds omit the element when unset.
     pub meta_description: Option<String>,
+}
+
+/// One row of a page's history list (F11): the save metadata without
+/// the body — listings stay small. `edited_by_name` resolves the soft
+/// audit link to a username while the account exists.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RevisionSummary {
+    pub page_id: i64,
+    /// The per-page sequence number, `1..N` in save order.
+    pub revision: i64,
+    pub slug: String,
+    pub title: String,
+    /// The state **as saved** — informational: the history list can
+    /// show "guardada como borrador programada".
+    pub is_published: bool,
+    pub publish_at: Option<i64>,
+    /// The editor's optional note, as typed.
+    pub note: Option<String>,
+    /// Save time, unix seconds.
+    pub created_at: i64,
+    /// The saving editor's username, when the account still exists.
+    pub edited_by_name: Option<String>,
+}
+
+/// A full revision snapshot (F11): every editable field as saved —
+/// what the detail view renders (escaped, never executed) and what
+/// the restore route copies back onto the page as a new revision.
+#[derive(Debug, Clone)]
+pub struct PageRevision {
+    pub page_id: i64,
+    pub revision: i64,
+    pub slug: String,
+    pub title: String,
+    pub content: String,
+    /// How the snapshotted `content` is interpreted (F8).
+    pub body_format: BodyFormat,
+    pub parent_id: Option<i64>,
+    pub position: i64,
+    pub meta_title: Option<String>,
+    pub meta_description: Option<String>,
+    pub og_image: Option<String>,
+    /// The state as saved (informational — a restore never applies
+    /// it; the page's live publication state is the editor's call).
+    pub is_published: bool,
+    pub publish_at: Option<i64>,
+    pub note: Option<String>,
+    /// Save time, unix seconds.
+    pub created_at: i64,
+    /// The saving editor's username, when the account still exists.
+    pub edited_by_name: Option<String>,
 }
 
 /// Sanitizes a visitor query into an FTS5 `MATCH` expression (F10):
@@ -781,6 +864,7 @@ impl PageRecord {
             slug: self.slug.clone(),
             title: self.title.clone(),
             is_published: self.is_published,
+            publish_at: self.publish_at,
             updated_at: self.updated_at,
             parent_id: self.parent_id,
             position: self.position,
@@ -803,6 +887,7 @@ impl<'r> FromRow<'r, SqliteRow> for PageRecord {
                 .and_then(|raw| BodyFormat::parse(&raw))
                 .unwrap_or(BodyFormat::Jhs),
             is_published: row.try_get::<i64, _>("is_published")? != 0,
+            publish_at: row.try_get("publish_at")?,
             created_by: row.try_get("created_by")?,
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
@@ -822,9 +907,37 @@ impl<'r> FromRow<'r, SqliteRow> for PageSummary {
             slug: row.try_get("slug")?,
             title: row.try_get("title")?,
             is_published: row.try_get::<i64, _>("is_published")? != 0,
+            publish_at: row.try_get("publish_at")?,
             updated_at: row.try_get("updated_at")?,
             parent_id: row.try_get("parent_id")?,
             position: row.try_get("position")?,
+        })
+    }
+}
+
+impl<'r> FromRow<'r, SqliteRow> for PageRevision {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, SqlxError> {
+        Ok(Self {
+            page_id: row.try_get("page_id")?,
+            revision: row.try_get("revision")?,
+            slug: row.try_get("slug")?,
+            title: row.try_get("title")?,
+            content: row.try_get("content")?,
+            body_format: row
+                .try_get::<String, _>("body_format")
+                .ok()
+                .and_then(|raw| BodyFormat::parse(&raw))
+                .unwrap_or(BodyFormat::Jhs),
+            parent_id: row.try_get("parent_id")?,
+            position: row.try_get("position")?,
+            meta_title: row.try_get("meta_title")?,
+            meta_description: row.try_get("meta_description")?,
+            og_image: row.try_get("og_image")?,
+            is_published: row.try_get::<i64, _>("is_published")? != 0,
+            publish_at: row.try_get("publish_at")?,
+            note: row.try_get("note")?,
+            created_at: row.try_get("created_at")?,
+            edited_by_name: row.try_get("edited_by_name")?,
         })
     }
 }
@@ -924,32 +1037,165 @@ pub trait PageRepository: Send + Sync + 'static {
         parent_id: Option<i64>,
         include_drafts: bool,
     ) -> Result<Vec<PageSummary>, RepositoryError>;
+
+    /// The revision history of a page (F11), newest first: one row per
+    /// save — create, edit and restore all append one. The rows are
+    /// pruned to the repository's configured cap on every write;
+    /// `edited_by_name` resolves the audit link while the account
+    /// exists.
+    async fn revisions(&self, page_id: i64) -> Result<Vec<RevisionSummary>, RepositoryError>;
+
+    /// One revision's full snapshot (F11): every editable field as
+    /// saved — the detail view's source of truth and the restore
+    /// route's payload.
+    async fn find_revision(
+        &self,
+        page_id: i64,
+        revision: i64,
+    ) -> Result<Option<PageRevision>, RepositoryError>;
 }
 
 /// Column list shared by every `SELECT` on the `pages` table.
 const PAGE_COLUMNS: &str = "id, slug, title, content, is_published, created_by, \
                            created_at, updated_at, parent_id, position, meta_title, \
-                           meta_description, og_image, body_format";
+                           meta_description, og_image, body_format, publish_at";
 
 /// Column list of the listing projection (no `content`).
-const PAGE_SUMMARY_COLUMNS: &str = "id, slug, title, is_published, updated_at, \
-                                   parent_id, position";
+const PAGE_SUMMARY_COLUMNS: &str = "id, slug, title, is_published, publish_at, \
+                                   updated_at, parent_id, position";
+
+/// Public visibility of a page (F11): the published flag, **or** a
+/// schedule that has already elapsed. SQLite evaluates the clock at
+/// query time (`strftime`), so a scheduled draft goes live exactly on
+/// the second — no background task, no cron, and identical behaviour
+/// after a restart. Two spellings: the plain one for `pages`, the
+/// `p.`-prefixed one for the aliased join the FTS5 search builds.
+const PUBLIC_VISIBLE: &str = "(is_published = 1 OR (publish_at IS NOT NULL \
+     AND publish_at <= CAST(strftime('%s', 'now') AS INTEGER)))";
+const PUBLIC_VISIBLE_P: &str = "(p.is_published = 1 OR (p.publish_at IS NOT NULL \
+     AND p.publish_at <= CAST(strftime('%s', 'now') AS INTEGER)))";
+
+/// How many revisions the history list shows (F11) — the newest ones;
+/// the stored rows themselves are pruned to `[cms] max_revisions` on
+/// every save, so this only bounds the pathological unlimited case.
+const MAX_LISTED_REVISIONS: i64 = 500;
 
 /// How many ancestor hops [`PageRepository::ancestors`] walks before
 /// giving up: deeper than any sane site tree, but a corrupted cycle
 /// answers an error instead of hanging the walk.
 const MAX_ANCESTOR_HOPS: usize = 128;
 
+/// The editable-state snapshot a save records as one revision (F11):
+/// every field the restore route can put back. The lifetimes keep the
+/// create/update paths zero-copy over the already-owned form values.
+struct RevisionSnapshot<'a> {
+    slug: &'a str,
+    title: &'a str,
+    content: &'a str,
+    body_format: BodyFormat,
+    parent_id: Option<i64>,
+    position: i64,
+    meta_title: Option<&'a str>,
+    meta_description: Option<&'a str>,
+    og_image: Option<&'a str>,
+    /// The state **as saved** — informational for the history list;
+    /// a restore applies content only, never the state.
+    is_published: bool,
+    publish_at: Option<i64>,
+    /// The editor's optional note, as typed.
+    note: Option<&'a str>,
+}
+
 /// SQLite-backed [`PageRepository`] over a shared pool.
 #[derive(Clone)]
 pub struct SqlitePageRepository {
     pool: SqlitePool,
+    /// How many revisions each page keeps (F11), from
+    /// `[cms] max_revisions`; `0` keeps every revision.
+    max_revisions: u32,
 }
 
 impl SqlitePageRepository {
-    /// Wraps an already-migrated pool into a repository.
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    /// Wraps an already-migrated pool into a repository, with the
+    /// revision cap the history prunes to (F11).
+    pub fn new(pool: SqlitePool, max_revisions: u32) -> Self {
+        Self {
+            pool,
+            max_revisions,
+        }
+    }
+
+    /// Appends the revision row for a save (F11): `revision` is the
+    /// next per-page sequence number, and the snapshot is the editable
+    /// state as saved. Runs inside the page's own write transaction —
+    /// a page and its history land atomically, never one without the
+    /// other. Answers the revision number the row took.
+    async fn record_revision(
+        transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        page_id: i64,
+        snapshot: &RevisionSnapshot<'_>,
+        edited_by: Option<i64>,
+    ) -> Result<i64, RepositoryError> {
+        let revision: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(revision), 0) + 1 FROM page_revisions WHERE page_id = ?1",
+        )
+        .bind(page_id)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(RepositoryError::from_sqlx)?;
+
+        sqlx::query(
+            "INSERT INTO page_revisions (page_id, revision, slug, title, content, \
+             body_format, parent_id, position, meta_title, meta_description, og_image, \
+             is_published, publish_at, edited_by, note, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        )
+        .bind(page_id)
+        .bind(revision)
+        .bind(snapshot.slug)
+        .bind(snapshot.title)
+        .bind(snapshot.content)
+        .bind(snapshot.body_format.as_str())
+        .bind(snapshot.parent_id)
+        .bind(snapshot.position)
+        .bind(snapshot.meta_title)
+        .bind(snapshot.meta_description)
+        .bind(snapshot.og_image)
+        .bind(snapshot.is_published)
+        .bind(snapshot.publish_at)
+        .bind(edited_by)
+        .bind(snapshot.note)
+        .bind(unix_now())
+        .execute(&mut **transaction)
+        .await
+        .map_err(RepositoryError::from_sqlx)?;
+
+        Ok(revision)
+    }
+
+    /// Drops the oldest revisions beyond the configured cap (F11) —
+    /// `max_revisions = 0` keeps everything. Inside the save's
+    /// transaction, so history never exceeds the cap, not even for a
+    /// moment.
+    async fn prune_revisions(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        page_id: i64,
+        revision: i64,
+    ) -> Result<(), RepositoryError> {
+        if self.max_revisions == 0 {
+            return Ok(());
+        }
+        let floor = revision - i64::from(self.max_revisions);
+        if floor > 0 {
+            sqlx::query("DELETE FROM page_revisions WHERE page_id = ?1 AND revision <= ?2")
+                .bind(page_id)
+                .bind(floor)
+                .execute(&mut **transaction)
+                .await
+                .map_err(RepositoryError::from_sqlx)?;
+        }
+        Ok(())
     }
 }
 
@@ -959,11 +1205,20 @@ impl PageRepository for SqlitePageRepository {
         let created_at = unix_now();
         let updated_at = created_at;
 
+        // F11: the page row and its first revision land atomically — a
+        // page without history, or history without a page, can never
+        // exist.
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(RepositoryError::from_sqlx)?;
+
         let result = sqlx::query(
             "INSERT INTO pages (slug, title, content, is_published, created_by, \
              created_at, updated_at, parent_id, position, meta_title, meta_description, \
-             og_image, body_format) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, \
-             ?11, ?12, ?13)",
+             og_image, body_format, publish_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
+             ?10, ?11, ?12, ?13, ?14)",
         )
         .bind(&page.slug)
         .bind(&page.title)
@@ -978,28 +1233,56 @@ impl PageRepository for SqlitePageRepository {
         .bind(&page.meta_description)
         .bind(&page.og_image)
         .bind(page.body_format.as_str())
-        .execute(&self.pool)
+        .bind(page.publish_at)
+        .execute(&mut *transaction)
         .await;
 
-        match result {
-            Ok(done) => Ok(PageRecord {
-                id: done.last_insert_rowid(),
-                slug: page.slug.clone(),
-                title: page.title.clone(),
-                content: page.content.clone(),
-                body_format: page.body_format,
-                is_published: page.is_published,
-                created_by: page.created_by,
-                created_at,
-                updated_at,
-                parent_id: page.parent_id,
-                position: page.position,
-                meta_title: page.meta_title.clone(),
-                meta_description: page.meta_description.clone(),
-                og_image: page.og_image.clone(),
-            }),
-            Err(error) => Err(RepositoryError::from_sqlx(error)),
-        }
+        let id = match result {
+            Ok(done) => done.last_insert_rowid(),
+            Err(error) => return Err(RepositoryError::from_sqlx(error)),
+        };
+
+        // F11: revision 1 — the page as created, noted by its author.
+        let snapshot = RevisionSnapshot {
+            slug: &page.slug,
+            title: &page.title,
+            content: &page.content,
+            body_format: page.body_format,
+            parent_id: page.parent_id,
+            position: page.position,
+            meta_title: page.meta_title.as_deref(),
+            meta_description: page.meta_description.as_deref(),
+            og_image: page.og_image.as_deref(),
+            is_published: page.is_published,
+            publish_at: page.publish_at,
+            note: page.revision_note.as_deref(),
+        };
+        let revision =
+            Self::record_revision(&mut transaction, id, &snapshot, page.created_by).await?;
+        self.prune_revisions(&mut transaction, id, revision).await?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(RepositoryError::from_sqlx)?;
+
+        Ok(PageRecord {
+            id,
+            slug: page.slug.clone(),
+            title: page.title.clone(),
+            content: page.content.clone(),
+            body_format: page.body_format,
+            is_published: page.is_published,
+            publish_at: page.publish_at,
+            created_by: page.created_by,
+            created_at,
+            updated_at,
+            parent_id: page.parent_id,
+            position: page.position,
+            meta_title: page.meta_title.clone(),
+            meta_description: page.meta_description.clone(),
+            og_image: page.og_image.clone(),
+        })
     }
 
     async fn find_by_id(&self, id: i64) -> Result<Option<PageRecord>, RepositoryError> {
@@ -1030,7 +1313,7 @@ impl PageRepository for SqlitePageRepository {
             )
         } else {
             format!(
-                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE is_published = 1 \
+                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE {PUBLIC_VISIBLE} \
                  ORDER BY updated_at DESC, id DESC LIMIT ?1"
             )
         };
@@ -1055,7 +1338,7 @@ impl PageRepository for SqlitePageRepository {
             )
         } else {
             format!(
-                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE is_published = 1 \
+                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE {PUBLIC_VISIBLE} \
                  ORDER BY updated_at DESC, id DESC LIMIT ?1 OFFSET ?2"
             )
         };
@@ -1082,14 +1365,15 @@ impl PageRepository for SqlitePageRepository {
         // `snippet` reads column 1 (`content`; column 0 is `title`) and
         // wraps the hits in the markers the handlers split on. The
         // draft gate lives in the JOIN's WHERE, decided by the caller.
-        sqlx::query_as(
+        sqlx::query_as(&format!(
             "SELECT p.id AS id, p.slug AS slug, p.title AS title, \
-             p.is_published AS is_published, p.updated_at AS updated_at, \
+             p.is_published AS is_published, p.publish_at AS publish_at, \
+             p.updated_at AS updated_at, \
              snippet(pages_fts, 1, '⟦', '⟧', '…', 12) AS fragment \
              FROM pages_fts JOIN pages p ON p.id = pages_fts.rowid \
-             WHERE pages_fts MATCH ?1 AND (p.is_published = 1 OR ?2) \
+             WHERE pages_fts MATCH ?1 AND ({PUBLIC_VISIBLE_P} OR ?2) \
              ORDER BY bm25(pages_fts), p.id LIMIT ?3 OFFSET ?4",
-        )
+        ))
         .bind(match_query)
         .bind(include_drafts)
         .bind(limit)
@@ -1107,10 +1391,10 @@ impl PageRepository for SqlitePageRepository {
         let Some(match_query) = fts_match_query(terms) else {
             return Ok(0);
         };
-        sqlx::query_scalar(
+        sqlx::query_scalar(&format!(
             "SELECT count(*) FROM pages_fts JOIN pages p ON p.id = pages_fts.rowid \
-             WHERE pages_fts MATCH ?1 AND (p.is_published = 1 OR ?2)",
-        )
+             WHERE pages_fts MATCH ?1 AND ({PUBLIC_VISIBLE_P} OR ?2)",
+        ))
         .bind(match_query)
         .bind(include_drafts)
         .fetch_one(&self.pool)
@@ -1119,10 +1403,10 @@ impl PageRepository for SqlitePageRepository {
     }
 
     async fn feed_entries(&self, limit: i64) -> Result<Vec<FeedEntry>, RepositoryError> {
-        sqlx::query_as(
+        sqlx::query_as(&format!(
             "SELECT id, slug, title, updated_at, meta_description FROM pages \
-             WHERE is_published = 1 ORDER BY updated_at DESC, id DESC LIMIT ?1",
-        )
+             WHERE {PUBLIC_VISIBLE} ORDER BY updated_at DESC, id DESC LIMIT ?1",
+        ))
         .bind(limit)
         .fetch_all(&self.pool)
         .await
@@ -1134,7 +1418,19 @@ impl PageRepository for SqlitePageRepository {
         id: i64,
         update: &PageUpdate,
     ) -> Result<Option<PageRecord>, RepositoryError> {
+        // The current row feeds the snapshot's slug (a `None` update
+        // keeps it) and the early exit for missing pages.
+        let Some(current) = self.find_by_id(id).await? else {
+            return Ok(None);
+        };
         let updated_at = unix_now();
+
+        // F11: like `create`, the edit and its revision land atomically.
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(RepositoryError::from_sqlx)?;
 
         // `COALESCE` keeps the current slug when the update carries none
         // (a `None` binding is SQL `NULL`). `parent_id` binds plainly:
@@ -1143,8 +1439,8 @@ impl PageRepository for SqlitePageRepository {
         let result = sqlx::query(
             "UPDATE pages SET slug = COALESCE(?2, slug), title = ?3, content = ?4, \
              is_published = ?5, updated_at = ?6, parent_id = ?7, position = ?8, \
-             meta_title = ?9, meta_description = ?10, og_image = ?11, body_format = ?12 \
-             WHERE id = ?1",
+             meta_title = ?9, meta_description = ?10, og_image = ?11, body_format = ?12, \
+             publish_at = ?13 WHERE id = ?1",
         )
         .bind(id)
         .bind(update.slug.as_deref())
@@ -1158,13 +1454,41 @@ impl PageRepository for SqlitePageRepository {
         .bind(&update.meta_description)
         .bind(&update.og_image)
         .bind(update.body_format.as_str())
-        .execute(&self.pool)
+        .bind(update.publish_at)
+        .execute(&mut *transaction)
         .await
         .map_err(RepositoryError::from_sqlx)?;
 
         if result.rows_affected() == 0 {
+            // Vanished between the lookup and the write: nothing to
+            // version (the dropped transaction rolls back).
             return Ok(None);
         }
+
+        // F11: the revision records the state *as saved* — including
+        // the editor and their optional note.
+        let snapshot = RevisionSnapshot {
+            slug: update.slug.as_deref().unwrap_or(&current.slug),
+            title: &update.title,
+            content: &update.content,
+            body_format: update.body_format,
+            parent_id: update.parent_id,
+            position: update.position,
+            meta_title: update.meta_title.as_deref(),
+            meta_description: update.meta_description.as_deref(),
+            og_image: update.og_image.as_deref(),
+            is_published: update.is_published,
+            publish_at: update.publish_at,
+            note: update.revision_note.as_deref(),
+        };
+        let revision =
+            Self::record_revision(&mut transaction, id, &snapshot, update.edited_by).await?;
+        self.prune_revisions(&mut transaction, id, revision).await?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(RepositoryError::from_sqlx)?;
 
         self.find_by_id(id).await
     }
@@ -1187,10 +1511,12 @@ impl PageRepository for SqlitePageRepository {
     }
 
     async fn count_published(&self) -> Result<i64, RepositoryError> {
-        sqlx::query_scalar("SELECT COUNT(*) FROM pages WHERE is_published = 1")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(RepositoryError::from_sqlx)
+        sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM pages WHERE {PUBLIC_VISIBLE}"
+        ))
+        .fetch_one(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
     }
 
     async fn ancestors(&self, id: i64) -> Result<Vec<PageSummary>, RepositoryError> {
@@ -1233,7 +1559,7 @@ impl PageRepository for SqlitePageRepository {
         // (top level) without string-building the condition.
         let sql = format!(
             "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE parent_id IS ?1 \
-             AND (is_published = 1 OR ?2) ORDER BY position, id"
+             AND ({PUBLIC_VISIBLE} OR ?2) ORDER BY position, id"
         );
         sqlx::query_as(&sql)
             .bind(parent_id)
@@ -1241,6 +1567,43 @@ impl PageRepository for SqlitePageRepository {
             .fetch_all(&self.pool)
             .await
             .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn revisions(&self, page_id: i64) -> Result<Vec<RevisionSummary>, RepositoryError> {
+        sqlx::query_as(
+            "SELECT r.page_id AS page_id, r.revision AS revision, r.slug AS slug, \
+             r.title AS title, r.is_published AS is_published, r.publish_at AS publish_at, \
+             r.note AS note, r.created_at AS created_at, u.username AS edited_by_name \
+             FROM page_revisions r LEFT JOIN users u ON u.id = r.edited_by \
+             WHERE r.page_id = ?1 ORDER BY r.revision DESC LIMIT ?2",
+        )
+        .bind(page_id)
+        .bind(MAX_LISTED_REVISIONS)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn find_revision(
+        &self,
+        page_id: i64,
+        revision: i64,
+    ) -> Result<Option<PageRevision>, RepositoryError> {
+        sqlx::query_as(
+            "SELECT r.page_id AS page_id, r.revision AS revision, r.slug AS slug, \
+             r.title AS title, r.content AS content, r.body_format AS body_format, \
+             r.parent_id AS parent_id, r.position AS position, r.meta_title AS meta_title, \
+             r.meta_description AS meta_description, r.og_image AS og_image, \
+             r.is_published AS is_published, r.publish_at AS publish_at, r.note AS note, \
+             r.created_at AS created_at, u.username AS edited_by_name \
+             FROM page_revisions r LEFT JOIN users u ON u.id = r.edited_by \
+             WHERE r.page_id = ?1 AND r.revision = ?2",
+        )
+        .bind(page_id)
+        .bind(revision)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
     }
 }
 
@@ -1635,7 +1998,8 @@ impl MenuRepository for SqliteMenuRepository {
         let rows = sqlx::query(
             "SELECT m.id, m.name, m.title, m.created_at, m.updated_at, \
              mi.id AS item_id, mi.position, mi.label, mi.page_id, mi.url, \
-             p.slug AS page_slug, p.title AS page_title, p.is_published AS page_is_published \
+             p.slug AS page_slug, p.title AS page_title, p.is_published AS page_is_published, \
+             p.publish_at AS page_publish_at \
              FROM menus m \
              LEFT JOIN menu_items mi ON mi.menu_id = m.id \
              LEFT JOIN pages p ON p.id = mi.page_id \
@@ -1678,10 +2042,19 @@ impl MenuRepository for SqliteMenuRepository {
             let page_published: Option<i64> = row
                 .try_get("page_is_published")
                 .expect("joined published flag");
+            // F11: an item resolves while its linked page is publicly
+            // visible — the flag, or a schedule that has already
+            // elapsed (the same read-time rule every public read
+            // applies), so a menu goes live together with its page.
+            let page_publish_at: Option<i64> =
+                row.try_get("page_publish_at").expect("joined schedule");
+            let page_visible = page_slug.is_some()
+                && (page_published == Some(1)
+                    || page_publish_at.is_some_and(|at| at <= unix_now()));
 
-            let resolved = match (page_id, page_slug, page_published) {
-                // Page link, published: resolve to /p/<slug>.
-                (Some(_), Some(slug), Some(1)) => {
+            let resolved = match (page_id, page_slug, page_visible) {
+                // Page link, publicly visible: resolve to /p/<slug>.
+                (Some(_), Some(slug), true) => {
                     let title: String = row.try_get("page_title").expect("joined title");
                     ResolvedMenuItem {
                         position: row.try_get("position").expect("mi.position"),

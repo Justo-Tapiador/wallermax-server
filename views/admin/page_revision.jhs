@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Revisión <?= revision.revision ?> — <?= page.title ?> — CMS wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+    <div class="panel-barra">
+      <h1>Revisión <?= revision.revision ?> de «<?= page.title ?>»</h1>
+      <a class="btn btn-fantasma" href="/admin/pages/<?= page.id ?>/history">Volver al historial</a>
+      <a class="btn btn-fantasma" href="/admin/pages/<?= page.id ?>/edit">Editar la página</a>
+    </div>
+
+<?jhs if (form_error) { ?>
+    <p class="aviso aviso-error"><?= form_error ?></p>
+<?jhs } ?>
+
+    <section class="tarjeta">
+      <p class="pagina-meta">
+        Guardada <?= revision.created_at_h ?><?jhs if (revision.edited_by_name) { ?> · por <?= revision.edited_by_name ?><?jhs } ?><?jhs if (revision.estado == "publicada") { ?> · guardada publicada<?jhs } else if (revision.estado == "programada") { ?> · guardada programada<?= revision.publish_at_h ? " para " + revision.publish_at_h : "" ?><?jhs } else { ?> · guardada como borrador<?jhs } ?>
+      </p>
+<?jhs if (revision.note) { ?>
+      <p class="fragmento">Nota: <?= revision.note ?></p>
+<?jhs } ?>
+
+      <dl>
+        <dt>Título</dt><dd><?= revision.title ?></dd>
+        <dt>Slug</dt><dd>/p/<?= revision.slug ?></dd>
+        <dt>Formato del contenido</dt><dd><?= revision.body_format == "markdown" ? "Markdown" : "Plantilla .jhs" ?></dd>
+        <dt>Padre</dt><dd><?= revision.parent_id == null ? "Nivel superior" : "Página #" + revision.parent_id ?></dd>
+        <dt>Posición</dt><dd><?= revision.position ?></dd>
+<?jhs if (revision.meta_title) { ?>
+        <dt>SEO · título para buscadores</dt><dd><?= revision.meta_title ?></dd>
+<?jhs } ?>
+<?jhs if (revision.meta_description) { ?>
+        <dt>SEO · descripción</dt><dd><?= revision.meta_description ?></dd>
+<?jhs } ?>
+<?jhs if (revision.og_image) { ?>
+        <dt>SEO · imagen social</dt><dd><?= revision.og_image ?></dd>
+<?jhs } ?>
+      </dl>
+
+      <h2>Contenido tal como se guardó</h2>
+      <p class="ayuda">Es el código fuente tal cual: desde aquí nunca se ejecuta (el
+         auto-escape lo muestra inerte). Restaurar lo copia sobre la página actual y el
+         editor de páginas lo renderiza como siempre — con la previsualización de F8
+         disponible antes de guardar.</p>
+      <pre><code><?= revision.content ?></code></pre>
+
+      <form method="post" action="/admin/pages/<?= page.id ?>/history/<?= revision.revision ?>/restore">
+        <button class="btn btn-primario" type="submit">Restaurar esta revisión</button>
+        <p class="ayuda">La restauración copia el contenido sobre la página y queda anotada
+           como una revisión nueva (reversible, como todo). El estado de publicación
+           actual — publicada, programada o borrador — se mantiene: restaurar nunca
+           publica ni despublica.</p>
+      </form>
+    </section>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

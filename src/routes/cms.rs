@@ -13,7 +13,10 @@
 //!   template source rendered through the same sandboxed engine (with
 //!   the standard globals), wrapped in `views/cms_page.jhs`. Drafts
 //!   answer 404 for the public and render with a banner for
-//!   editors/admins.
+//!   editors/admins. A draft with a future `publish_at` (F11) turns
+//!   publicly visible the moment the schedule elapses — visibility is
+//!   decided at read time, there is no background task to keep
+//!   running.
 //! - `GET /sitemap.xml` — the published pages (plus the canonical
 //!   homepage while `default_page` names a published page) as a
 //!   sitemap, behind `[cms] sitemap` (F7).
@@ -44,6 +47,12 @@
 //! - `GET  /admin/pages/new` / `POST /admin/pages` — create;
 //! - `GET  /admin/pages/{id}/edit` / `POST /admin/pages/{id}` — edit;
 //! - `POST /admin/pages/{id}/delete` — delete;
+//! - `GET  /admin/pages/{id}/history` and
+//!   `GET  /admin/pages/{id}/history/{revision}` — the revision
+//!   history (F11): every save (create, edit, restore) snapshots the
+//!   editable fields, and `POST …/history/{revision}/restore` copies
+//!   an old snapshot back **as a new revision** — content only, the
+//!   live publication state is the editor's call;
 //! - `GET  /admin/pages/import` / `POST` — copy a file from `public/`
 //!   into a new draft page (read-only on the static tree: the CMS
 //!   never writes into `public/`);
@@ -90,7 +99,10 @@ use crate::middleware::request_id::RequestId;
 use crate::middleware::templates::{base_data, redirect_response, render_response};
 use crate::routes::search::fragment_segments;
 use crate::state::{AppState, CmsContext};
-use crate::util::{format_timestamp, iso_date, iso_datetime, read_form, rfc2822_date, unix_now};
+use crate::util::{
+    format_datetime_local, format_timestamp, iso_date, iso_datetime, normalize_schedule,
+    parse_datetime_local, read_form, rfc2822_date, unix_now,
+};
 
 /// Maximum listed pages / users in the admin panels.
 const MAX_LISTED: i64 = 200;
@@ -131,6 +143,10 @@ const SITEMAP_LIMIT: i64 = 50_000;
 /// feed is a window over the site, not an archive: readers follow the
 /// site for the rest.
 const FEED_MAX_ITEMS: i64 = 20;
+
+/// Upper bound on a revision note (F11): one line of "what changed" —
+/// the note is metadata for the history list, not a comment box.
+const MAX_REVISION_NOTE: usize = 200;
 
 // ─── Browser-friendly guards ─────────────────────────────────────────
 
@@ -434,8 +450,10 @@ pub(crate) async fn render_public_page(
         return PublicPageOutcome::Missing;
     };
 
-    // Drafts: indistinguishable from missing pages unless the caller
-    // may manage content.
+    // Drafts are indistinguishable from missing pages unless the
+    // caller may manage content. F11: "draft" means the flag is off
+    // *and* the schedule (if any) has not elapsed yet — an elapsed
+    // schedule is public truth at read time.
     let viewer_is_editor = data
         .get("user")
         .and_then(|user| user.get("role"))
@@ -443,7 +461,10 @@ pub(crate) async fn render_public_page(
         .and_then(UserRole::parse)
         .is_some_and(|role| role.is_editor());
 
-    if !page.is_published && !viewer_is_editor {
+    let now = unix_now();
+    let visible_now = page.is_published || page.publish_at.is_some_and(|at| at <= now);
+
+    if !visible_now && !viewer_is_editor {
         return PublicPageOutcome::Served(
             render_view_with_data(state, parts, data.clone(), "404.jhs", StatusCode::NOT_FOUND)
                 .await,
@@ -551,7 +572,14 @@ pub(crate) async fn render_public_page(
         "id": page.id,
         "slug": page.slug,
         "title": page.title,
-        "is_published": page.is_published,
+        // F11: effective visibility — an elapsed schedule is public.
+        "is_published": visible_now,
+        // The pending schedule, for the editor's banner (F11): `null`
+        // on everything already public.
+        "scheduled_for_h": match page.publish_at {
+            Some(at) if !visible_now && at > now => Value::String(format_timestamp(at)),
+            _ => Value::Null,
+        },
         "created_at_h": format_timestamp(page.created_at),
         "updated_at_h": format_timestamp(page.updated_at),
         "author": author,
@@ -683,6 +711,15 @@ struct PageForm {
     meta_title: Option<String>,
     meta_description: Option<String>,
     og_image: Option<String>,
+    /// Scheduled publication as posted by the `datetime-local` input
+    /// (F11): empty/absent = no schedule, otherwise
+    /// `YYYY-MM-DDTHH:MM[:SS]` in **UTC**. Parsed by
+    /// [`crate::util::parse_datetime_local`] during validation and
+    /// normalized by [`crate::util::normalize_schedule`] on save.
+    publish_at: Option<String>,
+    /// Optional revision note ("qué cambió") recorded with the
+    /// snapshot this save appends (F11).
+    revision_note: Option<String>,
 }
 
 impl PageForm {
@@ -722,6 +759,14 @@ impl PageForm {
             .unwrap_or(0)
     }
 
+    /// The parsed schedule (F11): `None` when the field is empty,
+    /// otherwise the unix seconds the `datetime-local` value names.
+    /// Only meaningful after [`validate_page_form`] accepted the raw
+    /// shape — a malformed date never reaches a save.
+    fn schedule(&self) -> Option<i64> {
+        trimmed(&self.publish_at).and_then(|raw| parse_datetime_local(&raw))
+    }
+
     /// The form as template data (`id` and `is_new` added by callers).
     /// `parents` feeds the parent `<select>` (F7).
     fn form_data(&self, id: Option<i64>, parents: &[Value], error: Option<&str>) -> (Value, Value) {
@@ -738,6 +783,8 @@ impl PageForm {
             "meta_title": trimmed(&self.meta_title).unwrap_or_default(),
             "meta_description": trimmed(&self.meta_description).unwrap_or_default(),
             "og_image": trimmed(&self.og_image).unwrap_or_default(),
+            "publish_at": trimmed(&self.publish_at).unwrap_or_default(),
+            "revision_note": trimmed(&self.revision_note).unwrap_or_default(),
             "parents": parents,
         });
         (
@@ -805,6 +852,8 @@ async fn list_pages(
                     "slug": hit.slug,
                     "title": hit.title,
                     "is_published": hit.is_published,
+                    "estado": estado_badge(hit.is_published, hit.publish_at, unix_now()),
+                    "publish_at_h": hit.publish_at.map(format_timestamp),
                     "updated_at_h": format_timestamp(hit.updated_at),
                     "fragmento": fragment_segments(&hit.fragment),
                 })
@@ -858,6 +907,20 @@ async fn list_pages(
     .await
 }
 
+/// The admin state badge of a page (F11): `"publicada"` (the flag, or
+/// a schedule that has elapsed — the same read-time truth every
+/// public read applies), `"programada"` (a pending schedule),
+/// `"borrador"` otherwise.
+fn estado_badge(is_published: bool, publish_at: Option<i64>, now: i64) -> &'static str {
+    if is_published || publish_at.is_some_and(|at| at <= now) {
+        "publicada"
+    } else if publish_at.is_some() {
+        "programada"
+    } else {
+        "borrador"
+    }
+}
+
 /// Flattens the page tree depth-first into listing rows (F7).
 fn walk_page_tree(
     by_parent: &HashMap<Option<i64>, Vec<&PageSummary>>,
@@ -868,12 +931,15 @@ fn walk_page_tree(
     let Some(siblings) = by_parent.get(&parent) else {
         return;
     };
+    let now = unix_now();
     for page in siblings {
         rows.push(json!({
             "id": page.id,
             "slug": page.slug,
             "title": page.title,
             "is_published": page.is_published,
+            "estado": estado_badge(page.is_published, page.publish_at, now),
+            "publish_at_h": page.publish_at.map(format_timestamp),
             "updated_at_h": format_timestamp(page.updated_at),
             "depth": depth,
         }));
@@ -954,6 +1020,11 @@ async fn create_page(
         }
     }
 
+    // F11: the schedule as saved — a published page carries none, and
+    // an already-elapsed one is spent (the form's help text explains
+    // both rules).
+    let publish_at = normalize_schedule(form.published(), form.schedule(), unix_now());
+
     let new_page = NewPage {
         slug: form.slug.clone(),
         title: form.title.clone(),
@@ -966,6 +1037,8 @@ async fn create_page(
         meta_title: trimmed(&form.meta_title),
         meta_description: trimmed(&form.meta_description),
         og_image: trimmed(&form.og_image),
+        publish_at,
+        revision_note: trimmed(&form.revision_note),
     };
 
     match cms.pages.create(&new_page).await {
@@ -1010,18 +1083,25 @@ async fn edit_page_form(
         return see_other("/admin/pages");
     };
 
+    // F11: the checkbox states *effective* visibility — an elapsed
+    // schedule is already public, so the form says so; the schedule
+    // field keeps whatever the page carries (a future value, or the
+    // spent date the next save drops).
+    let effective = page.is_published || page.publish_at.is_some_and(|at| at <= unix_now());
     let form = PageForm {
         slug: page.slug,
         title: page.title,
         content: page.content,
         body_format: Some(page.body_format.as_str().to_owned()),
-        is_published: page.is_published.then(|| "on".to_owned()),
+        is_published: effective.then(|| "on".to_owned()),
         parent_id: page.parent_id.map(|parent| parent.to_string()),
         position: Some(page.position.to_string()),
         page_id: Some(id.to_string()),
         meta_title: page.meta_title,
         meta_description: page.meta_description,
         og_image: page.og_image,
+        publish_at: page.publish_at.map(format_datetime_local),
+        revision_note: None,
     };
     // The page itself and its whole branch are unavailable as parents.
     let parents = parent_options(cms, Some(id)).await;
@@ -1044,7 +1124,7 @@ async fn edit_page_form(
 /// `POST /admin/pages/{id}`: applies an edit.
 async fn update_page(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     Path(id): Path<i64>,
     request: Request,
 ) -> Response {
@@ -1111,6 +1191,10 @@ async fn update_page(
         }
     }
 
+    // F11: the same normalization on edit, plus the editor and their
+    // optional note — recorded on the revision this save appends.
+    let publish_at = normalize_schedule(form.published(), form.schedule(), unix_now());
+
     let update = PageUpdate {
         slug: Some(form.slug.clone()),
         title: form.title.clone(),
@@ -1122,6 +1206,9 @@ async fn update_page(
         meta_title: trimmed(&form.meta_title),
         meta_description: trimmed(&form.meta_description),
         og_image: trimmed(&form.og_image),
+        publish_at,
+        edited_by: Some(editor.user.user_id),
+        revision_note: trimmed(&form.revision_note),
     };
 
     match cms.pages.update(id, &update).await {
@@ -1281,6 +1368,284 @@ async fn load_page(cms: &CmsContext, id: i64) -> Option<crate::db::PageRecord> {
     }
 }
 
+// ─── Admin: the revision history (F11) ──────────────────────────────
+
+/// `GET /admin/pages/{id}/history`: every save of a page, newest
+/// first — revision numbers, editors, notes and state snapshots, the
+/// current revision marked. Editors only, like the rest of the panel.
+async fn page_history(
+    State(state): State<AppState>,
+    _editor: CmsEditor,
+    Path(id): Path<i64>,
+    request: Request,
+) -> Response {
+    let parts = PageParts::of(&request);
+    let Ok(cms) = cms_context(&state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+
+    let Some(page) = load_page(cms, id).await else {
+        return see_other("/admin/pages");
+    };
+
+    let revisions = match cms.pages.revisions(id).await {
+        Ok(revisions) => revisions,
+        Err(error) => {
+            tracing::error!(%error, "revision listing failed");
+            return AppError::internal("storage failure").into_response();
+        }
+    };
+
+    let now = unix_now();
+    let current_revision = revisions.first().map(|revision| revision.revision);
+    let filas: Vec<Value> = revisions
+        .iter()
+        .map(|revision| {
+            json!({
+                "revision": revision.revision,
+                "title": revision.title,
+                "slug": revision.slug,
+                "estado": estado_badge(revision.is_published, revision.publish_at, now),
+                "publish_at_h": revision.publish_at.map(format_timestamp),
+                "note": revision.note.clone().unwrap_or_default(),
+                "edited_by_name": revision.edited_by_name.clone().unwrap_or_default(),
+                "created_at_h": format_timestamp(revision.created_at),
+                "is_current": Some(revision.revision) == current_revision,
+            })
+        })
+        .collect();
+
+    render_view(
+        &state,
+        &parts,
+        "admin/page_history.jhs",
+        vec![
+            (
+                "page",
+                json!({ "id": page.id, "title": page.title, "slug": page.slug }),
+            ),
+            ("revisiones", Value::Array(filas)),
+        ],
+        StatusCode::OK,
+    )
+    .await
+}
+
+/// `GET /admin/pages/{id}/history/{revision}`: one snapshot in full —
+/// the editable fields as saved, the body as **source** (the
+/// auto-escape renders it inert: a revision is never executed, not
+/// even by the editor previewing it), and the restore form.
+async fn page_revision(
+    State(state): State<AppState>,
+    _editor: CmsEditor,
+    Path((id, revision)): Path<(i64, i64)>,
+    request: Request,
+) -> Response {
+    let parts = PageParts::of(&request);
+    let Ok(cms) = cms_context(&state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+
+    let Some(page) = load_page(cms, id).await else {
+        return see_other("/admin/pages");
+    };
+    let Some(snapshot) = load_revision(cms, id, revision).await else {
+        return see_other(&format!("/admin/pages/{id}/history"));
+    };
+
+    render_revision_view(&state, &parts, &page, &snapshot, None).await
+}
+
+/// `POST /admin/pages/{id}/history/{revision}/restore`: copies the
+/// snapshot's editable fields back onto the page — **as a new
+/// revision**, so the restore itself is recorded (and re-restorable).
+/// Content only, never the state: the page's live `is_published` and
+/// schedule are the editor's current call, not the snapshot's (F11).
+/// The parent the snapshot names is re-validated against the tree as
+/// it is *today* — existence and the cycle guard, exactly like an
+/// edit.
+async fn restore_revision(
+    State(state): State<AppState>,
+    editor: CmsEditor,
+    Path((id, revision)): Path<(i64, i64)>,
+    request: Request,
+) -> Response {
+    let parts = PageParts::of(&request);
+    let Ok(cms) = cms_context(&state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+
+    let Some(page) = load_page(cms, id).await else {
+        return see_other("/admin/pages");
+    };
+    let Some(snapshot) = load_revision(cms, id, revision).await else {
+        return see_other(&format!("/admin/pages/{id}/history"));
+    };
+
+    // The parent as named by the snapshot, re-validated today: it may
+    // have been deleted, or moved under this very page, since.
+    if let Some(parent_id) = snapshot.parent_id {
+        if parent_id == id {
+            return render_revision_view(
+                &state,
+                &parts,
+                &page,
+                &snapshot,
+                Some(
+                    "El padre que la revisión nombra es la propia página: muévela a otro \
+                     nivel antes de restaurar.",
+                ),
+            )
+            .await;
+        }
+        if load_page(cms, parent_id).await.is_none() {
+            return render_revision_view(
+                &state,
+                &parts,
+                &page,
+                &snapshot,
+                Some(
+                    "La página padre de la revisión ya no existe: restaura y elige un padre \
+                     actual en el editor.",
+                ),
+            )
+            .await;
+        }
+        let creates_cycle = match cms.pages.ancestors(parent_id).await {
+            Ok(chain) => chain.iter().any(|ancestor| ancestor.id == id),
+            Err(error) => {
+                tracing::error!(%error, "page hierarchy walk failed");
+                return AppError::internal("storage failure").into_response();
+            }
+        };
+        if creates_cycle {
+            return render_revision_view(
+                &state,
+                &parts,
+                &page,
+                &snapshot,
+                Some(
+                    "El padre de la revisión ahora cuelga de esta página: restaurar crearía \
+                     un ciclo.",
+                ),
+            )
+            .await;
+        }
+    }
+
+    // The live state rides along untouched — a restore never
+    // publishes or unpublishes — and the note records where the
+    // content came from.
+    let update = PageUpdate {
+        slug: Some(snapshot.slug.clone()),
+        title: snapshot.title.clone(),
+        content: snapshot.content.clone(),
+        body_format: snapshot.body_format,
+        is_published: page.is_published,
+        parent_id: snapshot.parent_id,
+        position: snapshot.position,
+        meta_title: snapshot.meta_title.clone(),
+        meta_description: snapshot.meta_description.clone(),
+        og_image: snapshot.og_image.clone(),
+        publish_at: page.publish_at,
+        edited_by: Some(editor.user.user_id),
+        revision_note: Some(format!("Restaurada desde la revisión {revision}.")),
+    };
+
+    match cms.pages.update(id, &update).await {
+        Ok(Some(_)) => see_other(&format!("/admin/pages/{id}/edit?ok=restaurada")),
+        Ok(None) => see_other("/admin/pages"),
+        Err(RepositoryError::Duplicate) => {
+            render_revision_view(
+                &state,
+                &parts,
+                &page,
+                &snapshot,
+                Some(
+                    "Ese slug ya existe (otra página lo ha tomado desde): renómbrala o edita a \
+                 mano la revisión que querías recuperar.",
+                ),
+            )
+            .await
+        }
+        Err(RepositoryError::Internal(message)) => {
+            tracing::error!(%message, "page restore failed");
+            render_revision_view(
+                &state,
+                &parts,
+                &page,
+                &snapshot,
+                Some("No se pudo restaurar (error interno)."),
+            )
+            .await
+        }
+    }
+}
+
+/// Renders the revision detail view — the shape `page_revision`
+/// renders and a failed restore re-renders with the error on top.
+async fn render_revision_view(
+    state: &AppState,
+    parts: &PageParts,
+    page: &crate::db::PageRecord,
+    snapshot: &crate::db::PageRevision,
+    error: Option<&str>,
+) -> Response {
+    let now = unix_now();
+    let revision_json = json!({
+        "revision": snapshot.revision,
+        "slug": snapshot.slug,
+        "title": snapshot.title,
+        "content": snapshot.content,
+        "body_format": snapshot.body_format.as_str(),
+        "parent_id": snapshot.parent_id,
+        "position": snapshot.position,
+        "meta_title": snapshot.meta_title.clone().unwrap_or_default(),
+        "meta_description": snapshot.meta_description.clone().unwrap_or_default(),
+        "og_image": snapshot.og_image.clone().unwrap_or_default(),
+        "estado": estado_badge(snapshot.is_published, snapshot.publish_at, now),
+        "publish_at_h": snapshot.publish_at.map(format_timestamp),
+        "note": snapshot.note.clone().unwrap_or_default(),
+        "edited_by_name": snapshot.edited_by_name.clone().unwrap_or_default(),
+        "created_at_h": format_timestamp(snapshot.created_at),
+    });
+    render_view(
+        state,
+        parts,
+        "admin/page_revision.jhs",
+        vec![
+            (
+                "page",
+                json!({ "id": page.id, "title": page.title, "slug": page.slug }),
+            ),
+            ("revision", revision_json),
+            (
+                "form_error",
+                error
+                    .map(|message| Value::String(message.to_owned()))
+                    .unwrap_or(Value::Null),
+            ),
+        ],
+        StatusCode::OK,
+    )
+    .await
+}
+
+/// Loads a revision, logging storage failures as a missing snapshot.
+async fn load_revision(
+    cms: &CmsContext,
+    page_id: i64,
+    revision: i64,
+) -> Option<crate::db::PageRevision> {
+    match cms.pages.find_revision(page_id, revision).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::error!(%error, "revision lookup failed");
+            None
+        }
+    }
+}
+
 /// Validates the admin page form; the error is already user-facing
 /// Spanish.
 fn validate_page_form(form: &PageForm) -> Result<(), &'static str> {
@@ -1333,6 +1698,15 @@ fn validate_page_form(form: &PageForm) -> Result<(), &'static str> {
         {
             return Err("La imagen social debe ser una ruta («/assets/…») o una URL absoluta.");
         }
+    }
+
+    // F11: the schedule must parse (UTC `datetime-local` shape) and
+    // the revision note stays a one-liner.
+    if trimmed(&form.publish_at).is_some_and(|raw| parse_datetime_local(&raw).is_none()) {
+        return Err("La fecha programada no es válida: usa el formato AAAA-MM-DDTHH:MM (UTC).");
+    }
+    if trimmed(&form.revision_note).is_some_and(|note| note.len() > MAX_REVISION_NOTE) {
+        return Err("La nota de revisión es demasiado larga (máximo 200 caracteres).");
     }
     Ok(())
 }
@@ -1533,6 +1907,10 @@ async fn import_page(
         meta_title: None,
         meta_description: None,
         og_image: None,
+        // F11: imports are unscheduled drafts whose first revision
+        // notes where the content came from.
+        publish_at: None,
+        revision_note: Some(format!("Importada desde public/{}", form.file)),
     };
 
     match cms.pages.create(&new_page).await {
@@ -2700,7 +3078,9 @@ async fn sitemap(State(state): State<AppState>, request: Request) -> Response {
     // is a published one (otherwise GET / is not CMS content).
     if let Some(slug) = state.config().cms.default_page.as_deref() {
         if let Some(home) = cms.pages.find_by_slug(slug).await.unwrap_or(None) {
-            if home.is_published {
+            // F11: the same read-time visibility rule — the flag, or
+            // an elapsed schedule.
+            if home.is_published || home.publish_at.is_some_and(|at| at <= unix_now()) {
                 xml.push_str(&sitemap_entry(&format!("{base}/"), home.updated_at));
             }
         }
@@ -3279,6 +3659,13 @@ pub fn routes() -> Router<AppState> {
         .route("/admin/pages/{id}/edit", get(edit_page_form))
         .route("/admin/pages/{id}", post(update_page))
         .route("/admin/pages/{id}/delete", post(delete_page))
+        // F11: the revision history and its restore.
+        .route("/admin/pages/{id}/history", get(page_history))
+        .route("/admin/pages/{id}/history/{revision}", get(page_revision))
+        .route(
+            "/admin/pages/{id}/history/{revision}/restore",
+            post(restore_revision),
+        )
         .route("/admin/menus", get(list_menus).post(create_menu))
         .route("/admin/menus/{id}", get(menu_detail).post(rename_menu))
         .route("/admin/menus/{id}/delete", post(delete_menu))
