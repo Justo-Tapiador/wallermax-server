@@ -47,6 +47,14 @@ pub(crate) fn format_timestamp(seconds: i64) -> String {
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}")
 }
 
+/// Formats unix seconds as `YYYY-MM-DD` (UTC) — the `<lastmod>` shape
+/// the sitemap protocol expects (F7). Shares `civil_from_days` with
+/// [`format_timestamp`], so the two projections never disagree.
+pub(crate) fn iso_date(seconds: i64) -> String {
+    let (year, month, day) = civil_from_days(seconds.div_euclid(86_400));
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
 /// Converts a count of days since 1970-01-01 into a civil date
 /// (Howard Hinnant's algorithm).
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
@@ -117,5 +125,13 @@ mod tests {
         assert_eq!(format_timestamp(0), "1970-01-01 00:00");
         assert_eq!(format_timestamp(1_788_739_200), "2026-09-07 00:00");
         assert_eq!(format_timestamp(951_782_400), "2000-02-29 00:00");
+    }
+
+    #[test]
+    fn iso_dates_match_the_sitemap_lastmod_shape() {
+        assert_eq!(iso_date(0), "1970-01-01");
+        assert_eq!(iso_date(1_788_739_200), "2026-09-07");
+        assert_eq!(iso_date(1_788_739_199), "2026-09-06");
+        assert_eq!(iso_date(951_782_400), "2000-02-29");
     }
 }

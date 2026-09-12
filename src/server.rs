@@ -24,7 +24,7 @@ use tokio::sync::watch;
 
 use crate::auth::JwtService;
 use crate::config::AppConfig;
-use crate::db::{self, SqlitePageRepository, SqliteUserRepository};
+use crate::db::{self, SqliteMenuRepository, SqlitePageRepository, SqliteUserRepository};
 use crate::routes;
 use crate::state::{AppState, AuthContext, CmsContext};
 
@@ -153,7 +153,8 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
     // build states directly.
     let cms = match (auth.is_some(), config.cms.enabled, config.templates.enabled) {
         (true, true, true) => Some(CmsContext {
-            pages: Arc::new(SqlitePageRepository::new(pool)),
+            pages: Arc::new(SqlitePageRepository::new(pool.clone())),
+            menus: Arc::new(SqliteMenuRepository::new(pool)),
         }),
         _ => None,
     };
@@ -186,8 +187,9 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
 
     if cms.is_some() {
         tracing::info!(
-            "cms enabled (public pages at /p, admin panel at /admin; content and users — \
-             server configuration stays in wallermax.toml)"
+            "cms enabled (public pages at /p, admin panel at /admin, menus at /admin/menus, \
+             sitemap at /sitemap.xml while [cms] sitemap; content and users — server \
+             configuration stays in wallermax.toml)"
         );
         if let Some(slug) = config.cms.default_page.as_deref() {
             tracing::info!(

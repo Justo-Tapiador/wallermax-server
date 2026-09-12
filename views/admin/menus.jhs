@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Menús — CMS wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+    <div class="panel-barra">
+      <h1>Menús</h1>
+      <a class="btn btn-fantasma" href="/admin">Panel</a>
+    </div>
+
+<?jhs if (query.ok == "eliminado") { ?>
+    <p class="aviso aviso-ok">Menú eliminado (con todos sus elementos).</p>
+<?jhs } ?>
+<?jhs if (form_error) { ?>
+    <p class="aviso aviso-error"><?= form_error ?></p>
+<?jhs } ?>
+
+    <section class="tarjeta">
+<?jhs if (admin_menus && admin_menus.length) { ?>
+      <ul class="lista">
+<?jhs admin_menus.forEach(function (menu) { ?>
+        <li>
+          <div class="principal">
+            <a href="/admin/menus/<?= menu.id ?>"><?= menu.title ?></a>
+            <div class="secundario">
+              <code>menus.<?= menu.name ?></code> · <?= menu.items ?> elemento<?= menu.items == 1 ? "" : "s" ?> ·
+              actualizado <?= menu.updated_at_h ?>
+            </div>
+          </div>
+          <div class="acciones">
+            <a class="btn btn-fantasma" href="/admin/menus/<?= menu.id ?>">Editar</a>
+            <form method="post" action="/admin/menus/<?= menu.id ?>/delete">
+              <button class="btn btn-peligro" type="submit">Borrar</button>
+            </form>
+          </div>
+        </li>
+<?jhs }); ?>
+      </ul>
+<?jhs } else { ?>
+      <p class="vacio">No hay menús todavía: crea el primero (por ejemplo
+         <code>principal</code> para la cabecera o <code>pie</code> para el pie).</p>
+<?jhs } ?>
+      <p class="ayuda">El <em>nombre</em> es la clave que leen las plantillas
+         (<code>menus.principal</code>); el título es solo para este panel. El nombre no
+         cambia después: si te equivocas, borra el menú y créalo de nuevo.</p>
+    </section>
+
+    <section class="tarjeta" aria-labelledby="nuevo-menu-titulo">
+      <h2 id="nuevo-menu-titulo">Nuevo menú</h2>
+      <form method="post" action="/admin/menus">
+        <div class="campo">
+          <label for="nombre-menu">Nombre (para las plantillas)</label>
+          <input id="nombre-menu" type="text" name="name" required maxlength="64"
+                 placeholder="principal">
+          <p class="ayuda">Minúsculas, números y guiones: es la clave de
+             <code>menus.&lt;nombre&gt;</code>.</p>
+        </div>
+        <div class="campo">
+          <label for="titulo-menu">Título (para el panel)</label>
+          <input id="titulo-menu" type="text" name="title" required maxlength="200"
+                 placeholder="Navegación principal">
+        </div>
+        <button class="btn btn-primario" type="submit">Crear menú</button>
+      </form>
+    </section>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

@@ -26,7 +26,7 @@
       <ul class="lista">
 <?jhs admin_pages.forEach(function (pagina) { ?>
         <li>
-          <div class="principal">
+          <div class="principal" style="padding-left:<?= pagina.depth * 1.25 ?>rem">
             <a href="/p/<?= pagina.slug ?>"><?= pagina.title ?></a>
             <div class="secundario">/p/<?= pagina.slug ?> · actualizada <?= pagina.updated_at_h ?></div>
           </div>
@@ -48,6 +48,8 @@
       <p class="vacio">No hay páginas todavía: crea la primera o importa un
          archivo de <code>public/</code>.</p>
 <?jhs } ?>
+      <p class="ayuda">El listado muestra la jerarquía completa: las hijas van indentadas
+         bajo su padre y el orden entre hermanas lo marca su «posición».</p>
     </section>
   </div>
 </main>

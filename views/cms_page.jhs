@@ -3,7 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title><?= page.title ?> — wallermax</title>
+  <title><?= (page.meta_title || page.title) ?> — wallermax</title>
+<?jhs if (page.meta_description) { ?>
+  <meta name="description" content="<?= page.meta_description ?>">
+<?jhs } ?>
+<?jhs if (page.og_image) { ?>
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="<?= page.meta_title || page.title ?>">
+  <meta property="og:image" content="<?= page.og_image ?>">
+<?jhs } ?>
   <link rel="stylesheet" href="/assets/wallermax.css">
 </head>
 <body>
@@ -16,6 +24,11 @@
          público recibe un 404 hasta que se publique.</p>
 <?jhs } ?>
       <h1><?= page.title ?></h1>
+<?jhs if (page.breadcrumbs && page.breadcrumbs.length) { ?>
+      <p class="pagina-meta migas">
+        <a href="/">Inicio</a><?jhs page.breadcrumbs.forEach(function (miga) { ?> · <a href="/p/<?= miga.slug ?>"><?= miga.title ?></a><?jhs }); ?>
+      </p>
+<?jhs } ?>
       <p class="pagina-meta">
         /p/<?= page.slug ?> · actualizada <?= page.updated_at_h ?><?jhs if (page.author) { ?> · por <?= page.author ?><?jhs } ?>
 <?jhs if (user && (user.role == "admin" || user.role == "editor")) { ?>

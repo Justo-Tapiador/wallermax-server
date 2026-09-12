@@ -44,6 +44,23 @@
              Cambiarlo mueve la URL pública de la página.</p>
         </div>
         <div class="campo">
+          <label for="padre">Página padre</label>
+          <select id="padre" name="parent_id">
+            <option value=""<?= form.parent_id == null ? " selected" : "" ?>>— Nivel superior —</option>
+<?jhs form.parents.forEach(function (opcion) { ?>
+            <option value="<?= opcion.id ?>"<?= form.parent_id == opcion.id ? " selected" : "" ?>><?= opcion.label ?></option>
+<?jhs }); ?>
+          </select>
+          <p class="ayuda">La jerarquía alimenta los menús, las migas de pan y las subpáginas.
+             Una página nunca puede colgar de su propia rama.</p>
+        </div>
+        <div class="campo">
+          <label for="posicion">Posición (orden entre páginas hermanas)</label>
+          <input id="posicion" type="number" name="position" min="0" max="99999"
+                 value="<?= form.position ?>">
+          <p class="ayuda">Menor número = antes. Con igual posición decide el orden de creación.</p>
+        </div>
+        <div class="campo">
           <label for="contenido">Contenido — plantilla <code>.jhs</code></label>
           <textarea id="contenido" name="content" spellcheck="false"
                     placeholder="&lt;h2&gt;Hola&lt;/h2&gt;&#10;&lt;p&gt;HTML con etiquetas &lt;?= user ?&gt; disponibles…&lt;/p&gt;"><?=
@@ -60,6 +77,29 @@
         <div class="campo campo-check">
           <input id="publicada" type="checkbox" name="is_published" value="on"<?= form.is_published ? " checked" : "" ?>>
           <label for="publicada">Publicada (visible en /p y en el listado público)</label>
+        </div>
+      </section>
+
+      <section class="tarjeta" aria-labelledby="seo-titulo">
+        <h2 id="seo-titulo">SEO (opcional)</h2>
+        <div class="campo">
+          <label for="meta-titulo">Título para buscadores</label>
+          <input id="meta-titulo" type="text" name="meta_title" maxlength="200"
+                 value="<?= form.meta_title ?>">
+          <p class="ayuda">Vacío = usar el título de la página. Los buscadores muestran ~60
+             caracteres.</p>
+        </div>
+        <div class="campo">
+          <label for="meta-descripcion">Descripción (meta description)</label>
+          <input id="meta-descripcion" type="text" name="meta_description" maxlength="500"
+                 value="<?= form.meta_description ?>">
+          <p class="ayuda">Vacío = sin etiqueta. Los buscadores muestran ~160 caracteres.</p>
+        </div>
+        <div class="campo">
+          <label for="og-imagen">Imagen social (og:image)</label>
+          <input id="og-imagen" type="text" name="og_image" maxlength="500"
+                 placeholder="/assets/og-inicio.png" value="<?= form.og_image ?>">
+          <p class="ayuda">Una ruta del sitio (<code>/assets/…</code>) o una URL absoluta.</p>
         </div>
         <button class="btn btn-primario" type="submit">
           <?= form.is_new ? "Crear página" : "Guardar cambios" ?>

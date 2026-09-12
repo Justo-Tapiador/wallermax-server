@@ -25,7 +25,7 @@ use axum::http::{HeaderName, HeaderValue};
 
 use crate::auth::JwtService;
 use crate::config::AppConfig;
-use crate::db::{PageRepository, UserRepository};
+use crate::db::{MenuRepository, PageRepository, UserRepository};
 use crate::external_api::ExternalApi;
 use crate::metrics::Metrics;
 use crate::proxy::{self, Cidr};
@@ -65,6 +65,9 @@ pub struct AuthContext {
 pub struct CmsContext {
     /// Page storage behind the [`PageRepository`] abstraction.
     pub pages: Arc<dyn PageRepository>,
+    /// Named navigation menus behind the [`MenuRepository`] abstraction
+    /// (F7): the `menus` template global and `/admin/menus` read here.
+    pub menus: Arc<dyn MenuRepository>,
 }
 
 /// Dynamic template rendering services shared by the template

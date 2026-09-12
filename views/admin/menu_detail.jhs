@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><?= menu.title ?> (<?= menu.name ?>) — Menús — CMS wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+    <div class="panel-barra">
+      <h1><?= menu.title ?> <span class="secundario">(menus.<?= menu.name ?>)</span></h1>
+      <a class="btn btn-fantasma" href="/admin/menus">Todos los menús</a>
+    </div>
+
+<?jhs if (query.ok == "creado") { ?>
+    <p class="aviso aviso-ok">Menú creado: añade el primer elemento abajo.</p>
+<?jhs } ?>
+<?jhs if (query.ok == "guardado") { ?>
+    <p class="aviso aviso-ok">Título guardado.</p>
+<?jhs } ?>
+<?jhs if (query.ok == "item-creado") { ?>
+    <p class="aviso aviso-ok">Elemento añadido.</p>
+<?jhs } ?>
+<?jhs if (query.ok == "item-guardado") { ?>
+    <p class="aviso aviso-ok">Elemento guardado.</p>
+<?jhs } ?>
+<?jhs if (query.ok == "item-eliminado") { ?>
+    <p class="aviso aviso-ok">Elemento eliminado.</p>
+<?jhs } ?>
+<?jhs if (form_error) { ?>
+    <p class="aviso aviso-error"><?= form_error ?></p>
+<?jhs } ?>
+
+    <section class="tarjeta" aria-labelledby="elementos-titulo">
+      <h2 id="elementos-titulo">Elementos (<?= items.length ?>)</h2>
+<?jhs if (items && items.length) { ?>
+      <ul class="lista">
+<?jhs items.forEach(function (elemento) { ?>
+        <li>
+          <div class="principal">
+            <a href="<?= elemento.href ?>"><?= elemento.label ? elemento.label : (elemento.page ? elemento.page.title : "(sin etiqueta)") ?></a>
+            <div class="secundario">
+              #<?= elemento.position ?> ·
+<?jhs if (elemento.is_page) { ?>
+              página /p/<?= elemento.page.slug ?><?jhs if (!elemento.page.is_published) { ?> · <span class="borrador">borrador: el público no lo verá hasta publicarse</span><?jhs } ?>
+<?jhs } else { ?>
+              URL <?= elemento.url ?>
+<?jhs } ?>
+            </div>
+          </div>
+          <div class="acciones">
+            <a class="btn btn-fantasma" href="/admin/menus/<?= menu.id ?>/items/<?= elemento.id ?>/edit">Editar</a>
+            <form method="post" action="/admin/menus/<?= menu.id ?>/items/<?= elemento.id ?>/delete">
+              <button class="btn btn-peligro" type="submit">Borrar</button>
+            </form>
+          </div>
+        </li>
+<?jhs }); ?>
+      </ul>
+<?jhs } else { ?>
+      <p class="vacio">Este menú no tiene elementos todavía.</p>
+<?jhs } ?>
+      <p class="ayuda">Los elementos enlazan una página del CMS o una URL personalizada
+         (una externa, una ruta del sitio, un ancla). Las páginas en borrador se saltan
+         en la navegación pública hasta que se publiquen.</p>
+    </section>
+
+    <section class="tarjeta" aria-labelledby="nuevo-elemento-titulo">
+      <h2 id="nuevo-elemento-titulo">Añadir elemento</h2>
+      <p class="ayuda">Cada elemento enlaza una página del CMS o una URL personalizada, con
+         su etiqueta y su posición. Los enlaces a páginas en borrador se saltan en la
+         navegación pública hasta que se publiquen.</p>
+      <a class="btn btn-primario" href="/admin/menus/<?= menu.id ?>/items/new">Añadir elemento</a>
+    </section>
+
+    <section class="tarjeta" aria-labelledby="renombrar-titulo">
+      <h2 id="renombrar-titulo">Renombrar (solo el título)</h2>
+      <form method="post" action="/admin/menus/<?= menu.id ?>">
+        <div class="campo">
+          <label for="titulo-menu">Título</label>
+          <input id="titulo-menu" type="text" name="title" required maxlength="200"
+                 value="<?= menu.title ?>">
+          <p class="ayuda">El nombre <code><?= menu.name ?></code> es la clave que leen las
+             plantillas y no cambia: crea otro menú si necesitas otra clave.</p>
+        </div>
+        <button class="btn btn-primario" type="submit">Guardar título</button>
+      </form>
+    </section>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

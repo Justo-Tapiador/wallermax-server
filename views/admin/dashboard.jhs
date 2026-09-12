@@ -28,6 +28,10 @@
         <div class="valor"><?= stats.drafts ?></div>
         <div class="etiqueta">Borradores</div>
       </div>
+      <div class="stat">
+        <div class="valor"><?= stats.menus ?></div>
+        <div class="etiqueta">Menús</div>
+      </div>
 <?jhs if (user && user.role == "admin") { ?>
       <div class="stat">
         <div class="valor"><?= stats.users ?></div>
@@ -51,6 +55,13 @@
             <a href="/admin/pages/import">Importar desde public/</a>
             <div class="secundario">Copia un archivo existente de <code>public/</code> como borrador editable.</div>
           </div>
+        </li>
+        <li>
+          <div class="principal">
+            <a href="/admin/menus">Menús</a>
+            <div class="secundario">Navegación del sitio (cabecera, pie, enlaces externos): lo que leen las plantillas como <code>menus.principal</code>.</div>
+          </div>
+          <div class="acciones"><a class="btn btn-fantasma" href="/admin/menus">Gestionar</a></div>
         </li>
 <?jhs if (user && user.role == "admin") { ?>
         <li>

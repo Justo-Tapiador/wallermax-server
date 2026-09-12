@@ -411,6 +411,28 @@ refresh_token_ttl_secs = 2592000
 # stays in wallermax.toml (local repository access).
 enabled = true
 
+# ── The corporate content model (F7) ──────────────────────────────
+# Hierarchical pages (parent + sibling position, cycle-proof moves,
+# breadcrumbs), named navigation menus managed at /admin/menus and
+# exposed to every template as the `menus` global, per-page SEO
+# metadata (meta title/description/og:image) and an automatic
+# sitemap. Full documentation: README-CMS.md. Still zero JavaScript.
+
+# Serve GET /sitemap.xml with the published pages (F7). The sitemap is
+# public information (the /p index already lists the same pages), so
+# the default is true; set false to keep crawlers on the static tree.
+# Override with WALLERMAX_CMS__SITEMAP.
+sitemap = true
+
+# Absolute origin of the site, used to build the sitemap's <loc> URLs
+# (the protocol requires them absolute). Without it the sitemap falls
+# back to the request's Host header with http:// — correct for direct
+# HTTP setups, WRONG behind TLS or a reverse proxy: set it there.
+# Validated at startup: absolute http(s) origin, no trailing slash.
+# Override with WALLERMAX_CMS__SITE_URL.
+#
+# site_url = "https://www.example.com"
+
 # Slug of the CMS page that takes over GET / (v0.11.0). While set, the
 # homepage renders that page through the exact GET /p/<slug> pipeline
 # (sandboxed .jhs body, views/cms_page.jhs wrapper, draft gating) and

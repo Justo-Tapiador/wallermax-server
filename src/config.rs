@@ -492,7 +492,7 @@ impl Default for AuthConfig {
 /// only writable with local repository access — the deliberate
 /// privilege split between the CMS administrator and the server
 /// operator.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CmsConfig {
     /// Enables the CMS routes and services.
@@ -522,6 +522,34 @@ pub struct CmsConfig {
     /// it while `cms.enabled = false` is accepted (the shape is still
     /// validated) but ignored, with a startup warning in `build_state`.
     pub default_page: Option<String>,
+    /// Serves `GET /sitemap.xml` with the published CMS pages while the
+    /// CMS is enabled (F7). The sitemap is public information (the
+    /// `/p` index already lists the same pages), so the default is
+    /// `true` — set `false` to keep crawlers on the static tree only.
+    ///
+    /// `WALLERMAX_CMS__SITEMAP` overrides the file value.
+    pub sitemap: bool,
+    /// The public origin of the site (`https://www.example.com`) used
+    /// to build absolute `<loc>` URLs in the sitemap (F7). Without it
+    /// the sitemap falls back to the request's `Host` header with
+    /// `http://` — correct for plain-HTTP setups, wrong behind TLS or
+    /// a reverse proxy: set it there.
+    ///
+    /// `WALLERMAX_CMS__SITE_URL` overrides the file value.
+    pub site_url: Option<String>,
+}
+
+impl Default for CmsConfig {
+    /// The shipped defaults: sitemap on (public information), the
+    /// rest off/empty — opting into the CMS is still explicit.
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_page: None,
+            sitemap: true,
+            site_url: None,
+        }
+    }
 }
 
 /// Static file serving settings.
@@ -1081,6 +1109,23 @@ impl AppConfig {
                     "invalid `cms.default_page` `{slug}`; expected the same slug shape the \
                      panel forms enforce: 1-64 characters of lowercase letters, digits and \
                      single dashes"
+                )));
+            }
+        }
+        // The sitemap origin is checked while off too, for the same
+        // reason: a typo'd `site_url` is a mistake regardless of the
+        // switch. It must be an absolute `http(s)` origin without a
+        // trailing slash, because sitemap `<loc>` URLs concatenate
+        // onto it verbatim.
+        if let Some(site_url) = self.cms.site_url.as_deref() {
+            let shape = (site_url.starts_with("http://") || site_url.starts_with("https://"))
+                && !site_url.trim().is_empty()
+                && !site_url.ends_with('/')
+                && !site_url.contains(char::is_whitespace);
+            if !shape {
+                return Err(ConfigError::Message(format!(
+                    "invalid `cms.site_url` `{site_url}`; expected an absolute origin such as \
+                     `https://www.example.com` without a trailing slash"
                 )));
             }
         }

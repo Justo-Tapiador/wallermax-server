@@ -369,6 +369,8 @@ each middleware's tuning values live in their own section.
 | `auth.refresh_token_ttl_secs` | integer | `2592000` | Refresh token lifetime (30 days). |
 | `cms.enabled` | bool | `false` (defaults) / `true` (wallermax.toml) | Mount the CMS route family (requires `[database]`, `[auth]` and `[templates]`). |
 | `cms.default_page` | string | unset | Slug of the CMS page that takes over `GET /` (v0.11.0) — beats the static index file; a missing slug warns and falls back, a draft stays editor-only. |
+| `cms.sitemap` | bool | `true` | Serve `GET /sitemap.xml` with the published CMS pages (F7). |
+| `cms.site_url` | string | unset | Absolute origin (`https://www.example.com`) for the sitemap's `<loc>` URLs; without it the request's `Host` header is used with `http://` (F7). |
 | `metrics.enabled` | bool | `false` (defaults) / `true` (wallermax.toml) | Serve the Prometheus exposition endpoint. |
 | `metrics.path` | string | `/metrics` | Path of the exposition endpoint. |
 | `tls.enabled` | bool | `false` | Serve HTTPS (rustls) on `server.host:port` instead of plain HTTP. |
@@ -710,7 +712,9 @@ failed verifications render with `user = null`, so role-gated markup is
 a plain `<?jhs if (user && user.role == 'admin') { ?>` block.
 `[templates] expose_user = false` turns the injection off. Since v0.8.0
 renders additionally receive `path` (the request path), `query` (the
-query parameters) and `pages` (the published CMS pages), and templates
+query parameters) and `pages` (the published CMS pages); since F7 the
+named navigation menus arrive as `menus` (`menus.main[0].href` — see
+[README-CMS.md](README-CMS.md)); and templates
 embed shared partials with `<?jhs include("partials/header") ?>` —
 see [README-jhs-engine.md](README-jhs-engine.md).
 
@@ -928,6 +932,14 @@ A small, deliberately boring content layer on top of the sessions:
 the browser speaks plain HTML forms, the server is the only party that
 touches SQLite, and the session cookie stays server-managed
 (`HttpOnly`) — the "server as proxy" model.
+
+**The corporate content model (F7)** — hierarchical pages with a
+cycle-proof move guard, named navigation menus exposed to every
+template as the `menus` global, per-page SEO metadata and an automatic
+`/sitemap.xml` — is documented in depth in
+**[README-CMS.md](README-CMS.md)**, together with the roadmap of the
+CMS feature line (the Markdown editor, the media library, search,
+revisions). Still zero JavaScript.
 
 ### Roles
 

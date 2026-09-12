@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><?= form.is_new ? "Nuevo elemento" : "Editar elemento" ?> — <?= menu.title ?> — CMS wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+    <div class="panel-barra">
+      <h1><?= form.is_new ? "Nuevo elemento" : "Editar elemento" ?> <span class="secundario">(menus.<?= menu.name ?>)</span></h1>
+      <a class="btn btn-fantasma" href="/admin/menus/<?= menu.id ?>">Volver al menú</a>
+    </div>
+
+<?jhs if (form_error) { ?>
+    <p class="aviso aviso-error"><?= form_error ?></p>
+<?jhs } ?>
+
+    <form method="post"
+          action="<?= form.is_new ? "/admin/menus/" + form.menu_id + "/items" : "/admin/menus/" + form.menu_id + "/items/" + form.item_id ?>">
+      <section class="tarjeta">
+        <div class="campo">
+          <label for="etiqueta">Etiqueta (opcional para páginas)</label>
+          <input id="etiqueta" type="text" name="label" maxlength="200"
+                 value="<?= form.label ?>">
+          <p class="ayuda">Vacío = el título de la página enlazada. Para URLs
+             personalizadas es obligatoria.</p>
+        </div>
+
+        <div class="campo">
+          <label for="pagina">Página del CMS</label>
+          <select id="pagina" name="page_id">
+            <option value="">— ninguna (usar URL personalizada) —</option>
+<?jhs page_options.forEach(function (opcion) { ?>
+            <option value="<?= opcion.id ?>"<?= form.page_id == opcion.id ? " selected" : "" ?>><?= opcion.is_published ? "" : "[borrador] " ?><?= opcion.title ?></option>
+<?jhs }); ?>
+          </select>
+        </div>
+
+        <div class="campo">
+          <label for="url">URL personalizada</label>
+          <input id="url" type="text" name="url" maxlength="500"
+                 placeholder="https://ejemplo.com o /aviso-legal o #seccion"
+                 value="<?= form.url ?>">
+          <p class="ayuda">Rellena esta <em>o</em> la página — no ambas. Empieza por
+             <code>/</code>, <code>http://</code>, <code>https://</code> o <code>#</code>.</p>
+        </div>
+
+        <div class="campo">
+          <label for="posicion">Posición (orden en el menú)</label>
+          <input id="posicion" type="number" name="position" min="0" max="99999"
+                 value="<?= form.position ?>">
+          <p class="ayuda">Menor número = antes. Con igual posición decide el orden de creación.</p>
+        </div>
+
+        <button class="btn btn-primario" type="submit">
+          <?= form.is_new ? "Añadir elemento" : "Guardar elemento" ?>
+        </button>
+      </section>
+    </form>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

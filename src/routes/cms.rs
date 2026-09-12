@@ -14,20 +14,41 @@
 //!   the standard globals), wrapped in `views/cms_page.jhs`. Drafts
 //!   answer 404 for the public and render with a banner for
 //!   editors/admins.
+//! - `GET /sitemap.xml` — the published pages (plus the canonical
+//!   homepage while `default_page` names a published page) as a
+//!   sitemap, behind `[cms] sitemap` (F7).
+//!
+//! **Corporate content model (F7)** — still zero JavaScript:
+//!
+//! - Pages are **hierarchical**: a parent and a sibling `position`, a
+//!   cycle-proof move guard (a page can never hang under its own
+//!   branch), breadcrumbs and `page.children` on the public render,
+//!   and a depth-indented admin tree. Deleting a parent reparents its
+//!   children to the top level — content is never lost with a branch.
+//! - **Named menus** ("main", "footer"…) managed at `/admin/menus`:
+//!   items link a page or a custom URL, and every template receives
+//!   them resolved as the `menus` global. Items pointing at drafts
+//!   are skipped publicly, so the navigation never links a 404.
+//! - **SEO metadata** per page (`meta_title`, `meta_description`,
+//!   `og_image`) rendered into the wrapper's `<head>`.
 //!
 //! **Admin panel** (`admin` and `editor` roles; browser-friendly
 //! guards: unauthenticated visitors are redirected to `/login`, and
 //! the forms re-render with their values and the error on failure so
 //! nothing typed is ever lost):
 //!
-//! - `GET  /admin` — dashboard (page and user counters);
-//! - `GET  /admin/pages` — every page, drafts included;
+//! - `GET  /admin` — dashboard (page, menu and user counters);
+//! - `GET  /admin/pages` — every page, drafts included, as a tree;
+//!   create, edit (title/slug/body/parent/position/SEO/publish),
+//!   delete;
 //! - `GET  /admin/pages/new` / `POST /admin/pages` — create;
 //! - `GET  /admin/pages/{id}/edit` / `POST /admin/pages/{id}` — edit;
 //! - `POST /admin/pages/{id}/delete` — delete;
 //! - `GET  /admin/pages/import` / `POST` — copy a file from `public/`
 //!   into a new draft page (read-only on the static tree: the CMS
-//!   never writes into `public/`).
+//!   never writes into `public/`);
+//! - `GET/POST /admin/menus…` — the named navigation menus and their
+//!   items (F7).
 //!
 //! **User management** (`admin` only, `/admin/users`): create, change
 //! role, reset password, delete — with the last-admin and self-edit
@@ -44,6 +65,7 @@
 //! repository access: the CMS administrator manages content and users,
 //! never the server.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use axum::extract::{Path, Request, State};
@@ -55,13 +77,15 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::auth::{hash_password, validate_password, validate_username, verify_password};
-use crate::db::{NewPage, PageUpdate, RepositoryError, User, UserRole};
+use crate::db::{
+    NewMenu, NewMenuItem, NewPage, PageSummary, PageUpdate, RepositoryError, User, UserRole,
+};
 use crate::error::AppError;
 use crate::extractors::AuthUser;
 use crate::middleware::request_id::RequestId;
 use crate::middleware::templates::{base_data, redirect_response, render_response};
 use crate::state::{AppState, CmsContext};
-use crate::util::{format_timestamp, read_form};
+use crate::util::{format_timestamp, iso_date, read_form};
 
 /// Maximum listed pages / users in the admin panels.
 const MAX_LISTED: i64 = 200;
@@ -79,6 +103,24 @@ const MAX_TITLE: usize = 200;
 const MAX_IMPORT_LISTED: usize = 200;
 const MAX_IMPORT_BYTES: u64 = 600_000;
 const MAX_IMPORT_DEPTH: usize = 3;
+
+/// Upper bound on a page's `meta_description` (F7): search engines
+/// display roughly 160 characters; the stored budget is generous.
+const MAX_META_DESCRIPTION: usize = 500;
+
+/// Upper bound on a page's `og_image` and a menu item's URL (F7).
+const MAX_URL_FIELD: usize = 500;
+
+/// Upper bound on a menu item label (F7) — the custom-URL labels
+/// share the page-title budget.
+const MAX_MENU_LABEL: usize = 200;
+
+/// Highest sibling position the forms accept (F7).
+const MAX_POSITION: i64 = 99_999;
+
+/// How many pages the sitemap lists (F7) — the protocol's own advised
+/// per-file ceiling.
+const SITEMAP_LIMIT: i64 = 50_000;
 
 // ─── Browser-friendly guards ─────────────────────────────────────────
 
@@ -427,6 +469,40 @@ pub(crate) async fn render_public_page(
         _ => Value::Null,
     };
 
+    // F7: the hierarchy around the page — the ancestor chain (root
+    // first, immediate parent last) feeds the breadcrumbs and the
+    // `page.parent` link; the direct children (drafts only while the
+    // viewer may manage content) feed `page.children`.
+    let ancestors = match cms.pages.ancestors(page.id).await {
+        Ok(chain) => chain,
+        Err(error) => {
+            tracing::error!(%error, "page hierarchy walk failed");
+            Vec::new()
+        }
+    };
+    let children = match cms.pages.children(Some(page.id), viewer_is_editor).await {
+        Ok(children) => children,
+        Err(error) => {
+            tracing::error!(%error, "page children lookup failed");
+            Vec::new()
+        }
+    };
+
+    let breadcrumbs: Vec<Value> = ancestors
+        .iter()
+        .map(|ancestor| json!({ "slug": ancestor.slug, "title": ancestor.title }))
+        .collect();
+    let parent = ancestors
+        .last()
+        .map(|parent| json!({ "id": parent.id, "slug": parent.slug, "title": parent.title }))
+        .unwrap_or(Value::Null);
+    let children_json: Vec<Value> = children
+        .iter()
+        .map(
+            |child| json!({ "slug": child.slug, "title": child.title, "position": child.position }),
+        )
+        .collect();
+
     let page_json = json!({
         "id": page.id,
         "slug": page.slug,
@@ -435,6 +511,13 @@ pub(crate) async fn render_public_page(
         "created_at_h": format_timestamp(page.created_at),
         "updated_at_h": format_timestamp(page.updated_at),
         "author": author,
+        "parent": parent,
+        "breadcrumbs": breadcrumbs,
+        "children": children_json,
+        "position": page.position,
+        "meta_title": page.meta_title,
+        "meta_description": page.meta_description,
+        "og_image": page.og_image,
     });
 
     let mut wrapper_data = data.clone();
@@ -502,11 +585,19 @@ async fn dashboard(
         },
         None => 0,
     };
+    let menus = match cms.menus.count().await {
+        Ok(menus) => menus,
+        Err(error) => {
+            tracing::error!(%error, "cms dashboard counters failed");
+            return AppError::internal("storage failure").into_response();
+        }
+    };
 
     let stats = json!({
         "pages": total,
         "published": published,
         "drafts": total - published,
+        "menus": menus,
         "users": users,
     });
 
@@ -530,6 +621,16 @@ struct PageForm {
     content: String,
     /// HTML checkboxes post `on` when checked and nothing when not.
     is_published: Option<String>,
+    /// Parent page id as posted by the select: empty string = top
+    /// level, digits = the parent (F7).
+    parent_id: Option<String>,
+    /// Sibling ordering as posted: empty or absent → 0, anything else
+    /// must parse inside `0..=MAX_POSITION` (F7).
+    position: Option<String>,
+    /// SEO overrides (F7): empty fields clear the stored value.
+    meta_title: Option<String>,
+    meta_description: Option<String>,
+    og_image: Option<String>,
 }
 
 impl PageForm {
@@ -540,8 +641,23 @@ impl PageForm {
         )
     }
 
+    /// The parsed parent id (`None` = top level). Only meaningful
+    /// after [`validate_page_form`] accepted the raw shape (F7).
+    fn parent(&self) -> Option<i64> {
+        trimmed(&self.parent_id).and_then(|raw| raw.parse().ok())
+    }
+
+    /// The parsed sibling position, defaulting to 0 (F7).
+    fn position(&self) -> i64 {
+        parse_position(self.position.as_deref())
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+    }
+
     /// The form as template data (`id` and `is_new` added by callers).
-    fn form_data(&self, id: Option<i64>, error: Option<&str>) -> (Value, Value) {
+    /// `parents` feeds the parent `<select>` (F7).
+    fn form_data(&self, id: Option<i64>, parents: &[Value], error: Option<&str>) -> (Value, Value) {
         let form = json!({
             "id": id,
             "slug": self.slug,
@@ -549,6 +665,12 @@ impl PageForm {
             "content": self.content,
             "is_published": self.published(),
             "is_new": id.is_none(),
+            "parent_id": self.parent(),
+            "position": self.position(),
+            "meta_title": trimmed(&self.meta_title).unwrap_or_default(),
+            "meta_description": trimmed(&self.meta_description).unwrap_or_default(),
+            "og_image": trimmed(&self.og_image).unwrap_or_default(),
+            "parents": parents,
         });
         (
             form,
@@ -556,6 +678,29 @@ impl PageForm {
                 .map(|message| Value::String(message.to_owned()))
                 .unwrap_or(Value::Null),
         )
+    }
+}
+
+/// Trims an optional form field to `None` when empty — the shared
+/// "empty means clear" reading of every optional CMS input (F7).
+fn trimmed(field: &Option<String>) -> Option<String> {
+    field
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+/// Parses a form position: absent/empty → `Ok(None)` (the caller's
+/// default applies), a number in `0..=MAX_POSITION` → `Ok(Some(n))`,
+/// anything else → the Spanish form error (F7).
+fn parse_position(raw: Option<&str>) -> Result<Option<i64>, &'static str> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(None);
+    };
+    match raw.parse::<i64>() {
+        Ok(value) if (0..=MAX_POSITION).contains(&value) => Ok(Some(value)),
+        _ => Err("La posición debe ser un número entre 0 y 99 999."),
     }
 }
 
@@ -578,18 +723,17 @@ async fn list_pages(
         }
     };
 
-    let admin_pages: Vec<Value> = pages
-        .into_iter()
-        .map(|page| {
-            json!({
-                "id": page.id,
-                "slug": page.slug,
-                "title": page.title,
-                "is_published": page.is_published,
-                "updated_at_h": format_timestamp(page.updated_at),
-            })
-        })
-        .collect();
+    // F7: the flat listing becomes a tree — siblings ordered by
+    // `position` then id, children nested under their parent with a
+    // `depth` the view turns into indentation.
+    let mut sorted = pages;
+    sorted.sort_by_key(|page| (page.position, page.id));
+    let mut by_parent: HashMap<Option<i64>, Vec<&PageSummary>> = HashMap::new();
+    for page in &sorted {
+        by_parent.entry(page.parent_id).or_default().push(page);
+    }
+    let mut admin_pages: Vec<Value> = Vec::with_capacity(sorted.len());
+    walk_page_tree(&by_parent, None, 0, &mut admin_pages);
 
     render_view(
         &state,
@@ -601,6 +745,29 @@ async fn list_pages(
     .await
 }
 
+/// Flattens the page tree depth-first into listing rows (F7).
+fn walk_page_tree(
+    by_parent: &HashMap<Option<i64>, Vec<&PageSummary>>,
+    parent: Option<i64>,
+    depth: usize,
+    rows: &mut Vec<Value>,
+) {
+    let Some(siblings) = by_parent.get(&parent) else {
+        return;
+    };
+    for page in siblings {
+        rows.push(json!({
+            "id": page.id,
+            "slug": page.slug,
+            "title": page.title,
+            "is_published": page.is_published,
+            "updated_at_h": format_timestamp(page.updated_at),
+            "depth": depth,
+        }));
+        walk_page_tree(by_parent, Some(page.id), depth + 1, rows);
+    }
+}
+
 /// `GET /admin/pages/new`: the empty creation form.
 async fn new_page_form(
     State(state): State<AppState>,
@@ -608,8 +775,13 @@ async fn new_page_form(
     request: Request,
 ) -> Response {
     let parts = PageParts::of(&request);
+    let Ok(cms) = cms_context(&state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+
     let form = PageForm::default();
-    let (form, error) = form.form_data(None, None);
+    let parents = parent_options(cms, None).await;
+    let (form, error) = form.form_data(None, &parents, None);
     render_view(
         &state,
         &parts,
@@ -648,12 +820,33 @@ async fn create_page(
         return render_form_with_error(&state, &parts, None, form, error).await;
     }
 
+    // F7: a stated parent must exist before the insert (the select
+    // only offers real pages, but the form is just HTTP).
+    let parent = form.parent();
+    if let Some(parent_id) = parent {
+        if load_page(cms, parent_id).await.is_none() {
+            return render_form_with_error(
+                &state,
+                &parts,
+                None,
+                form,
+                "La página padre no existe.",
+            )
+            .await;
+        }
+    }
+
     let new_page = NewPage {
         slug: form.slug.clone(),
         title: form.title.clone(),
         content: form.content.clone(),
         is_published: form.published(),
         created_by: Some(editor.user.user_id),
+        parent_id: parent,
+        position: form.position(),
+        meta_title: trimmed(&form.meta_title),
+        meta_description: trimmed(&form.meta_description),
+        og_image: trimmed(&form.og_image),
     };
 
     match cms.pages.create(&new_page).await {
@@ -703,8 +896,15 @@ async fn edit_page_form(
         title: page.title,
         content: page.content,
         is_published: page.is_published.then(|| "on".to_owned()),
+        parent_id: page.parent_id.map(|parent| parent.to_string()),
+        position: Some(page.position.to_string()),
+        meta_title: page.meta_title,
+        meta_description: page.meta_description,
+        og_image: page.og_image,
     };
-    let (form, error) = form.form_data(Some(id), None);
+    // The page itself and its whole branch are unavailable as parents.
+    let parents = parent_options(cms, Some(id)).await;
+    let (form, error) = form.form_data(Some(id), &parents, None);
     render_view(
         &state,
         &parts,
@@ -740,11 +940,61 @@ async fn update_page(
         return render_form_with_error(&state, &parts, Some(id), form, error).await;
     }
 
+    // F7: the move guard. `None` (top level) is always legal; a
+    // stated parent must exist, differ from the page, and not sit
+    // below it — otherwise the tree would grow a cycle.
+    let parent = form.parent();
+    if let Some(parent_id) = parent {
+        if parent_id == id {
+            return render_form_with_error(
+                &state,
+                &parts,
+                Some(id),
+                form,
+                "Una página no puede ser su propia padre.",
+            )
+            .await;
+        }
+        if load_page(cms, parent_id).await.is_none() {
+            return render_form_with_error(
+                &state,
+                &parts,
+                Some(id),
+                form,
+                "La página padre no existe.",
+            )
+            .await;
+        }
+        let creates_cycle = match cms.pages.ancestors(parent_id).await {
+            Ok(chain) => chain.iter().any(|ancestor| ancestor.id == id),
+            Err(error) => {
+                tracing::error!(%error, "page hierarchy walk failed");
+                return AppError::internal("storage failure").into_response();
+            }
+        };
+        if creates_cycle {
+            return render_form_with_error(
+                &state,
+                &parts,
+                Some(id),
+                form,
+                "Ese padre crearía un ciclo: la página no puede colgar de su propia \
+                 descendiente.",
+            )
+            .await;
+        }
+    }
+
     let update = PageUpdate {
         slug: Some(form.slug.clone()),
         title: form.title.clone(),
         content: form.content.clone(),
         is_published: form.published(),
+        parent_id: parent,
+        position: form.position(),
+        meta_title: trimmed(&form.meta_title),
+        meta_description: trimmed(&form.meta_description),
+        og_image: trimmed(&form.og_image),
     };
 
     match cms.pages.update(id, &update).await {
@@ -820,6 +1070,39 @@ fn validate_page_form(form: &PageForm) -> Result<(), &'static str> {
     if form.content.len() > MAX_PAGE_CONTENT {
         return Err("El contenido es demasiado largo (máximo 600 000 caracteres).");
     }
+
+    // F7 additions: hierarchy and SEO shapes.
+    parse_position(form.position.as_deref())?;
+    if let Some(raw_parent) = trimmed(&form.parent_id) {
+        if raw_parent.parse::<i64>().map(|id| id > 0).unwrap_or(false) {
+            // A positive integer: fine — existence is checked by the
+            // handler, which can talk to the repository.
+        } else {
+            return Err(
+                "El padre debe ser el identificador de una página (o vacío para el nivel \
+                 superior).",
+            );
+        }
+    }
+    if trimmed(&form.meta_title).is_some_and(|meta_title| meta_title.len() > MAX_TITLE) {
+        return Err("El título para buscadores es demasiado largo (máximo 200 caracteres).");
+    }
+    if trimmed(&form.meta_description)
+        .is_some_and(|description| description.len() > MAX_META_DESCRIPTION)
+    {
+        return Err("La descripción es demasiado larga (máximo 500 caracteres).");
+    }
+    if let Some(og_image) = trimmed(&form.og_image) {
+        if og_image.len() > MAX_URL_FIELD {
+            return Err("La imagen social es demasiado larga (máximo 500 caracteres).");
+        }
+        if !(og_image.starts_with('/')
+            || og_image.starts_with("http://")
+            || og_image.starts_with("https://"))
+        {
+            return Err("La imagen social debe ser una ruta («/assets/…») o una URL absoluta.");
+        }
+    }
     Ok(())
 }
 
@@ -845,7 +1128,11 @@ async fn render_form_with_error(
     form: PageForm,
     error: &str,
 ) -> Response {
-    let (form, error) = form.form_data(id, Some(error));
+    let parents = match state.cms() {
+        Some(cms) => parent_options(cms, id).await,
+        None => Vec::new(),
+    };
+    let (form, error) = form.form_data(id, &parents, Some(error));
     render_view(
         state,
         parts,
@@ -854,6 +1141,54 @@ async fn render_form_with_error(
         StatusCode::OK,
     )
     .await
+}
+
+/// The parent `<select>` options (F7): every page except `exclude`
+/// and its whole branch — a page can never be moved under its own
+/// subtree. Indented with non-breaking spaces so the tree shape
+/// reads inside the dropdown, and ordered exactly like the admin
+/// tree (position, then id, depth-first).
+async fn parent_options(cms: &CmsContext, exclude: Option<i64>) -> Vec<Value> {
+    let mut pages = match cms.pages.list(true, MAX_LISTED).await {
+        Ok(pages) => pages,
+        Err(error) => {
+            tracing::error!(%error, "page listing failed");
+            return Vec::new();
+        }
+    };
+    pages.sort_by_key(|page| (page.position, page.id));
+
+    let mut by_parent: HashMap<Option<i64>, Vec<&PageSummary>> = HashMap::new();
+    for page in &pages {
+        by_parent.entry(page.parent_id).or_default().push(page);
+    }
+    let mut options = Vec::new();
+    walk_parent_options(&by_parent, None, exclude, 0, &mut options);
+    options
+}
+
+/// Depth-first walk behind [`parent_options`] (F7).
+fn walk_parent_options(
+    by_parent: &HashMap<Option<i64>, Vec<&PageSummary>>,
+    parent: Option<i64>,
+    exclude: Option<i64>,
+    depth: usize,
+    options: &mut Vec<Value>,
+) {
+    let Some(siblings) = by_parent.get(&parent) else {
+        return;
+    };
+    for page in siblings {
+        // The excluded page and its whole subtree are unavailable.
+        if Some(page.id) == exclude {
+            continue;
+        }
+        options.push(json!({
+            "id": page.id,
+            "label": format!("{}{}", "\u{00a0}".repeat(depth * 3), page.title),
+        }));
+        walk_parent_options(by_parent, Some(page.id), exclude, depth + 1, options);
+    }
 }
 
 // ─── Admin: import from `public/` ────────────────────────────────────
@@ -953,6 +1288,13 @@ async fn import_page(
         content,
         is_published: false,
         created_by: Some(editor.user.user_id),
+        // Imported files land as plain top-level drafts: the editor
+        // sets hierarchy and SEO in the follow-up edit (F7).
+        parent_id: None,
+        position: 0,
+        meta_title: None,
+        meta_description: None,
+        og_image: None,
     };
 
     match cms.pages.create(&new_page).await {
@@ -1097,6 +1439,802 @@ fn slug_from_file_name(name: &str) -> String {
         slug.push_str("importada");
     }
     slug
+}
+
+// ─── Admin: menus (F7) ──────────────────────────────────────────────
+
+/// The menu creation form payload.
+#[derive(Deserialize, Default)]
+struct MenuForm {
+    name: String,
+    title: String,
+}
+
+/// The menu title rename payload.
+#[derive(Deserialize, Default)]
+struct MenuTitleForm {
+    title: String,
+}
+
+/// The menu item form payload: a page link or a custom URL — exactly
+/// one of the two, plus an optional label override and position.
+#[derive(Deserialize, Default)]
+struct ItemForm {
+    label: Option<String>,
+    page_id: Option<String>,
+    url: Option<String>,
+    position: Option<String>,
+}
+
+impl ItemForm {
+    /// The parsed page id (`None` = no page chosen). Only meaningful
+    /// after [`validate_item_form`] accepted the shape.
+    fn page(&self) -> Option<i64> {
+        trimmed(&self.page_id).and_then(|raw| raw.parse().ok())
+    }
+
+    /// The parsed custom URL (`None` = none chosen).
+    fn url(&self) -> Option<String> {
+        trimmed(&self.url)
+    }
+
+    /// The parsed label override.
+    fn label(&self) -> Option<String> {
+        trimmed(&self.label)
+    }
+
+    /// The parsed position, defaulting to 0.
+    fn position(&self) -> i64 {
+        parse_position(self.position.as_deref())
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+    }
+}
+
+/// `GET /admin/menus`: the menus plus the creation form.
+async fn list_menus(
+    State(state): State<AppState>,
+    _editor: CmsEditor,
+    request: Request,
+) -> Response {
+    render_menus_view(&state, &PageParts::of(&request), None).await
+}
+
+/// Renders the admin menus listing (with an optional form error).
+async fn render_menus_view(state: &AppState, parts: &PageParts, error: Option<&str>) -> Response {
+    let Ok(cms) = cms_context(state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+
+    let menus = match cms.menus.list().await {
+        Ok(menus) => menus,
+        Err(error) => {
+            tracing::error!(%error, "menu listing failed");
+            return AppError::internal("storage failure").into_response();
+        }
+    };
+
+    let mut admin_menus = Vec::with_capacity(menus.len());
+    for menu in menus {
+        let items = cms.menus.count_items(menu.id).await.unwrap_or(0);
+        admin_menus.push(json!({
+            "id": menu.id,
+            "name": menu.name,
+            "title": menu.title,
+            "items": items,
+            "updated_at_h": format_timestamp(menu.updated_at),
+        }));
+    }
+
+    render_view(
+        state,
+        parts,
+        "admin/menus.jhs",
+        vec![
+            ("admin_menus", Value::Array(admin_menus)),
+            (
+                "form_error",
+                error
+                    .map(|message| Value::String(message.to_owned()))
+                    .unwrap_or(Value::Null),
+            ),
+        ],
+        StatusCode::OK,
+    )
+    .await
+}
+
+/// `POST /admin/menus`: creates a menu.
+async fn create_menu(
+    State(state): State<AppState>,
+    _editor: CmsEditor,
+    request: Request,
+) -> Response {
+    let parts = PageParts::of(&request);
+    let max_body = state.config().server.max_body_size_bytes;
+    let Ok(cms) = cms_context(&state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+
+    let form = match read_form::<MenuForm>(request, max_body).await {
+        Ok(form) => form,
+        Err(message) => {
+            return render_menus_view(&state, &parts, Some(&message)).await;
+        }
+    };
+
+    let title = form.title.trim();
+    if title.is_empty() {
+        return render_menus_view(
+            &state,
+            &parts,
+            Some("El título del menú no puede estar vacío."),
+        )
+        .await;
+    }
+    if form.title.len() > MAX_TITLE {
+        return render_menus_view(
+            &state,
+            &parts,
+            Some("El título del menú es demasiado largo (máximo 200 caracteres)."),
+        )
+        .await;
+    }
+    if !crate::util::valid_slug(&form.name) {
+        return render_menus_view(
+            &state,
+            &parts,
+            Some(
+                "El nombre del menú debe tener 1-64 caracteres: minúsculas, números y guiones \
+                 (es la clave que leen las plantillas: menus.<nombre>).",
+            ),
+        )
+        .await;
+    }
+
+    let new_menu = NewMenu {
+        name: form.name,
+        title: form.title.trim().to_owned(),
+    };
+
+    match cms.menus.create(&new_menu).await {
+        Ok(menu) => see_other(&format!("/admin/menus/{}?ok=creado", menu.id)),
+        Err(RepositoryError::Duplicate) => {
+            render_menus_view(
+                &state,
+                &parts,
+                Some(
+                    "Ese nombre de menú ya existe: es la clave que leen las plantillas \
+                      (menus.<nombre>).",
+                ),
+            )
+            .await
+        }
+        Err(RepositoryError::Internal(message)) => {
+            tracing::error!(%message, "menu creation failed");
+            render_menus_view(&state, &parts, Some("No se pudo guardar (error interno).")).await
+        }
+    }
+}
+
+/// `GET /admin/menus/{id}`: the menu detail — rename form, items, and
+/// the add-item form.
+async fn menu_detail(
+    State(state): State<AppState>,
+    _editor: CmsEditor,
+    Path(id): Path<i64>,
+    request: Request,
+) -> Response {
+    render_menu_detail(&state, &PageParts::of(&request), id, None).await
+}
+
+/// Renders the menu detail view (with an optional form error).
+async fn render_menu_detail(
+    state: &AppState,
+    parts: &PageParts,
+    id: i64,
+    error: Option<&str>,
+) -> Response {
+    let Ok(cms) = cms_context(state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+
+    let Some(menu) = load_menu(cms, id).await else {
+        return see_other("/admin/menus");
+    };
+
+    let items = match cms.menus.items_with_pages(id).await {
+        Ok(items) => items,
+        Err(error) => {
+            tracing::error!(%error, "menu item listing failed");
+            return AppError::internal("storage failure").into_response();
+        }
+    };
+
+    let items_json: Vec<Value> = items
+        .iter()
+        .map(|entry| {
+            let page = entry
+                .page
+                .as_ref()
+                .map(|page| {
+                    json!({
+                        "slug": page.slug,
+                        "title": page.title,
+                        "is_published": page.is_published,
+                    })
+                })
+                .unwrap_or(Value::Null);
+            json!({
+                "id": entry.item.id,
+                "position": entry.item.position,
+                "label": entry.item.label,
+                "page": page,
+                "url": entry.item.url,
+                "is_page": entry.item.page_id.is_some(),
+                "href": match (&entry.page, &entry.item.url) {
+                    (Some(page), _) => format!("/p/{}", page.slug),
+                    (None, Some(url)) => url.clone(),
+                    (None, None) => String::new(),
+                },
+            })
+        })
+        .collect();
+
+    let menu_json = json!({
+        "id": menu.id,
+        "name": menu.name,
+        "title": menu.title,
+    });
+
+    render_view(
+        state,
+        parts,
+        "admin/menu_detail.jhs",
+        vec![
+            ("menu", menu_json),
+            ("items", Value::Array(items_json)),
+            (
+                "form_error",
+                error
+                    .map(|message| Value::String(message.to_owned()))
+                    .unwrap_or(Value::Null),
+            ),
+        ],
+        StatusCode::OK,
+    )
+    .await
+}
+
+/// `POST /admin/menus/{id}`: renames the menu's title (the name is
+/// the template key and stays immutable).
+async fn rename_menu(
+    State(state): State<AppState>,
+    _editor: CmsEditor,
+    Path(id): Path<i64>,
+    request: Request,
+) -> Response {
+    let parts = PageParts::of(&request);
+    let max_body = state.config().server.max_body_size_bytes;
+    let Ok(cms) = cms_context(&state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+
+    let form = match read_form::<MenuTitleForm>(request, max_body).await {
+        Ok(form) => form,
+        Err(message) => {
+            return render_menu_detail(&state, &parts, id, Some(&message)).await;
+        }
+    };
+
+    let title = form.title.trim();
+    if title.is_empty() {
+        return render_menu_detail(
+            &state,
+            &parts,
+            id,
+            Some("El título del menú no puede estar vacío."),
+        )
+        .await;
+    }
+    if form.title.len() > MAX_TITLE {
+        return render_menu_detail(
+            &state,
+            &parts,
+            id,
+            Some("El título del menú es demasiado largo (máximo 200 caracteres)."),
+        )
+        .await;
+    }
+
+    match cms.menus.update_title(id, title).await {
+        Ok(Some(_)) => see_other(&format!("/admin/menus/{id}?ok=guardado")),
+        Ok(None) => see_other("/admin/menus"),
+        Err(RepositoryError::Internal(message)) => {
+            tracing::error!(%message, "menu rename failed");
+            render_menu_detail(
+                &state,
+                &parts,
+                id,
+                Some("No se pudo guardar (error interno)."),
+            )
+            .await
+        }
+        Err(RepositoryError::Duplicate) => {
+            render_menu_detail(
+                &state,
+                &parts,
+                id,
+                Some("No se pudo guardar (error interno)."),
+            )
+            .await
+        }
+    }
+}
+
+/// `POST /admin/menus/{id}/delete`: removes a menu and its items.
+async fn delete_menu(
+    State(state): State<AppState>,
+    _editor: CmsEditor,
+    Path(id): Path<i64>,
+    request: Request,
+) -> Response {
+    let _parts = PageParts::of(&request);
+    let Ok(cms) = cms_context(&state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+
+    match cms.menus.delete(id).await {
+        Ok(_) => see_other("/admin/menus?ok=eliminado"),
+        Err(error) => {
+            tracing::error!(%error, "menu deletion failed");
+            AppError::internal("storage failure").into_response()
+        }
+    }
+}
+
+/// `GET /admin/menus/{id}/items/new`: the add-item form.
+async fn new_item_form(
+    State(state): State<AppState>,
+    _editor: CmsEditor,
+    Path(id): Path<i64>,
+    request: Request,
+) -> Response {
+    render_item_form_view(
+        &state,
+        &PageParts::of(&request),
+        id,
+        &ItemForm::default(),
+        None,
+        None,
+    )
+    .await
+}
+
+/// `POST /admin/menus/{id}/items`: adds an item to the menu.
+async fn create_item(
+    State(state): State<AppState>,
+    _editor: CmsEditor,
+    Path(id): Path<i64>,
+    request: Request,
+) -> Response {
+    let parts = PageParts::of(&request);
+    let max_body = state.config().server.max_body_size_bytes;
+    let Ok(cms) = cms_context(&state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+
+    let form = match read_form::<ItemForm>(request, max_body).await {
+        Ok(form) => form,
+        Err(message) => {
+            return render_item_form_view(
+                &state,
+                &parts,
+                id,
+                &ItemForm::default(),
+                None,
+                Some(&message),
+            )
+            .await;
+        }
+    };
+
+    if let Err(error) = validate_item_form(cms, &form).await {
+        return render_item_form_view(&state, &parts, id, &form, None, Some(error)).await;
+    }
+
+    let new_item = NewMenuItem {
+        menu_id: id,
+        position: form.position(),
+        label: form.label(),
+        page_id: form.page(),
+        url: form.url(),
+    };
+
+    match cms.menus.add_item(&new_item).await {
+        Ok(_) => see_other(&format!("/admin/menus/{id}?ok=item-creado")),
+        Err(RepositoryError::Internal(message)) => {
+            tracing::error!(%message, "menu item creation failed");
+            render_item_form_view(
+                &state,
+                &parts,
+                id,
+                &form,
+                None,
+                Some("No se pudo guardar (error interno)."),
+            )
+            .await
+        }
+        Err(RepositoryError::Duplicate) => {
+            render_item_form_view(
+                &state,
+                &parts,
+                id,
+                &form,
+                None,
+                Some("No se pudo guardar (error interno)."),
+            )
+            .await
+        }
+    }
+}
+
+/// `GET /admin/menus/{id}/items/{item_id}/edit`: the edit-item form.
+async fn edit_item_form(
+    State(state): State<AppState>,
+    _editor: CmsEditor,
+    Path((id, item_id)): Path<(i64, i64)>,
+    request: Request,
+) -> Response {
+    let parts = PageParts::of(&request);
+    let Ok(cms) = cms_context(&state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+
+    let Some(item) = load_menu_item(cms, id, item_id).await else {
+        return see_other(&format!("/admin/menus/{id}"));
+    };
+
+    let form = ItemForm {
+        label: item.label,
+        page_id: item.page_id.map(|page| page.to_string()),
+        url: item.url,
+        position: Some(item.position.to_string()),
+    };
+
+    render_item_form_view(&state, &parts, id, &form, Some(item_id), None).await
+}
+
+/// `POST /admin/menus/{id}/items/{item_id}`: applies an item edit.
+async fn update_item(
+    State(state): State<AppState>,
+    _editor: CmsEditor,
+    Path((id, item_id)): Path<(i64, i64)>,
+    request: Request,
+) -> Response {
+    let parts = PageParts::of(&request);
+    let max_body = state.config().server.max_body_size_bytes;
+    let Ok(cms) = cms_context(&state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+
+    let form = match read_form::<ItemForm>(request, max_body).await {
+        Ok(form) => form,
+        Err(message) => {
+            return render_item_form_view(
+                &state,
+                &parts,
+                id,
+                &ItemForm::default(),
+                Some(item_id),
+                Some(&message),
+            )
+            .await;
+        }
+    };
+
+    if cms.menus.find_item(item_id).await.ok().flatten().is_none() {
+        return see_other(&format!("/admin/menus/{id}"));
+    }
+    if let Err(error) = validate_item_form(cms, &form).await {
+        return render_item_form_view(&state, &parts, id, &form, Some(item_id), Some(error)).await;
+    }
+
+    let new_item = NewMenuItem {
+        menu_id: id,
+        position: form.position(),
+        label: form.label(),
+        page_id: form.page(),
+        url: form.url(),
+    };
+
+    match cms.menus.update_item(item_id, &new_item).await {
+        Ok(Some(_)) => see_other(&format!("/admin/menus/{id}?ok=item-guardado")),
+        Ok(None) => see_other(&format!("/admin/menus/{id}")),
+        Err(RepositoryError::Internal(message)) => {
+            tracing::error!(%message, "menu item update failed");
+            render_item_form_view(
+                &state,
+                &parts,
+                id,
+                &form,
+                Some(item_id),
+                Some("No se pudo guardar (error interno)."),
+            )
+            .await
+        }
+        Err(RepositoryError::Duplicate) => {
+            render_item_form_view(
+                &state,
+                &parts,
+                id,
+                &form,
+                Some(item_id),
+                Some("No se pudo guardar (error interno)."),
+            )
+            .await
+        }
+    }
+}
+
+/// `POST /admin/menus/{id}/items/{item_id}/delete`: removes one item.
+async fn delete_item(
+    State(state): State<AppState>,
+    _editor: CmsEditor,
+    Path((id, item_id)): Path<(i64, i64)>,
+    request: Request,
+) -> Response {
+    let _parts = PageParts::of(&request);
+    let Ok(cms) = cms_context(&state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+
+    // Only items that actually belong to this menu are touchable
+    // through its URLs.
+    if load_menu_item(cms, id, item_id).await.is_some() {
+        if let Err(error) = cms.menus.delete_item(item_id).await {
+            tracing::error!(%error, "menu item deletion failed");
+            return AppError::internal("storage failure").into_response();
+        }
+    }
+
+    see_other(&format!("/admin/menus/{id}?ok=item-eliminado"))
+}
+
+/// Renders the menu item form (create or edit) with the submitted
+/// values and an optional error.
+async fn render_item_form_view(
+    state: &AppState,
+    parts: &PageParts,
+    menu_id: i64,
+    form: &ItemForm,
+    item_id: Option<i64>,
+    error: Option<&str>,
+) -> Response {
+    let Ok(cms) = cms_context(state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+
+    let Some(menu) = load_menu(cms, menu_id).await else {
+        return see_other("/admin/menus");
+    };
+
+    // Drafts are included on purpose: a menu may link a draft (the
+    // public `menus` global skips it until the page is published).
+    let page_options: Vec<Value> = match cms.pages.list(true, MAX_LISTED).await {
+        Ok(pages) => pages
+            .iter()
+            .map(|page| {
+                json!({
+                    "id": page.id,
+                    "title": page.title,
+                    "is_published": page.is_published,
+                })
+            })
+            .collect(),
+        Err(error) => {
+            tracing::error!(%error, "page listing failed");
+            Vec::new()
+        }
+    };
+
+    let form_json = json!({
+        "menu_id": menu_id,
+        "item_id": item_id,
+        "is_new": item_id.is_none(),
+        "label": form.label.as_deref().unwrap_or(""),
+        "page_id": form.page(),
+        "url": form.url.as_deref().unwrap_or(""),
+        "position": form.position(),
+    });
+    let menu_json = json!({
+        "id": menu.id,
+        "name": menu.name,
+        "title": menu.title,
+    });
+
+    render_view(
+        state,
+        parts,
+        "admin/menu_item_form.jhs",
+        vec![
+            ("menu", menu_json),
+            ("form", form_json),
+            ("page_options", Value::Array(page_options)),
+            (
+                "form_error",
+                error
+                    .map(|message| Value::String(message.to_owned()))
+                    .unwrap_or(Value::Null),
+            ),
+        ],
+        StatusCode::OK,
+    )
+    .await
+}
+
+/// Validates the item form: exactly one destination (page or URL), a
+/// mandatory label for custom links, and the shared shape rules.
+async fn validate_item_form(cms: &CmsContext, form: &ItemForm) -> Result<(), &'static str> {
+    parse_position(form.position.as_deref())?;
+    let page = form.page();
+    let url = form.url();
+    let label = form.label();
+
+    if label
+        .as_ref()
+        .is_some_and(|label| label.len() > MAX_MENU_LABEL)
+    {
+        return Err("La etiqueta es demasiado larga (máximo 200 caracteres).");
+    }
+
+    match (page, url) {
+        (Some(_), Some(_)) => Err("Elige una página o escribe una URL — no ambas."),
+        (None, None) => Err("El elemento necesita un destino: una página o una URL."),
+        (Some(page_id), None) => {
+            if load_page(cms, page_id).await.is_none() {
+                return Err("La página elegida no existe.");
+            }
+            Ok(())
+        }
+        (None, Some(url)) => {
+            if url.len() > MAX_URL_FIELD {
+                return Err("La URL es demasiado larga (máximo 500 caracteres).");
+            }
+            if !(url.starts_with('/')
+                || url.starts_with("http://")
+                || url.starts_with("https://")
+                || url.starts_with('#'))
+            {
+                return Err("La URL debe empezar por «/», «http://», «https://» o «#».");
+            }
+            if label.is_none() {
+                return Err("Los enlaces personalizados necesitan una etiqueta.");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Loads a menu by id, logging storage failures as a missing menu.
+async fn load_menu(cms: &CmsContext, id: i64) -> Option<crate::db::MenuRecord> {
+    match cms.menus.find_by_id(id).await {
+        Ok(menu) => menu,
+        Err(error) => {
+            tracing::error!(%error, "menu lookup failed");
+            None
+        }
+    }
+}
+
+/// Loads a menu item that must belong to `menu_id` — foreign or
+/// missing items answer `None` (the URL named this menu).
+async fn load_menu_item(
+    cms: &CmsContext,
+    menu_id: i64,
+    item_id: i64,
+) -> Option<crate::db::MenuItemRecord> {
+    match cms.menus.find_item(item_id).await {
+        Ok(Some(item)) if item.menu_id == menu_id => Some(item),
+        Ok(_) => None,
+        Err(error) => {
+            tracing::error!(%error, "menu item lookup failed");
+            None
+        }
+    }
+}
+
+// ─── Public: `GET /sitemap.xml` (F7) ────────────────────────────────
+
+/// `GET /sitemap.xml`: the published CMS pages (and the canonical
+/// homepage while `default_page` names a published page) as a
+/// sitemap.
+///
+/// `<loc>` URLs must be absolute: `[cms] site_url` wins, and without
+/// it the request's `Host` header carries the visible origin under
+/// plain `http://` — correct for direct HTTP setups, wrong behind
+/// TLS or a proxy (the docs say so). The response is cacheable: it
+/// is public information, unlike every template render.
+async fn sitemap(State(state): State<AppState>, request: Request) -> Response {
+    if !state.config().cms.sitemap {
+        return AppError::not_found("GET", "/sitemap.xml").into_response();
+    }
+    let Ok(cms) = cms_context(&state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+
+    let pages = match cms.pages.list(false, SITEMAP_LIMIT).await {
+        Ok(pages) => pages,
+        Err(error) => {
+            tracing::error!(%error, "sitemap page listing failed");
+            return AppError::internal("storage failure").into_response();
+        }
+    };
+
+    let base = state.config().cms.site_url.clone().unwrap_or_else(|| {
+        let host = request
+            .headers()
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("127.0.0.1");
+        format!("http://{host}")
+    });
+
+    let mut xml =
+        String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
+
+    // The canonical homepage: only while the configured default page
+    // is a published one (otherwise GET / is not CMS content).
+    if let Some(slug) = state.config().cms.default_page.as_deref() {
+        if let Some(home) = cms.pages.find_by_slug(slug).await.unwrap_or(None) {
+            if home.is_published {
+                xml.push_str(&sitemap_entry(&format!("{base}/"), home.updated_at));
+            }
+        }
+    }
+    for page in pages {
+        xml.push_str(&sitemap_entry(
+            &format!("{base}/p/{}", page.slug),
+            page.updated_at,
+        ));
+    }
+    xml.push_str("</urlset>\n");
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
+        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .body(axum::body::Body::from(xml))
+        .unwrap_or_else(|error| {
+            tracing::error!(%error, "failed to build the sitemap response");
+            AppError::internal("failed to build the sitemap response".to_owned()).into_response()
+        })
+}
+
+/// One `<url>` entry with XML-escaped values and a W3C date.
+fn sitemap_entry(loc: &str, lastmod: i64) -> String {
+    format!(
+        "  <url>\n    <loc>{}</loc>\n    <lastmod>{}</lastmod>\n  </url>\n",
+        xml_escape(loc),
+        iso_date(lastmod)
+    )
+}
+
+/// Escapes the five characters XML requires in text and attributes.
+fn xml_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
 }
 
 // ─── Admin: users ────────────────────────────────────────────────────
@@ -1614,6 +2752,7 @@ fn password_error(redirect: &str, code: &str) -> Response {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/p/{slug}", get(public_page))
+        .route("/sitemap.xml", get(sitemap))
         .route("/perfil/password", post(change_password))
         .route("/admin", get(dashboard))
         .route("/admin/pages", get(list_pages).post(create_page))
@@ -1622,6 +2761,20 @@ pub fn routes() -> Router<AppState> {
         .route("/admin/pages/{id}/edit", get(edit_page_form))
         .route("/admin/pages/{id}", post(update_page))
         .route("/admin/pages/{id}/delete", post(delete_page))
+        .route("/admin/menus", get(list_menus).post(create_menu))
+        .route("/admin/menus/{id}", get(menu_detail).post(rename_menu))
+        .route("/admin/menus/{id}/delete", post(delete_menu))
+        .route("/admin/menus/{id}/items/new", get(new_item_form))
+        .route("/admin/menus/{id}/items", post(create_item))
+        .route(
+            "/admin/menus/{id}/items/{item_id}/edit",
+            get(edit_item_form),
+        )
+        .route("/admin/menus/{id}/items/{item_id}", post(update_item))
+        .route(
+            "/admin/menus/{id}/items/{item_id}/delete",
+            post(delete_item),
+        )
         .route("/admin/users", get(list_users).post(create_user))
         .route("/admin/users/new", get(new_user_form))
         .route("/admin/users/{id}/edit", get(edit_user_form))
@@ -1632,6 +2785,38 @@ pub fn routes() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xml_escape_covers_the_five_required_characters() {
+        assert_eq!(xml_escape("plain"), "plain");
+        assert_eq!(
+            xml_escape("a&b<c>d\"e'f"),
+            "a&amp;b&lt;c&gt;d&quot;e&apos;f"
+        );
+    }
+
+    #[test]
+    fn sitemap_entries_carry_escaped_locs_and_iso_dates() {
+        let entry = sitemap_entry("https://x.example/p/a&b", 0);
+        assert!(
+            entry.contains("<loc>https://x.example/p/a&amp;b</loc>"),
+            "{entry}"
+        );
+        assert!(entry.contains("<lastmod>1970-01-01</lastmod>"), "{entry}");
+    }
+
+    #[test]
+    fn positions_parse_with_bounds_and_defaults() {
+        assert_eq!(parse_position(None), Ok(None));
+        assert_eq!(parse_position(Some("")), Ok(None));
+        assert_eq!(parse_position(Some("  ")), Ok(None));
+        assert_eq!(parse_position(Some("7")), Ok(Some(7)));
+        assert_eq!(parse_position(Some("0")), Ok(Some(0)));
+        assert_eq!(parse_position(Some("99999")), Ok(Some(99_999)));
+        assert!(parse_position(Some("abc")).is_err());
+        assert!(parse_position(Some("-1")).is_err());
+        assert!(parse_position(Some("100000")).is_err());
+    }
 
     #[test]
     fn slugs_accept_the_documented_shape() {

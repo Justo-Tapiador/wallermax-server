@@ -40,8 +40,8 @@
 //! which is template-author-facing diagnostics rather than a leak:
 //! template code never sees server internals.
 //!
-//! ## Template data: the `user`, `path`, `query`, `pages` and `req`
-//! globals
+//! ## Template data: the `user`, `path`, `query`, `pages`, `menus` and
+//! `req` globals
 //!
 //! Every render receives a small set of globals (see [`base_data`]):
 //!
@@ -55,6 +55,10 @@
 //! - `pages` — the published CMS pages (`[{ id, slug, title,
 //!   updated_at }]`, newest first, capped) while the CMS is enabled:
 //!   navigation menus and the home listing render from it;
+//! - `menus` — the named navigation menus (F7): `{ main: [{ label,
+//!   href }] }`-shaped, items resolved to published pages or custom
+//!   URLs, `{}` while the CMS is off — the corporate header/footer
+//!   render from it;
 //! - `req` — an Express-shaped request object (v0.9.0):
 //!   `{ method, url, path, query, headers }`. Only a fixed allowlist
 //!   of harmless headers (`accept`, `accept-language`, `content-type`,
@@ -234,6 +238,7 @@ pub(crate) async fn base_data(
     data.insert(String::from("path"), Value::String(uri.path().to_owned()));
     data.insert(String::from("query"), query_global(uri));
     data.insert(String::from("pages"), pages_global(state).await);
+    data.insert(String::from("menus"), menus_global(state).await);
     data.insert(String::from("req"), req_global(headers, uri, method));
     data
 }
@@ -311,6 +316,43 @@ async fn pages_global(state: &AppState) -> Value {
         Err(error) => {
             tracing::warn!(%error, "the pages template global could not be loaded");
             Value::Array(Vec::new())
+        }
+    }
+}
+
+/// The `menus` global (F7): the named navigation menus, each an array
+/// of `{ label, href }` items resolved server-side — published pages
+/// and custom URLs only, so the public navigation never links a 404.
+/// `{}` while the CMS is disabled; templates read `menus.main`.
+async fn menus_global(state: &AppState) -> Value {
+    let Some(cms) = state.cms() else {
+        return Value::Object(Map::new());
+    };
+
+    match cms.menus.resolved().await {
+        Ok(menus) => {
+            let mut map = Map::new();
+            for (menu, items) in menus {
+                map.insert(
+                    menu.name,
+                    Value::Array(
+                        items
+                            .into_iter()
+                            .map(|item| {
+                                json!({
+                                    "label": item.label,
+                                    "href": item.url,
+                                })
+                            })
+                            .collect(),
+                    ),
+                );
+            }
+            Value::Object(map)
+        }
+        Err(error) => {
+            tracing::warn!(%error, "the menus template global could not be loaded");
+            Value::Object(Map::new())
         }
     }
 }

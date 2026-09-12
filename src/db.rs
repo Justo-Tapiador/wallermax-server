@@ -611,6 +611,18 @@ pub struct NewPage {
     pub is_published: bool,
     /// Author id (soft audit link; `NULL` keeps the page after deletion).
     pub created_by: Option<i64>,
+    /// Parent page id; `None` places the page at the top level (F7).
+    pub parent_id: Option<i64>,
+    /// Sibling ordering inside the parent — menus, subpage listings and
+    /// the admin tree, lower first (F7).
+    pub position: i64,
+    /// Optional `<title>` override for search engines (F7).
+    pub meta_title: Option<String>,
+    /// Optional `<meta name="description">` content (F7).
+    pub meta_description: Option<String>,
+    /// Optional social/`og:image` URL — a site path or an absolute URL
+    /// (F7; the media library lands in a later phase).
+    pub og_image: Option<String>,
 }
 
 /// Field updates for an existing CMS page, addressed by id. A `None`
@@ -622,9 +634,22 @@ pub struct PageUpdate {
     pub title: String,
     pub content: String,
     pub is_published: bool,
+    /// The new parent. **Unlike `slug`, `None` means "top level"**, not
+    /// "keep the current one": the admin form always carries the field
+    /// (empty select = move to the top), so every update states the
+    /// intended parent explicitly (F7).
+    pub parent_id: Option<i64>,
+    /// Sibling ordering inside the (new) parent.
+    pub position: i64,
+    /// New `<title>` override, or `None` to clear it (empty form field).
+    pub meta_title: Option<String>,
+    /// New `<meta name="description">`, or `None` to clear it.
+    pub meta_description: Option<String>,
+    /// New `og:image`, or `None` to clear it.
+    pub og_image: Option<String>,
 }
 
-/// A persisted CMS page row (see `migrations/0003_*`).
+/// A persisted CMS page row (see `migrations/0003_*` and `0004_*`).
 #[derive(Debug, Clone)]
 pub struct PageRecord {
     pub id: i64,
@@ -637,6 +662,13 @@ pub struct PageRecord {
     pub created_at: i64,
     /// Last edit time, unix seconds.
     pub updated_at: i64,
+    /// Parent page id; `None` = top level (F7).
+    pub parent_id: Option<i64>,
+    /// Sibling ordering inside the parent (F7).
+    pub position: i64,
+    pub meta_title: Option<String>,
+    pub meta_description: Option<String>,
+    pub og_image: Option<String>,
 }
 
 /// Listing projection of a page (no `content`: listings stay small).
@@ -647,6 +679,10 @@ pub struct PageSummary {
     pub title: String,
     pub is_published: bool,
     pub updated_at: i64,
+    /// Parent page id; `None` = top level (F7).
+    pub parent_id: Option<i64>,
+    /// Sibling ordering inside the parent (F7).
+    pub position: i64,
 }
 
 impl PageRecord {
@@ -658,6 +694,8 @@ impl PageRecord {
             title: self.title.clone(),
             is_published: self.is_published,
             updated_at: self.updated_at,
+            parent_id: self.parent_id,
+            position: self.position,
         }
     }
 }
@@ -673,6 +711,11 @@ impl<'r> FromRow<'r, SqliteRow> for PageRecord {
             created_by: row.try_get("created_by")?,
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
+            parent_id: row.try_get("parent_id")?,
+            position: row.try_get("position")?,
+            meta_title: row.try_get("meta_title")?,
+            meta_description: row.try_get("meta_description")?,
+            og_image: row.try_get("og_image")?,
         })
     }
 }
@@ -685,6 +728,8 @@ impl<'r> FromRow<'r, SqliteRow> for PageSummary {
             title: row.try_get("title")?,
             is_published: row.try_get::<i64, _>("is_published")? != 0,
             updated_at: row.try_get("updated_at")?,
+            parent_id: row.try_get("parent_id")?,
+            position: row.try_get("position")?,
         })
     }
 }
@@ -724,6 +769,11 @@ pub trait PageRepository: Send + Sync + 'static {
     ) -> Result<Option<PageRecord>, RepositoryError>;
 
     /// Deletes the page with `id`. Returns whether a row was removed.
+    ///
+    /// Children survive: the schema reparents them to the top level
+    /// (`ON DELETE SET NULL`), and menu items pointing at the page are
+    /// removed (`ON DELETE CASCADE`) — the navigation never keeps dead
+    /// links by construction (F7).
     async fn delete(&self, id: i64) -> Result<bool, RepositoryError>;
 
     /// Counts all pages.
@@ -731,14 +781,36 @@ pub trait PageRepository: Send + Sync + 'static {
 
     /// Counts published pages.
     async fn count_published(&self) -> Result<i64, RepositoryError>;
+
+    /// The ancestor chain of the page with `id`: root first, immediate
+    /// parent last, the page itself excluded. The walk is bounded so a
+    /// corrupted cycle can never hang it (F7).
+    async fn ancestors(&self, id: i64) -> Result<Vec<PageSummary>, RepositoryError>;
+
+    /// The direct children of a page (`None` = top level), ordered by
+    /// `position` then id. Drafts are only included while
+    /// `include_drafts` (the admin tree); the public subpage listings
+    /// see published children only (F7).
+    async fn children(
+        &self,
+        parent_id: Option<i64>,
+        include_drafts: bool,
+    ) -> Result<Vec<PageSummary>, RepositoryError>;
 }
 
 /// Column list shared by every `SELECT` on the `pages` table.
 const PAGE_COLUMNS: &str = "id, slug, title, content, is_published, created_by, \
-                           created_at, updated_at";
+                           created_at, updated_at, parent_id, position, meta_title, \
+                           meta_description, og_image";
 
 /// Column list of the listing projection (no `content`).
-const PAGE_SUMMARY_COLUMNS: &str = "id, slug, title, is_published, updated_at";
+const PAGE_SUMMARY_COLUMNS: &str = "id, slug, title, is_published, updated_at, \
+                                   parent_id, position";
+
+/// How many ancestor hops [`PageRepository::ancestors`] walks before
+/// giving up: deeper than any sane site tree, but a corrupted cycle
+/// answers an error instead of hanging the walk.
+const MAX_ANCESTOR_HOPS: usize = 128;
 
 /// SQLite-backed [`PageRepository`] over a shared pool.
 #[derive(Clone)]
@@ -761,7 +833,8 @@ impl PageRepository for SqlitePageRepository {
 
         let result = sqlx::query(
             "INSERT INTO pages (slug, title, content, is_published, created_by, \
-             created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             created_at, updated_at, parent_id, position, meta_title, meta_description, \
+             og_image) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )
         .bind(&page.slug)
         .bind(&page.title)
@@ -770,6 +843,11 @@ impl PageRepository for SqlitePageRepository {
         .bind(page.created_by)
         .bind(created_at)
         .bind(updated_at)
+        .bind(page.parent_id)
+        .bind(page.position)
+        .bind(&page.meta_title)
+        .bind(&page.meta_description)
+        .bind(&page.og_image)
         .execute(&self.pool)
         .await;
 
@@ -783,6 +861,11 @@ impl PageRepository for SqlitePageRepository {
                 created_by: page.created_by,
                 created_at,
                 updated_at,
+                parent_id: page.parent_id,
+                position: page.position,
+                meta_title: page.meta_title.clone(),
+                meta_description: page.meta_description.clone(),
+                og_image: page.og_image.clone(),
             }),
             Err(error) => Err(RepositoryError::from_sqlx(error)),
         }
@@ -836,10 +919,13 @@ impl PageRepository for SqlitePageRepository {
         let updated_at = unix_now();
 
         // `COALESCE` keeps the current slug when the update carries none
-        // (a `None` binding is SQL `NULL`).
+        // (a `None` binding is SQL `NULL`). `parent_id` binds plainly:
+        // the form always states the intended parent, and `NULL` means
+        // top level (see `PageUpdate`).
         let result = sqlx::query(
             "UPDATE pages SET slug = COALESCE(?2, slug), title = ?3, content = ?4, \
-             is_published = ?5, updated_at = ?6 WHERE id = ?1",
+             is_published = ?5, updated_at = ?6, parent_id = ?7, position = ?8, \
+             meta_title = ?9, meta_description = ?10, og_image = ?11 WHERE id = ?1",
         )
         .bind(id)
         .bind(update.slug.as_deref())
@@ -847,6 +933,11 @@ impl PageRepository for SqlitePageRepository {
         .bind(&update.content)
         .bind(update.is_published)
         .bind(updated_at)
+        .bind(update.parent_id)
+        .bind(update.position)
+        .bind(&update.meta_title)
+        .bind(&update.meta_description)
+        .bind(&update.og_image)
         .execute(&self.pool)
         .await
         .map_err(RepositoryError::from_sqlx)?;
@@ -880,6 +971,524 @@ impl PageRepository for SqlitePageRepository {
             .fetch_one(&self.pool)
             .await
             .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn ancestors(&self, id: i64) -> Result<Vec<PageSummary>, RepositoryError> {
+        let mut chain = Vec::new();
+        let mut current = id;
+        for _ in 0..MAX_ANCESTOR_HOPS {
+            let parent = sqlx::query_as::<_, PageSummary>(&format!(
+                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE id = ?1"
+            ))
+            .bind(current)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)?;
+
+            let Some(page) = parent else {
+                // A parent disappeared mid-walk: the chain simply stops.
+                break;
+            };
+            // The walk starts at the page itself, which is NOT its own
+            // ancestor — only the chain above it is collected.
+            if page.id != id {
+                chain.insert(0, page.clone());
+            }
+            match page.parent_id {
+                // A corrupted self-parent loop would hang the walk; the
+                // hop budget bounds it and this guard exits early.
+                Some(parent_id) if parent_id != page.id => current = parent_id,
+                _ => break,
+            }
+        }
+        Ok(chain)
+    }
+
+    async fn children(
+        &self,
+        parent_id: Option<i64>,
+        include_drafts: bool,
+    ) -> Result<Vec<PageSummary>, RepositoryError> {
+        // `parent_id IS ?1` matches both a concrete id and `NULL`
+        // (top level) without string-building the condition.
+        let sql = format!(
+            "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE parent_id IS ?1 \
+             AND (is_published = 1 OR ?2) ORDER BY position, id"
+        );
+        sqlx::query_as(&sql)
+            .bind(parent_id)
+            .bind(include_drafts)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)
+    }
+}
+
+// ─── Menus (F7, corporate content model) ─────────────────────────────
+
+/// Values needed to insert a named navigation menu.
+#[derive(Debug, Clone)]
+pub struct NewMenu {
+    /// Machine name (slug-shaped, immutable after creation): the
+    /// `menus` template global is keyed by it — `menus.main`.
+    pub name: String,
+    /// Human title for the admin listing.
+    pub title: String,
+}
+
+/// A persisted menu row (see `migrations/0004_*`).
+#[derive(Debug, Clone)]
+pub struct MenuRecord {
+    pub id: i64,
+    pub name: String,
+    pub title: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+impl<'r> FromRow<'r, SqliteRow> for MenuRecord {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, SqlxError> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            name: row.try_get("name")?,
+            title: row.try_get("title")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+}
+
+/// Values needed to insert (or replace) a menu item: a link to a page
+/// or a custom URL — exactly one of the two.
+#[derive(Debug, Clone)]
+pub struct NewMenuItem {
+    pub menu_id: i64,
+    /// Sibling ordering, lower first.
+    pub position: i64,
+    /// Label override; `None` falls back to the linked page's title
+    /// (custom-URL items must carry a label — validated by the forms).
+    pub label: Option<String>,
+    /// The linked page (draft pages are skipped in the public `menus`
+    /// global until published).
+    pub page_id: Option<i64>,
+    /// A custom or external URL: `/aviso-legal`, `https://…`.
+    pub url: Option<String>,
+}
+
+/// A persisted menu item row.
+#[derive(Debug, Clone)]
+pub struct MenuItemRecord {
+    pub id: i64,
+    pub menu_id: i64,
+    pub position: i64,
+    pub label: Option<String>,
+    pub page_id: Option<i64>,
+    pub url: Option<String>,
+}
+
+impl<'r> FromRow<'r, SqliteRow> for MenuItemRecord {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, SqlxError> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            menu_id: row.try_get("menu_id")?,
+            position: row.try_get("position")?,
+            label: row.try_get("label")?,
+            page_id: row.try_get("page_id")?,
+            url: row.try_get("url")?,
+        })
+    }
+}
+
+/// The page projection joined into menu item listings (the admin
+/// detail view needs slug/title/published state without the content).
+#[derive(Debug, Clone)]
+pub struct MenuPageProjection {
+    pub id: i64,
+    pub slug: String,
+    pub title: String,
+    pub is_published: bool,
+}
+
+/// A menu item with the page half-resolved: the item row plus the
+/// linked page's slug/title when it exists (drafts included — this is
+/// the admin view; the public `menus` global filters them).
+#[derive(Debug, Clone)]
+pub struct MenuItemWithPage {
+    pub item: MenuItemRecord,
+    pub page: Option<MenuPageProjection>,
+}
+
+/// A menu item fully resolved for rendering — what the `menus`
+/// template global consumes.
+#[derive(Debug, Clone)]
+pub struct ResolvedMenuItem {
+    /// Sibling ordering (kept so templates can restyle ordered lists).
+    pub position: i64,
+    pub label: String,
+    /// `/p/<slug>` for page links, the custom URL as stored otherwise.
+    pub url: String,
+}
+
+/// Storage abstraction for the named navigation menus.
+///
+/// Same shape as [`PageRepository`]: handlers and the template globals
+/// depend on the trait, not on SQLite.
+#[async_trait]
+pub trait MenuRepository: Send + Sync + 'static {
+    /// Inserts a menu. Fails with [`RepositoryError::Duplicate`] when
+    /// the name is already taken.
+    async fn create(&self, menu: &NewMenu) -> Result<MenuRecord, RepositoryError>;
+
+    /// Looks up a menu by id.
+    async fn find_by_id(&self, id: i64) -> Result<Option<MenuRecord>, RepositoryError>;
+
+    /// Every menu ordered by name (the admin listing).
+    async fn list(&self) -> Result<Vec<MenuRecord>, RepositoryError>;
+
+    /// Counts menus.
+    async fn count(&self) -> Result<i64, RepositoryError>;
+
+    /// Counts the items of one menu (the admin listing badge).
+    async fn count_items(&self, menu_id: i64) -> Result<i64, RepositoryError>;
+
+    /// Renames a menu's **title**; the name is the template key and
+    /// stays immutable. Returns `None` when the menu does not exist.
+    async fn update_title(
+        &self,
+        id: i64,
+        title: &str,
+    ) -> Result<Option<MenuRecord>, RepositoryError>;
+
+    /// Deletes the menu and (by the schema) its items.
+    async fn delete(&self, id: i64) -> Result<bool, RepositoryError>;
+
+    /// The items of one menu with their page projection, ordered by
+    /// `position` then id — the admin detail view (drafts included).
+    async fn items_with_pages(
+        &self,
+        menu_id: i64,
+    ) -> Result<Vec<MenuItemWithPage>, RepositoryError>;
+
+    /// Looks up one item by id.
+    async fn find_item(&self, item_id: i64) -> Result<Option<MenuItemRecord>, RepositoryError>;
+
+    /// Adds an item to its menu. The caller validates the
+    /// page-xor-url shape first; the schema `CHECK` is the backstop.
+    async fn add_item(&self, item: &NewMenuItem) -> Result<MenuItemRecord, RepositoryError>;
+
+    /// Replaces an item. Returns `None` when it does not exist.
+    async fn update_item(
+        &self,
+        item_id: i64,
+        item: &NewMenuItem,
+    ) -> Result<Option<MenuItemRecord>, RepositoryError>;
+
+    /// Deletes one item.
+    async fn delete_item(&self, item_id: i64) -> Result<bool, RepositoryError>;
+
+    /// Every menu with its items resolved to label + href — **published
+    /// pages only**: draft and deleted-page links are skipped, so the
+    /// public navigation never 404s by construction. Menus ordered by
+    /// name (the `menus` template global).
+    async fn resolved(&self) -> Result<Vec<(MenuRecord, Vec<ResolvedMenuItem>)>, RepositoryError>;
+}
+
+/// SQLite-backed [`MenuRepository`] over a shared pool.
+#[derive(Clone)]
+pub struct SqliteMenuRepository {
+    pool: SqlitePool,
+}
+
+impl SqliteMenuRepository {
+    /// Wraps an already-migrated pool into a repository.
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl MenuRepository for SqliteMenuRepository {
+    async fn create(&self, menu: &NewMenu) -> Result<MenuRecord, RepositoryError> {
+        let now = unix_now();
+        let result = sqlx::query(
+            "INSERT INTO menus (name, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(&menu.name)
+        .bind(&menu.title)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await;
+
+        match result {
+            Ok(done) => Ok(MenuRecord {
+                id: done.last_insert_rowid(),
+                name: menu.name.clone(),
+                title: menu.title.clone(),
+                created_at: now,
+                updated_at: now,
+            }),
+            Err(error) => Err(RepositoryError::from_sqlx(error)),
+        }
+    }
+
+    async fn find_by_id(&self, id: i64) -> Result<Option<MenuRecord>, RepositoryError> {
+        sqlx::query_as("SELECT id, name, title, created_at, updated_at FROM menus WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn list(&self) -> Result<Vec<MenuRecord>, RepositoryError> {
+        sqlx::query_as("SELECT id, name, title, created_at, updated_at FROM menus ORDER BY name")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn count(&self) -> Result<i64, RepositoryError> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM menus")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn count_items(&self, menu_id: i64) -> Result<i64, RepositoryError> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM menu_items WHERE menu_id = ?1")
+            .bind(menu_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn update_title(
+        &self,
+        id: i64,
+        title: &str,
+    ) -> Result<Option<MenuRecord>, RepositoryError> {
+        let result = sqlx::query("UPDATE menus SET title = ?2, updated_at = ?3 WHERE id = ?1")
+            .bind(id)
+            .bind(title)
+            .bind(unix_now())
+            .execute(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+
+        self.find_by_id(id).await
+    }
+
+    async fn delete(&self, id: i64) -> Result<bool, RepositoryError> {
+        let result = sqlx::query("DELETE FROM menus WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn items_with_pages(
+        &self,
+        menu_id: i64,
+    ) -> Result<Vec<MenuItemWithPage>, RepositoryError> {
+        sqlx::query(
+            "SELECT mi.id, mi.menu_id, mi.position, mi.label, mi.page_id, mi.url, \
+             p.id AS page_id2, p.slug AS page_slug, p.title AS page_title, \
+             p.is_published AS page_is_published \
+             FROM menu_items mi LEFT JOIN pages p ON p.id = mi.page_id \
+             WHERE mi.menu_id = ?1 ORDER BY mi.position, mi.id",
+        )
+        .bind(menu_id)
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| {
+                    let item = MenuItemRecord {
+                        id: row.try_get("id").expect("mi.id is always present"),
+                        menu_id: row.try_get("menu_id").expect("mi.menu_id is present"),
+                        position: row.try_get("position").expect("mi.position is present"),
+                        label: row.try_get("label").expect("mi.label column"),
+                        page_id: row.try_get("page_id").expect("mi.page_id column"),
+                        url: row.try_get("url").expect("mi.url column"),
+                    };
+                    let page = row
+                        .try_get::<Option<i64>, _>("page_id2")
+                        .expect("joined page id")
+                        .map(|_| MenuPageProjection {
+                            id: row.try_get("page_id2").expect("joined page id"),
+                            slug: row.try_get("page_slug").expect("joined slug"),
+                            title: row.try_get("page_title").expect("joined title"),
+                            is_published: row
+                                .try_get::<i64, _>("page_is_published")
+                                .expect("joined published flag")
+                                != 0,
+                        });
+                    MenuItemWithPage { item, page }
+                })
+                .collect()
+        })
+        .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn find_item(&self, item_id: i64) -> Result<Option<MenuItemRecord>, RepositoryError> {
+        sqlx::query_as(
+            "SELECT id, menu_id, position, label, page_id, url FROM menu_items WHERE id = ?1",
+        )
+        .bind(item_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn add_item(&self, item: &NewMenuItem) -> Result<MenuItemRecord, RepositoryError> {
+        let result = sqlx::query(
+            "INSERT INTO menu_items (menu_id, position, label, page_id, url) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(item.menu_id)
+        .bind(item.position)
+        .bind(&item.label)
+        .bind(item.page_id)
+        .bind(&item.url)
+        .execute(&self.pool)
+        .await;
+
+        match result {
+            Ok(done) => Ok(MenuItemRecord {
+                id: done.last_insert_rowid(),
+                menu_id: item.menu_id,
+                position: item.position,
+                label: item.label.clone(),
+                page_id: item.page_id,
+                url: item.url.clone(),
+            }),
+            Err(error) => Err(RepositoryError::from_sqlx(error)),
+        }
+    }
+
+    async fn update_item(
+        &self,
+        item_id: i64,
+        item: &NewMenuItem,
+    ) -> Result<Option<MenuItemRecord>, RepositoryError> {
+        let result = sqlx::query(
+            "UPDATE menu_items SET menu_id = ?2, position = ?3, label = ?4, page_id = ?5, \
+             url = ?6 WHERE id = ?1",
+        )
+        .bind(item_id)
+        .bind(item.menu_id)
+        .bind(item.position)
+        .bind(&item.label)
+        .bind(item.page_id)
+        .bind(&item.url)
+        .execute(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+
+        self.find_item(item_id).await
+    }
+
+    async fn delete_item(&self, item_id: i64) -> Result<bool, RepositoryError> {
+        let result = sqlx::query("DELETE FROM menu_items WHERE id = ?1")
+            .bind(item_id)
+            .execute(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn resolved(&self) -> Result<Vec<(MenuRecord, Vec<ResolvedMenuItem>)>, RepositoryError> {
+        // One joined pass: menus LEFT JOIN items LEFT JOIN pages. Items
+        // pointing at draft or missing pages are filtered in Rust so
+        // the public navigation never links a 404.
+        let rows = sqlx::query(
+            "SELECT m.id, m.name, m.title, m.created_at, m.updated_at, \
+             mi.id AS item_id, mi.position, mi.label, mi.page_id, mi.url, \
+             p.slug AS page_slug, p.title AS page_title, p.is_published AS page_is_published \
+             FROM menus m \
+             LEFT JOIN menu_items mi ON mi.menu_id = m.id \
+             LEFT JOIN pages p ON p.id = mi.page_id \
+             ORDER BY m.name, mi.position, mi.id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)?;
+
+        let mut ordered: Vec<(MenuRecord, Vec<ResolvedMenuItem>)> = Vec::new();
+        let mut by_name: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+
+        for row in rows {
+            let menu = MenuRecord {
+                id: row.try_get("id").expect("menus.id is always present"),
+                name: row.try_get("name").expect("menus.name is always present"),
+                title: row.try_get("title").expect("menus.title is always present"),
+                created_at: row.try_get("created_at").expect("menus.created_at"),
+                updated_at: row.try_get("updated_at").expect("menus.updated_at"),
+            };
+            let index = *by_name.entry(menu.name.clone()).or_insert_with(|| {
+                ordered.push((menu, Vec::new()));
+                ordered.len() - 1
+            });
+
+            // A menu with no items: the LEFT JOIN produced one row with
+            // item_id NULL — nothing to append.
+            if row
+                .try_get::<Option<i64>, _>("item_id")
+                .expect("item id")
+                .is_none()
+            {
+                continue;
+            }
+
+            let page_id: Option<i64> = row.try_get("page_id").expect("mi.page_id column");
+            let url: Option<String> = row.try_get("url").expect("mi.url column");
+            let page_slug: Option<String> = row.try_get("page_slug").expect("joined slug");
+            let page_published: Option<i64> = row
+                .try_get("page_is_published")
+                .expect("joined published flag");
+
+            let resolved = match (page_id, page_slug, page_published) {
+                // Page link, published: resolve to /p/<slug>.
+                (Some(_), Some(slug), Some(1)) => {
+                    let title: String = row.try_get("page_title").expect("joined title");
+                    ResolvedMenuItem {
+                        position: row.try_get("position").expect("mi.position"),
+                        label: row
+                            .try_get::<Option<String>, _>("label")
+                            .expect("mi.label column")
+                            .unwrap_or(title),
+                        url: format!("/p/{slug}"),
+                    }
+                }
+                // Draft or deleted page: skip the item publicly.
+                (Some(_), _, _) => continue,
+                // Custom URL: label is mandatory (form-validated).
+                (None, _, _) => ResolvedMenuItem {
+                    position: row.try_get("position").expect("mi.position"),
+                    label: row
+                        .try_get::<Option<String>, _>("label")
+                        .expect("mi.label column")
+                        .unwrap_or_default(),
+                    url: url.unwrap_or_default(),
+                },
+            };
+
+            ordered[index].1.push(resolved);
+        }
+
+        Ok(ordered)
     }
 }
 
