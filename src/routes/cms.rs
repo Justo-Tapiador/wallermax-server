@@ -78,7 +78,8 @@ use serde_json::{json, Map, Value};
 
 use crate::auth::{hash_password, validate_password, validate_username, verify_password};
 use crate::db::{
-    NewMenu, NewMenuItem, NewPage, PageSummary, PageUpdate, RepositoryError, User, UserRole,
+    BodyFormat, NewMenu, NewMenuItem, NewPage, PageSummary, PageUpdate, RepositoryError, User,
+    UserRole,
 };
 use crate::error::AppError;
 use crate::extractors::AuthUser;
@@ -424,39 +425,57 @@ pub(crate) async fn render_public_page(
         );
     }
 
-    // Render the page body (template source) with the same globals.
-    let body_html = {
-        let Some(templates) = state.templates() else {
-            return PublicPageOutcome::Served(
-                AppError::internal("templates are not initialized").into_response(),
-            );
-        };
-        let engine = templates.engine();
-        let content = page.content.clone();
-        let globals = data.clone();
-        match tokio::task::spawn_blocking(move || engine.render_string(&content, &globals)).await {
-            Ok(Ok(output)) => {
-                // A res.redirect() inside a stored page body redirects the
-                // whole page, exactly like it does inside a view.
-                if let Some(redirect) = &output.redirect {
-                    return PublicPageOutcome::Served(redirect_response(
-                        redirect,
-                        parts.request_id.as_deref(),
-                    ));
+    // Render the page body with the mode the page states: `.jhs`
+    // template source through the engine (the standard globals ride
+    // along), Markdown through the safe renderer (F8).
+    let body_html = match page.body_format {
+        BodyFormat::Markdown => {
+            let content = page.content.clone();
+            match tokio::task::spawn_blocking(move || crate::markdown::render(&content)).await {
+                Ok(html) => html,
+                Err(join_error) => {
+                    tracing::error!(%join_error, "page rendering task failed");
+                    return PublicPageOutcome::Served(
+                        AppError::internal("page rendering task failed".to_owned()).into_response(),
+                    );
                 }
-                output.html
             }
-            Ok(Err(error)) => {
-                // Template-author diagnostics, like every other render.
+        }
+        BodyFormat::Jhs => {
+            let Some(templates) = state.templates() else {
                 return PublicPageOutcome::Served(
-                    AppError::internal(error.to_string()).into_response(),
+                    AppError::internal("templates are not initialized").into_response(),
                 );
-            }
-            Err(join_error) => {
-                tracing::error!(%join_error, "page rendering task failed");
-                return PublicPageOutcome::Served(
-                    AppError::internal("page rendering task failed".to_owned()).into_response(),
-                );
+            };
+            let engine = templates.engine();
+            let content = page.content.clone();
+            let globals = data.clone();
+            match tokio::task::spawn_blocking(move || engine.render_string(&content, &globals))
+                .await
+            {
+                Ok(Ok(output)) => {
+                    // A res.redirect() inside a stored page body redirects the
+                    // whole page, exactly like it does inside a view.
+                    if let Some(redirect) = &output.redirect {
+                        return PublicPageOutcome::Served(redirect_response(
+                            redirect,
+                            parts.request_id.as_deref(),
+                        ));
+                    }
+                    output.html
+                }
+                Ok(Err(error)) => {
+                    // Template-author diagnostics, like every other render.
+                    return PublicPageOutcome::Served(
+                        AppError::internal(error.to_string()).into_response(),
+                    );
+                }
+                Err(join_error) => {
+                    tracing::error!(%join_error, "page rendering task failed");
+                    return PublicPageOutcome::Served(
+                        AppError::internal("page rendering task failed".to_owned()).into_response(),
+                    );
+                }
             }
         }
     };
@@ -619,6 +638,9 @@ struct PageForm {
     slug: String,
     title: String,
     content: String,
+    /// How the body is interpreted: `jhs` (the default — the field is
+    /// absent in pre-F8 clients) or `markdown` (F8).
+    body_format: Option<String>,
     /// HTML checkboxes post `on` when checked and nothing when not.
     is_published: Option<String>,
     /// Parent page id as posted by the select: empty string = top
@@ -627,6 +649,11 @@ struct PageForm {
     /// Sibling ordering as posted: empty or absent → 0, anything else
     /// must parse inside `0..=MAX_POSITION` (F7).
     position: Option<String>,
+    /// The page being edited, posted by the hidden input the
+    /// previsualización round-trip carries (F8): empty/absent = a new
+    /// page. It is **round-trip data, not a command** — the preview
+    /// never writes, and saves go to the routes that own the id.
+    page_id: Option<String>,
     /// SEO overrides (F7): empty fields clear the stored value.
     meta_title: Option<String>,
     meta_description: Option<String>,
@@ -639,6 +666,21 @@ impl PageForm {
             self.is_published.as_deref(),
             Some("on") | Some("true") | Some("1")
         )
+    }
+
+    /// The parsed body format, defaulting to `.jhs` (F8). The shape
+    /// itself is validated by [`validate_page_form`]; this accessor is
+    /// for re-rendering after validation accepted the field.
+    fn body_format(&self) -> BodyFormat {
+        self.body_format
+            .as_deref()
+            .and_then(BodyFormat::parse)
+            .unwrap_or(BodyFormat::Jhs)
+    }
+
+    /// The preview's round-trip page id (`None` = new page, F8).
+    fn page_id(&self) -> Option<i64> {
+        trimmed(&self.page_id).and_then(|raw| raw.parse().ok())
     }
 
     /// The parsed parent id (`None` = top level). Only meaningful
@@ -663,6 +705,7 @@ impl PageForm {
             "slug": self.slug,
             "title": self.title,
             "content": self.content,
+            "body_format": self.body_format().as_str(),
             "is_published": self.published(),
             "is_new": id.is_none(),
             "parent_id": self.parent(),
@@ -786,7 +829,12 @@ async fn new_page_form(
         &state,
         &parts,
         "admin/page_form.jhs",
-        vec![("form", form), ("form_error", error)],
+        // `preview_html` rides along as null: the view always reads it.
+        vec![
+            ("form", form),
+            ("form_error", error),
+            ("preview_html", Value::Null),
+        ],
         StatusCode::OK,
     )
     .await
@@ -840,6 +888,7 @@ async fn create_page(
         slug: form.slug.clone(),
         title: form.title.clone(),
         content: form.content.clone(),
+        body_format: form.body_format(),
         is_published: form.published(),
         created_by: Some(editor.user.user_id),
         parent_id: parent,
@@ -895,9 +944,11 @@ async fn edit_page_form(
         slug: page.slug,
         title: page.title,
         content: page.content,
+        body_format: Some(page.body_format.as_str().to_owned()),
         is_published: page.is_published.then(|| "on".to_owned()),
         parent_id: page.parent_id.map(|parent| parent.to_string()),
         position: Some(page.position.to_string()),
+        page_id: Some(id.to_string()),
         meta_title: page.meta_title,
         meta_description: page.meta_description,
         og_image: page.og_image,
@@ -909,7 +960,12 @@ async fn edit_page_form(
         &state,
         &parts,
         "admin/page_form.jhs",
-        vec![("form", form), ("form_error", error)],
+        // `preview_html` rides along as null: the view always reads it.
+        vec![
+            ("form", form),
+            ("form_error", error),
+            ("preview_html", Value::Null),
+        ],
         StatusCode::OK,
     )
     .await
@@ -989,6 +1045,7 @@ async fn update_page(
         slug: Some(form.slug.clone()),
         title: form.title.clone(),
         content: form.content.clone(),
+        body_format: form.body_format(),
         is_published: form.published(),
         parent_id: parent,
         position: form.position(),
@@ -1022,6 +1079,104 @@ async fn update_page(
             .await
         }
     }
+}
+
+/// `POST /admin/pages/preview`: the server-side previsualización (F8).
+///
+/// The form's second submit button (`formaction`, pure HTML — no
+/// JavaScript, CSP untouched) posts the same fields here, the server
+/// renders the body with the mode it states **without writing
+/// anything**, and the response re-renders the same form — values
+/// kept, so the editor keeps writing — with the rendered body above
+/// it. A `.jhs` preview runs through the engine with the live globals,
+/// exactly the render the public page would get, so template errors
+/// bounce back as `form_error` instead of a published 500.
+///
+/// `page_id` is round-trip data only: the re-rendered form's save
+/// action (new page vs. edit) — the preview itself never persists.
+async fn preview_page(
+    State(state): State<AppState>,
+    _editor: CmsEditor,
+    request: Request,
+) -> Response {
+    let parts = PageParts::of(&request);
+    let max_body = state.config().server.max_body_size_bytes;
+    let Ok(cms) = cms_context(&state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+
+    let form = match read_form::<PageForm>(request, max_body).await {
+        Ok(form) => form,
+        Err(message) => {
+            return render_form_with_error(&state, &parts, None, PageForm::default(), &message)
+                .await;
+        }
+    };
+
+    if let Err(error) = validate_page_form(&form) {
+        return render_form_with_error(&state, &parts, form.page_id(), form, error).await;
+    }
+
+    let preview_html = match form.body_format() {
+        BodyFormat::Markdown => {
+            let content = form.content.clone();
+            match tokio::task::spawn_blocking(move || crate::markdown::render(&content)).await {
+                Ok(rendered) => Value::String(rendered),
+                Err(join_error) => {
+                    tracing::error!(%join_error, "preview rendering task failed");
+                    return AppError::internal("preview rendering failed".to_owned())
+                        .into_response();
+                }
+            }
+        }
+        BodyFormat::Jhs => {
+            let Some(templates) = state.templates() else {
+                return AppError::internal("templates are not initialized").into_response();
+            };
+            let engine = templates.engine();
+            let content = form.content.clone();
+            let globals = base_data(&state, &parts.headers, &parts.uri, &parts.method).await;
+            match tokio::task::spawn_blocking(move || engine.render_string(&content, &globals))
+                .await
+            {
+                Ok(Ok(output)) => Value::String(output.html),
+                Ok(Err(error)) => {
+                    // The editor sees template diagnostics inline —
+                    // that is the whole point of previewing.
+                    return render_form_with_error(
+                        &state,
+                        &parts,
+                        form.page_id(),
+                        form,
+                        &error.to_string(),
+                    )
+                    .await;
+                }
+                Err(join_error) => {
+                    tracing::error!(%join_error, "preview rendering task failed");
+                    return AppError::internal("preview rendering failed".to_owned())
+                        .into_response();
+                }
+            }
+        }
+    };
+
+    // Same form, same parent options, preview above.
+    let id = form.page_id();
+    let parents = parent_options(cms, id).await;
+    let (form_json, form_error) = form.form_data(id, &parents, None);
+    render_view(
+        &state,
+        &parts,
+        "admin/page_form.jhs",
+        vec![
+            ("form", form_json),
+            ("form_error", form_error),
+            ("preview_html", preview_html),
+        ],
+        StatusCode::OK,
+    )
+    .await
 }
 
 /// `POST /admin/pages/{id}/delete`: removes a page (idempotent).
@@ -1069,6 +1224,12 @@ fn validate_page_form(form: &PageForm) -> Result<(), &'static str> {
     validate_slug(&form.slug)?;
     if form.content.len() > MAX_PAGE_CONTENT {
         return Err("El contenido es demasiado largo (máximo 600 000 caracteres).");
+    }
+
+    // F8: the body format must be one of the two modes the form
+    // offers; a malformed (hand-crafted) POST bounces back.
+    if trimmed(&form.body_format).is_some_and(|raw| BodyFormat::parse(&raw).is_none()) {
+        return Err("El formato del contenido debe ser jhs o markdown.");
     }
 
     // F7 additions: hierarchy and SEO shapes.
@@ -1137,7 +1298,12 @@ async fn render_form_with_error(
         state,
         parts,
         "admin/page_form.jhs",
-        vec![("form", form), ("form_error", error)],
+        // `preview_html` rides along as null: the view always reads it.
+        vec![
+            ("form", form),
+            ("form_error", error),
+            ("preview_html", Value::Null),
+        ],
         StatusCode::OK,
     )
     .await
@@ -1286,6 +1452,8 @@ async fn import_page(
         slug: slug.clone(),
         title,
         content,
+        // Imported .html/.jhs files are template-shaped by definition.
+        body_format: BodyFormat::Jhs,
         is_published: false,
         created_by: Some(editor.user.user_id),
         // Imported files land as plain top-level drafts: the editor
@@ -2758,6 +2926,9 @@ pub fn routes() -> Router<AppState> {
         .route("/admin/pages", get(list_pages).post(create_page))
         .route("/admin/pages/new", get(new_page_form))
         .route("/admin/pages/import", get(import_form).post(import_page))
+        // Static segment first: axum's matcher prefers it over `{id}`,
+        // so the preview never shadows an edit URL.
+        .route("/admin/pages/preview", post(preview_page))
         .route("/admin/pages/{id}/edit", get(edit_page_form))
         .route("/admin/pages/{id}", post(update_page))
         .route("/admin/pages/{id}/delete", post(delete_page))

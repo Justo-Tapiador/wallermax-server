@@ -598,6 +598,43 @@ impl UserRepository for SqliteUserRepository {
 
 // ─── CMS pages (v0.8.0) ───────────────────────────────────────────────
 
+/// How a page body is interpreted (F8, `pages.body_format`).
+///
+/// `Jhs` is the pre-F8 default: the body is template source rendered
+/// by the engine with the standard globals. `Markdown` renders through
+/// the safe subset in [`crate::markdown`] — no raw HTML, filtered URL
+/// schemes — the plain-writing mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyFormat {
+    Jhs,
+    Markdown,
+}
+
+impl BodyFormat {
+    /// The two values the admin form and the database agree on.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "jhs" => Some(Self::Jhs),
+            "markdown" => Some(Self::Markdown),
+            _ => None,
+        }
+    }
+
+    /// The stored spelling (also the `<option value>` in the form).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Jhs => "jhs",
+            Self::Markdown => "markdown",
+        }
+    }
+}
+
+impl std::fmt::Display for BodyFormat {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Values needed to insert a CMS page.
 #[derive(Debug, Clone)]
 pub struct NewPage {
@@ -607,6 +644,8 @@ pub struct NewPage {
     pub title: String,
     /// `.jhs` template source rendered on the fly.
     pub content: String,
+    /// How `content` is interpreted (F8).
+    pub body_format: BodyFormat,
     /// Whether the page is publicly visible (drafts are editors-only).
     pub is_published: bool,
     /// Author id (soft audit link; `NULL` keeps the page after deletion).
@@ -633,6 +672,9 @@ pub struct PageUpdate {
     pub slug: Option<String>,
     pub title: String,
     pub content: String,
+    /// The new body interpretation — the form always states it, like
+    /// `title` (F8).
+    pub body_format: BodyFormat,
     pub is_published: bool,
     /// The new parent. **Unlike `slug`, `None` means "top level"**, not
     /// "keep the current one": the admin form always carries the field
@@ -656,6 +698,8 @@ pub struct PageRecord {
     pub slug: String,
     pub title: String,
     pub content: String,
+    /// How `content` is interpreted (F8).
+    pub body_format: BodyFormat,
     pub is_published: bool,
     pub created_by: Option<i64>,
     /// Creation time, unix seconds.
@@ -707,6 +751,13 @@ impl<'r> FromRow<'r, SqliteRow> for PageRecord {
             slug: row.try_get("slug")?,
             title: row.try_get("title")?,
             content: row.try_get("content")?,
+            // The CHECK constraint keeps the column honest; the Jhs
+            // fallback covers a pre-F8 database mid-migration.
+            body_format: row
+                .try_get::<String, _>("body_format")
+                .ok()
+                .and_then(|raw| BodyFormat::parse(&raw))
+                .unwrap_or(BodyFormat::Jhs),
             is_published: row.try_get::<i64, _>("is_published")? != 0,
             created_by: row.try_get("created_by")?,
             created_at: row.try_get("created_at")?,
@@ -801,7 +852,7 @@ pub trait PageRepository: Send + Sync + 'static {
 /// Column list shared by every `SELECT` on the `pages` table.
 const PAGE_COLUMNS: &str = "id, slug, title, content, is_published, created_by, \
                            created_at, updated_at, parent_id, position, meta_title, \
-                           meta_description, og_image";
+                           meta_description, og_image, body_format";
 
 /// Column list of the listing projection (no `content`).
 const PAGE_SUMMARY_COLUMNS: &str = "id, slug, title, is_published, updated_at, \
@@ -834,7 +885,8 @@ impl PageRepository for SqlitePageRepository {
         let result = sqlx::query(
             "INSERT INTO pages (slug, title, content, is_published, created_by, \
              created_at, updated_at, parent_id, position, meta_title, meta_description, \
-             og_image) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             og_image, body_format) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, \
+             ?11, ?12, ?13)",
         )
         .bind(&page.slug)
         .bind(&page.title)
@@ -848,6 +900,7 @@ impl PageRepository for SqlitePageRepository {
         .bind(&page.meta_title)
         .bind(&page.meta_description)
         .bind(&page.og_image)
+        .bind(page.body_format.as_str())
         .execute(&self.pool)
         .await;
 
@@ -857,6 +910,7 @@ impl PageRepository for SqlitePageRepository {
                 slug: page.slug.clone(),
                 title: page.title.clone(),
                 content: page.content.clone(),
+                body_format: page.body_format,
                 is_published: page.is_published,
                 created_by: page.created_by,
                 created_at,
@@ -925,7 +979,8 @@ impl PageRepository for SqlitePageRepository {
         let result = sqlx::query(
             "UPDATE pages SET slug = COALESCE(?2, slug), title = ?3, content = ?4, \
              is_published = ?5, updated_at = ?6, parent_id = ?7, position = ?8, \
-             meta_title = ?9, meta_description = ?10, og_image = ?11 WHERE id = ?1",
+             meta_title = ?9, meta_description = ?10, og_image = ?11, body_format = ?12 \
+             WHERE id = ?1",
         )
         .bind(id)
         .bind(update.slug.as_deref())
@@ -938,6 +993,7 @@ impl PageRepository for SqlitePageRepository {
         .bind(&update.meta_title)
         .bind(&update.meta_description)
         .bind(&update.og_image)
+        .bind(update.body_format.as_str())
         .execute(&self.pool)
         .await
         .map_err(RepositoryError::from_sqlx)?;

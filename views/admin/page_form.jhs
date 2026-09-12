@@ -29,7 +29,19 @@
     <p class="aviso aviso-error"><?= form_error ?></p>
 <?jhs } ?>
 
+<?jhs if (preview_html) { ?>
+    <section class="tarjeta" aria-labelledby="preview-titulo">
+      <h2 id="preview-titulo">Vista previa</h2>
+      <p class="ayuda">Así quedará el cuerpo con el formato elegido. Todavía no se ha
+         guardado nada: sigue editando abajo y pulsa «Guardar» cuando esté listo.</p>
+      <div class="pagina-cuerpo">
+<?jhs echo(raw(preview_html)) ?>
+      </div>
+    </section>
+<?jhs } ?>
+
     <form method="post" action="<?= form.is_new ? "/admin/pages" : "/admin/pages/" + form.id ?>">
+      <input type="hidden" name="page_id" value="<?= form.id == null ? "" : form.id ?>">
       <section class="tarjeta">
         <div class="campo">
           <label for="titulo">Título</label>
@@ -61,11 +73,28 @@
           <p class="ayuda">Menor número = antes. Con igual posición decide el orden de creación.</p>
         </div>
         <div class="campo">
-          <label for="contenido">Contenido — plantilla <code>.jhs</code></label>
+          <label for="formato">Formato del contenido</label>
+          <select id="formato" name="body_format">
+            <option value="jhs"<?= form.body_format == "markdown" ? "" : " selected" ?>>Plantilla .jhs — HTML con etiquetas &lt;?= ?&gt;</option>
+            <option value="markdown"<?= form.body_format == "markdown" ? " selected" : "" ?>>Markdown — texto llano</option>
+          </select>
+          <p class="ayuda">Markdown es el modo de escritura segura: se renderiza en el
+             servidor y el HTML crudo que escribas se descarta. La plantilla .jhs es el
+             modo potente (etiquetas, globales, include) para editores.</p>
+        </div>
+        <div class="campo">
+          <label for="contenido">Contenido — <?= form.body_format == "markdown" ? "Markdown" : "plantilla .jhs" ?></label>
           <textarea id="contenido" name="content" spellcheck="false"
-                    placeholder="&lt;h2&gt;Hola&lt;/h2&gt;&#10;&lt;p&gt;HTML con etiquetas &lt;?= user ?&gt; disponibles…&lt;/p&gt;"><?=
+                    placeholder="<?= form.body_format == "markdown" ? "# Título&#10;&#10;Párrafo con **negrita** y [un enlace](https://ejemplo.com)…" : "&lt;h2&gt;Hola&lt;/h2&gt;&#10;&lt;p&gt;HTML con etiquetas &lt;?= user ?&gt; disponibles…&lt;/p&gt;" ?>"><?=
             form.content
           ?></textarea>
+<?jhs if (form.body_format == "markdown") { ?>
+          <p class="ayuda">Encabezados #, listas, citas, bloques de código, tablas y
+             enlaces. El HTML crudo se descarta y los enlaces a esquemas extraños
+             (javascript:, data:) se degradan: la página nunca puede convertirse en
+             portadora de scripts. Pulsa «Previsualizar» abajo para ver el render
+             exacto antes de guardar.</p>
+<?jhs } else { ?>
           <p class="ayuda">Es HTML con etiquetas <code>&lt;?= expresión ?&gt;</code> y
              <code>&lt;?jhs código ?&gt;</code> (el mismo motor de las vistas). Los
              globales <code>user</code>, <code>path</code>, <code>query</code> y
@@ -73,6 +102,7 @@
              <code>&lt;?jhs include("partials/header") ?&gt;</code> para reutilizar la
              cabecera del sitio. El <em>auto-escape</em> está activo: usa
              <code>raw()</code> solo para HTML de confianza.</p>
+<?jhs } ?>
         </div>
         <div class="campo campo-check">
           <input id="publicada" type="checkbox" name="is_published" value="on"<?= form.is_published ? " checked" : "" ?>>
@@ -104,6 +134,8 @@
         <button class="btn btn-primario" type="submit">
           <?= form.is_new ? "Crear página" : "Guardar cambios" ?>
         </button>
+        <button class="btn btn-fantasma" type="submit" formaction="/admin/pages/preview"
+                formmethod="post">Previsualizar</button>
       </section>
     </form>
   </div>

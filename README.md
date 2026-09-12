@@ -938,8 +938,8 @@ cycle-proof move guard, named navigation menus exposed to every
 template as the `menus` global, per-page SEO metadata and an automatic
 `/sitemap.xml` — is documented in depth in
 **[README-CMS.md](README-CMS.md)**, together with the roadmap of the
-CMS feature line (the Markdown editor, the media library, search,
-revisions). Still zero JavaScript.
+CMS feature line (the media library, search, revisions). Still zero
+JavaScript.
 
 ### Roles
 

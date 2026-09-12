@@ -34,6 +34,9 @@ boa_engine = "0.21.1"
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "cookies"] }
 url = "2"
+# CMS Markdown bodies (F8): the pull parser + HTML writer, raw HTML
+# disabled at the call site (safe subset for editor-authored content).
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 
 [dev-dependencies]
 rcgen = "0.14.7"
