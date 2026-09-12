@@ -630,7 +630,7 @@ Example responses:
 {"status":"ok","version":"0.14.0","template_backend":"sidecar"}
 
 // GET /api/stats
-{"service":"wallermax-server","version":"0.12.0","uptime_seconds":10.244,"total_requests":12,"requests_per_second":1.171,"rate_limited_requests":0,"registered_users":2}
+{"service":"wallermax-server","version":"0.14.0","uptime_seconds":10.244,"total_requests":12,"requests_per_second":1.171,"rate_limited_requests":0,"registered_users":2}
 
 // POST /api/echo  (Content-Type: text/plain, body "hello wallermax")
 {"received_bytes":15,"content_type":"text/plain","body":"hello wallermax"}
@@ -779,7 +779,7 @@ What the sidecar adds on top of the engine itself:
 
 ```console
 $ curl http://127.0.0.1:8080/health
-{"status":"ok","version":"0.12.0","template_backend":"sidecar"}
+{"status":"ok","version":"0.14.0","template_backend":"sidecar"}
 
 $ curl http://127.0.0.1:8080/metrics | grep template_backend
 wallermax_template_backend{backend="sidecar"} 1
