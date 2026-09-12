@@ -1,11 +1,17 @@
+<?jhs
+const title ="Plantilla .jhs";
+const greeting ="Hola desde una plantilla .jhs";
+const favicon ="/assets/favicon.png";
+?>
 <!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="utf-8">
-  <title>Plantilla .jhs</title>
+  <link rel="icon" type="image/png" href="<?= favicon ?>" />
+  <title><?jhs echo(title) ?></title>
 </head>
 <body>
-  <h1>Hola desde una plantilla .jhs</h1>
+  <h1><?jhs echo(greeting) ?></h1>
 <ul>
 <?jhs
   var items = ["uno", "dos", "tres"];
@@ -19,7 +25,9 @@
   <p>Con escape automático: <?= "<b>no en negrita</b>" ?></p>
   <p>Sin escape (contenido de confianza): <?= raw("<b>sí en negrita</b>") ?></p>
   <p>Año actual: <?= new Date().getFullYear() ?></p>
-<?jhs console.log("línea de depuración desde la plantilla"); ?>
+<script>
+   console.log("<?= 'línea de depuración desde la plantilla'?>");
+</script>
   <p>El global <code>user</code> (null para visitantes anónimos):</p>
 <pre>
 <?jhs echo(JSON.stringify(user, null, 4)) ?>

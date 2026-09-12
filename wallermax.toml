@@ -425,8 +425,7 @@ enabled = true
 # (the public gets the same 404 as /p/<slug>). The slug shape is
 # validated at startup exactly like the panel forms validate it.
 # Override with WALLERMAX_CMS__DEFAULT_PAGE.
-#
-default_page = "inicio"
+# default_page = "inicio"
 
 [metrics]
 # Prometheus exposition endpoint: scrapes return every collected metric

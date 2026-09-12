@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/png" href="/assets/favicon.png" />
+  <title>Wallermax Server></title>
+  <meta name="description" content="A modular, secure and high-performance web server written in Rust">
+    <link rel="stylesheet" href="/assets/init.css?v=1" />
+
+</head>
+
+<body>
+<header>
+  <div class="container nav">
+    <a class="brand" href="#home" data-click="Wallermax Server">
+      <img src="/assets/wallermax-logo.png" alt="wallermax Server logo">
+    </a>
+
+    <nav aria-label="Main navigation">
+      <a class="active" href="#home">Home</a>
+      <a href="#features">Features</a>
+      <a href="#changelog">Changelog</a>
+      <a href="#docs">Docs</a>
+      <a href="#github">GitHub</a>
+      <button class="theme" type="button" data-click="Dark mode">◐</button>
+    </nav>
+  </div>
+</header>
+
+<main id="home">
+  <div class="container">
+    <section class="hero">
+      <div>
+        <h1>Wallermax <span>Server</span></h1>
+        <p class="lead">A modular, secure and high-performance web server written in Rust.</p>
+        <div class="actions">
+          <button class="btn primary" data-click="View on GitHub">◉ &nbsp; View on GitHub</button>
+          <button class="btn secondary" data-click="Read the Docs">Read the Docs</button>
+        </div>
+      </div>
+      <img class="hero-art" src="/assets/wallermax-hero-art.png" alt="wallermax wolf logo and server artwork">
+    </section>
+
+    <div class="status">
+      <div class="terminal">&gt;_</div>
+      <div><strong>Status: v0.12.0</strong> — the roadmap phases done, a dynamic template engine with require() running on the original node-jhs2 engine, browser sessions, and a small built-in CMS that owns the homepage, and a server-side proxy for external APIs.</div>
+    </div>
+
+    <section id="features" class="features">
+      <article class="feature">
+        <div class="icon">♢</div><h3>Secure</h3>
+        <p>Built with modern security practices, including HTTPS (rustls), refresh tokens with family revocation, and trusted proxy X-Forwarded-For parsing.</p>
+      </article>
+      <article class="feature">
+        <div class="icon">ϟ</div><h3>High Performance</h3>
+        <p>A modular architecture with a multi-stage Docker image, compose example and GitHub Actions CI pipeline.</p>
+      </article>
+      <article class="feature">
+        <div class="icon">◇</div><h3>Flexible &amp; Modular</h3>
+        <p>Template engine (jhs), dynamic require(), CommonJS modules, a server-side proxy for external APIs and more.</p>
+      </article>
+      <article class="feature">
+        <div class="icon">⚙</div><h3>Built-in CMS</h3>
+        <p>Database-backed pages at /p/&lt;slug&gt;, login/registration modals, and a JavaScript-free admin panel for content and accounts.</p>
+      </article>
+      <article class="feature">
+        <div class="icon">♙</div><h3>Sessions &amp; Identity</h3>
+        <p>Browser sessions with wallermax_session cookie, user global in every render, and a no-JavaScript /login page.</p>
+      </article>
+      <article class="feature">
+        <div class="icon">⌁</div><h3>Monitoring &amp; Observability</h3>
+        <p>Prometheus /metrics endpoint, GET /health and the wallermax_template_backend metric.</p>
+      </article>
+    </section>
+
+    <section id="changelog" class="history">
+      <div class="history-head">
+        <div>
+          <h2>◷ &nbsp; Version History</h2>
+          <p>A journey of continuous improvements.</p>
+        </div>
+        <div class="latest">Latest <b>v0.12.0</b></div>
+      </div>
+
+      <div class="timeline">
+        <div class="column">
+          <div class="entry"><b>v0.5.0</b><p>The sandboxed .jhs template engine.</p></div>
+          <div class="entry"><b>v0.7.0</b><p>Keeps browsers logged in with the wallermax_session cookie and the no-JavaScript /login page.</p></div>
+          <div class="entry"><b>v0.9.0</b><p>require() back to the templates — a native module bridge with a configurable forbidden-modules banner, the crypto polyfill, CommonJS modules under modules/, plus res.redirect() and the req global.</p></div>
+          <div class="entry"><b>v0.10.1</b><p>Exposes the live backend through GET /health and the wallermax_template_backend metric.</p></div>
+          <div class="entry"><b>v0.12.0</b><p>Adds the server-side external API proxy.</p></div>
+        </div>
+
+        <div class="column">
+          <div class="entry"><b>v0.6.0</b><p>Injects the authenticated identity into every render as the user global.</p></div>
+          <div class="entry"><b>v0.8.0</b><p>Adds the CMS: database-backed pages at /p/&lt;slug&gt;, login/registration modals, a JavaScript-free admin panel for content and accounts.</p></div>
+          <div class="entry"><b>v0.10.0</b><p>Moves every render onto a supervised Node sidecar running the original node-jhs2 engine ([templates] backend = auto | boa | sidecar).</p></div>
+          <div class="entry"><b>v0.11.0</b><p>Gives the CMS the homepage: [cms] default_page renders a database-backed page at GET / — ahead of the static index file, with /p/&lt;slug&gt; draft gating and a graceful fallback.</p></div>
+        </div>
+      </div>
+    </section>
+
+  
+  </div>
+</main>
+
+<footer id="github">
+  <div class="container">
+    <div class="footer-top">
+      <div class="footer-brand">wallermax <span>Server</span></div>
+      <div class="footer-nav">
+        <a href="#home">Home</a><a href="#features">Features</a><a href="#changelog">Changelog</a>
+        <a href="#docs">Docs</a><a href="#github">GitHub</a>
+      </div>
+      <div>◉ &nbsp; ◌ &nbsp; 𝕏</div>
+    </div>
+    <div class="copyright">
+      <span>© 2026 Wallermax Server. MIT License.</span>
+      <span>Written in Rust ⚙</span>
+    </div>
+  </div>
+</footer>
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('a, button').forEach(el => {
+      el.addEventListener('click', event => {
+        const label = el.dataset.click || el.textContent.trim().replace(/\s+/g, ' ');
+        if (label==='GitHub' || label==='View on GitHub') {
+           window.open(`https://github.com/Justo-Tapiador/wallermax-server`, '_blank');
+        } else if(label==='Docs'  || label==='Read the Docs') {
+           window.open(`https://github.com/Justo-Tapiador/wallermax-server/blob/main/README.md`, '_blank');
+        }
+        
+      });
+      if (el.tagName === 'A' && el.closest('nav')) {
+        el.addEventListener('click', function(event) {
+          document.querySelectorAll('nav a.active').forEach(activeLink => {
+            activeLink.classList.remove('active');
+          });
+          this.classList.add('active');
+        });
+      }
+    });
+
+    let hashActual = window.location.hash;
+    if (hashActual) {
+      let enlaceActivo = document.querySelector('nav a[href="' + hashActual + '"]');
+      if (enlaceActivo) {
+        document.querySelectorAll('nav a.active').forEach(activeLink => activeLink.classList.remove('active'));
+        enlaceActivo.classList.add('active');
+      }
+    }
+  });
+</script>
+</body>
+</html>
