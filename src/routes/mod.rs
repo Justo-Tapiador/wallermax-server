@@ -18,6 +18,7 @@ pub mod echo;
 pub mod external_api;
 pub mod health;
 pub mod index;
+pub mod media;
 pub mod metrics;
 pub mod static_files;
 pub mod stats;
@@ -43,7 +44,10 @@ use crate::state::AppState;
 ///
 /// `cms_enabled` mounts the CMS family (`/p/{slug}`, `/admin/*` and
 /// `/perfil/password`), which additionally requires the template
-/// rendering services in the application state.
+/// rendering services in the application state. The media library
+/// routes (`/admin/media` and the public `/media/{id}/{name}`
+/// family, F9) ride the exact same mount: they live in the same
+/// [`CmsContext`].
 ///
 /// `external_api_enabled` mounts the external API proxy
 /// (`GET/POST /api/ext/{name}` and `GET/POST /api/ext/{name}/{subpath}`),
@@ -75,7 +79,7 @@ pub fn routes(
     }
 
     if cms_enabled {
-        router = router.merge(cms::routes());
+        router = router.merge(cms::routes()).merge(media::routes());
     }
 
     if external_api_enabled {

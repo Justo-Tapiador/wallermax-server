@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><?= item.original_name ?> — medios — CMS wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+    <div class="panel-barra">
+      <h1><?= item.original_name ?></h1>
+      <a class="btn btn-fantasma" href="/admin/media">Biblioteca</a>
+      <a class="btn btn-fantasma" href="/admin">Panel</a>
+    </div>
+
+<?jhs if (query.ok == "alt") { ?>
+    <p class="aviso aviso-ok">Texto alternativo actualizado (los fragmentos de abajo ya
+       usan el nuevo).</p>
+<?jhs } ?>
+<?jhs if (form_error) { ?>
+    <p class="aviso aviso-error"><?= form_error ?></p>
+<?jhs } ?>
+
+    <section class="tarjeta" aria-labelledby="imagen-titulo">
+      <h2 id="imagen-titulo">La imagen</h2>
+      <img class="detalle-imagen" src="<?= item.url ?>" alt="<?= item.alt_text ?>"
+           width="<?= item.width ?>" height="<?= item.height ?>">
+      <ul class="lista">
+        <li>
+          <div class="principal">
+            <strong>Tipo y tamaño</strong>
+            <div class="secundario"><?= item.mime_type ?> · <?= item.size_h ?>
+              (<?= item.width ?> × <?= item.height ?> píxeles) · subido <?= item.created_at_h ?></div>
+          </div>
+        </li>
+        <li>
+          <div class="principal">
+            <strong>URL definitiva</strong>
+            <div class="secundario"><code><?= item.url ?></code></div>
+          </div>
+        </li>
+        <li>
+          <div class="principal">
+            <strong>Nombre en disco</strong>
+            <div class="secundario"><code><?= item.stored_name ?></code> (generado por el
+              servidor: plano, único, sin nada tuyo en la ruta)</div>
+          </div>
+        </li>
+      </ul>
+    </section>
+
+    <section class="tarjeta" aria-labelledby="pegar-titulo">
+      <h2 id="pegar-titulo">Listo para pegar</h2>
+      <p class="ayuda">En una página Markdown, el fragmento ya trae el texto alternativo.
+         En una plantilla <code>.jhs</code> pega el HTML tal cual.</p>
+      <div class="campo">
+        <label for="snippet-markdown">Markdown</label>
+        <textarea id="snippet-markdown" readonly rows="2" spellcheck="false"><?= markdown_snippet ?></textarea>
+      </div>
+      <div class="campo">
+        <label for="snippet-html">HTML</label>
+        <textarea id="snippet-html" readonly rows="2" spellcheck="false"><?= html_snippet ?></textarea>
+      </div>
+    </section>
+
+    <section class="tarjeta" aria-labelledby="alt-titulo">
+      <h2 id="alt-titulo">Texto alternativo</h2>
+      <form method="post" action="/admin/media/<?= item.id ?>/alt">
+        <div class="campo">
+          <label for="alt">Descripción de la imagen</label>
+          <input id="alt" type="text" name="alt" maxlength="500" value="<?= item.alt_text ?>"
+                 placeholder="Logo de la empresa sobre fondo blanco">
+          <p class="ayuda">Lo leen los lectores de pantalla y los buscadores; también
+             alimenta los fragmentos de arriba.</p>
+        </div>
+        <button class="btn btn-primario" type="submit">Guardar texto</button>
+      </form>
+    </section>
+
+    <section class="tarjeta" aria-labelledby="borrar-titulo">
+      <h2 id="borrar-titulo">Borrar</h2>
+      <p class="ayuda">Borra el archivo y su fila; la URL pública pasa a responder 404.
+         Las páginas que aún la enlacen quedarán con un hueco — revísalas antes.</p>
+      <form method="post" action="/admin/media/<?= item.id ?>/delete">
+        <button class="btn btn-peligro" type="submit">Borrar este archivo</button>
+      </form>
+    </section>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

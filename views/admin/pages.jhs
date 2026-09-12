@@ -14,6 +14,7 @@
       <h1>Páginas</h1>
       <a class="btn btn-fantasma" href="/admin">Panel</a>
       <a class="btn btn-fantasma" href="/admin/pages/import">Importar</a>
+      <a class="btn btn-fantasma" href="/admin/media">Medios</a>
       <a class="btn btn-primario" href="/admin/pages/new">Nueva página</a>
     </div>
 

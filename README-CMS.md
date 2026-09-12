@@ -1,13 +1,14 @@
-# The wallermax CMS — the corporate content model (F7) & the editor (F8)
+# The wallermax CMS — the corporate content model (F7), the editor (F8) & the media library (F9)
 
 This is the companion deep-dive for the CMS feature line: the main
 [README.md](README.md) keeps the essentials and links here, so the
 front door of the repository stays short while the content features
 get the room they deserve.
 
-**F7** adds four corporate-site capabilities and **F8** the editor —
-all of them **zero-JavaScript** (the CSP keeps blocking scripts and
-every new screen works through plain HTML forms):
+**F7** adds four corporate-site capabilities, **F8** the editor and
+**F9** the media library — all of them **zero-JavaScript** (the CSP
+keeps blocking scripts and every new screen works through plain HTML
+forms):
 
 | Capability | One line |
 |---|---|
@@ -16,6 +17,7 @@ every new screen works through plain HTML forms):
 | [SEO metadata](#seo-metadata) | Per-page `meta_title`, `meta_description` and `og_image` in the wrapper's `<head>`. |
 | [Sitemap](#sitemap) | `GET /sitemap.xml` with every published page, automatically. |
 | [The editor (F8)](#the-editor-two-body-modes) | Markdown bodies with a server-side preview — and the `.jhs` mode kept as-is. |
+| [The media library (F9)](#the-media-library-f9) | Image uploads validated at the byte level, immutable-cached serving, alt text and copy-paste snippets. |
 
 Planned next phases live in [the roadmap](#the-cms-roadmap) at the
 bottom.
@@ -279,20 +281,127 @@ string (like the probe above) — but composing another endpoint's
 output into a page is the proxy's job (`[external_api]`), not a
 template's.
 
+## The media library (F9)
+
+Pages need images. `/admin/media` is where they live: editors upload
+through a plain `multipart/form-data` form (the only place the panel
+uses multipart — everything else stays urlencoded), the server
+validates, stores and serves, and page authors copy a ready-made
+snippet. Still zero JavaScript: no drop zones, no progress bars, no
+crop widgets — a form, a redirect, a page.
+
+### The three validation gates
+
+Every upload passes all three before a single byte touches the disk:
+
+1. **The sniff.** The format is derived from the file's leading bytes
+   (`image::guess_format` — real magic-byte detection), never from the
+   client's `Content-Type` or the file name. The sniffed format is also
+   what gets stored and later served, so a served file can never lie
+   about what it is.
+2. **The whitelist.** PNG, JPEG, GIF and WebP — the raster formats
+   every browser renders natively. SVG is deliberately absent: it is
+   text, it can carry scripts, and the CMS's scripts-blocked story
+   should not depend on sanitizing an attacker-controlled one. A
+   sniffed-but-disallowed format (BMP, TIFF, …) bounces back with
+   «Formato no admitido».
+3. **The decode.** The file is fully decoded under
+   `image::Limits` — at most 8192 × 8192 pixels and 512 MiB of decoder
+   allocation (the decompression-bomb guard) — which also proves the
+   file is well-formed: a truncated or corrupt "PNG" never reaches
+   the disk. Decode and thumbnailing run on the blocking thread pool,
+   not the async runtime.
+
+The `media_max_bytes` cap is enforced while *streaming* the upload —
+the file is never buffered past the limit, so the memory cost of a
+malicious upload is bounded by the cap itself.
+
+### Storage: flat, server-generated, never in `public/`
+
+Files land in `[cms] media_dir` (default `media/`, created at
+startup) under names the server generates: `<32-hex>.<ext>` for the
+file and `<32-hex>_t.png` for its 320-pixel PNG thumbnail. Nothing the
+client sent — not the name, not the path, not the extension —
+influences the on-disk name, so the serving routes can never be talked
+into a path traversal; schema `CHECK`s back the flat shape and the
+four-mime whitelist in the database. The library **never writes into
+`public/`**, and media is served by its own routes (with row lookups
+and cache headers) rather than the static file family.
+
+The uploader's original file name is kept for display only (last
+path segment, control characters stripped, 200 characters), and the
+`alt` text travels with the upload.
+
+### Serving: immutable by construction
+
+| Route | Who | What |
+|---|---|---|
+| `GET /media/{id}/{name}` | public | The file, byte-for-byte, with the sniffed `Content-Type`. |
+| `GET /media/thumb/{id}` | public | The 320-pixel PNG thumbnail (falls back to the full file if missing). |
+| `GET /admin/media` | editor/admin | The grid + the upload form. |
+| `GET /admin/media/{id}` | editor/admin | Detail: full image, metadata, alt form, snippets, delete. |
+| `POST /admin/media` | editor/admin | The upload (multipart: `file` + `alt`). |
+| `POST /admin/media/{id}/alt` | editor/admin | Replace the alt text. |
+| `POST /admin/media/{id}/delete` | editor/admin | Delete the row and the files. |
+
+The URL name must match the row exactly — a wrong name, an unknown id
+or a traversal attempt all land in the same 404 as `/p/{slug}` does.
+Because every upload gets a fresh id and a fresh name, the bytes under
+a given URL never change: the responses carry
+`Cache-Control: public, max-age=31536000, immutable`, and a browser
+fetches a media URL at most once. (Deleting a file breaks that URL by
+design — see below.)
+
+### The editor workflow
+
+Upload → the detail page shows the image, its metadata, and two
+snippets ready to copy-paste — the Markdown one carrying the alt text:
+
+```markdown
+![Logo del sitio](/media/3/8f14e45fceea167a5a36dedd4bea2543.png)
+```
+
+The alt text is editable on the same page (500 characters, the SEO
+budget), and the snippets regenerate with it — the same
+accessibility-first loop the Markdown renderer's `![alt](url)`
+syntax expects.
+
+### Deleting, and the limits of the library
+
+Deleting removes the row and both files; the public URL then answers
+404, and any page still referencing it shows a hole. The detail page
+warns about exactly that before the button — finding *which* pages
+reference a file is search work (F10). The listing shows the latest
+200 items (full pagination is F10's business too).
+
 ## Configuration
 
-Two keys from F7 (both optional) — and **F8 adds zero keys**: the
-body mode is per-page state in the database, not server
-configuration, so the `wallermax.toml` boundary is untouched.
+Two keys from F7, two from F9 (all optional) — and **F8 adds zero
+keys**: the body mode is per-page state in the database, not server
+configuration, so the `wallermax.toml` boundary stayed untouched
+through it.
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|
 | `cms.sitemap` | bool | `true` | Serve `GET /sitemap.xml` with the published pages. |
 | `cms.site_url` | string | unset | Absolute origin for the sitemap's `<loc>` URLs; without it the request's `Host` header is used with `http://`. |
+| `cms.media_dir` | path | `"media"` | Directory the media library stores uploads in (created at startup; its own directory — never `public/`). |
+| `cms.media_max_bytes` | bytes | `524288` | Cap on one uploaded file; the upload is streamed and refused past the cap. |
 
 Environment overrides: `WALLERMAX_CMS__SITEMAP`,
-`WALLERMAX_CMS__SITE_URL`. The keys are validated while the CMS is off
-too — a typo'd `site_url` is a startup error regardless of the switch.
+`WALLERMAX_CMS__SITE_URL`, `WALLERMAX_CMS__MEDIA_DIR`,
+`WALLERMAX_CMS__MEDIA_MAX_BYTES`. The keys are validated while the CMS
+is off too — a typo'd `site_url` or an out-of-range `media_max_bytes`
+(1 KiB .. 64 MiB) is a startup error regardless of the switch.
+
+**The one interplay worth knowing** (F9): the default `512 KiB`
+`media_max_bytes` fits under the default 1 MiB
+`server.max_body_size_bytes` with multipart framing headroom, so
+uploads work out of the box. Raise `media_max_bytes` for real
+photography and raise `server.max_body_size_bytes` with it — the
+request body limit rejects oversized uploads with a 413 *before* the
+friendly form error can fire, and a startup warning tells you when
+the keys are out of step.
 
 ## Security notes
 
@@ -318,6 +427,19 @@ too — a typo'd `site_url` is a startup error regardless of the switch.
 - **The privilege split is untouched**: menus are content (`editor`),
   not server configuration; nothing new crossed the
   `wallermax.toml`-only boundary.
+- **Media is validated at the byte level** (F9): the sniffed magic
+  bytes (not the client's `Content-Type`) decide the format and the
+  whitelist (PNG/JPEG/GIF/WebP — no SVG, ever), and the full decode
+  under dimension/allocation limits rejects truncation and
+  decompression bombs before anything is written. The upload is
+  streamed with the cap enforced mid-read, never buffered unchecked.
+- **Media serving cannot traverse**: on-disk names are flat,
+  server-generated hex stems (`CHECK`-constrained in the schema), the
+  lookup key is the id, and the URL name must match the row exactly —
+  wrong names, unknown ids and `../` attempts all land in the same
+  404. `Cache-Control: immutable` is safe by construction: every
+  upload is a new id and a new name, so the bytes under a URL never
+  change.
 
 ## The CMS roadmap
 
@@ -328,9 +450,9 @@ the same discipline as the phases before it:
 - **F8 — the editor** (done): Markdown bodies with the safe subset
   and the server-side previsualización, stored alongside the `.jhs`
   body mode — this document.
-- **F9 — the media library**: uploads with magic-byte validation,
-  size caps, thumbnails, alt text — served from a dedicated directory,
-  never writing into `public/`.
+- **F9 — the media library** (done): uploads with magic-byte
+  validation, size caps, thumbnails, alt text — served from a dedicated
+  directory, never writing into `public/` — this document.
 - **F10 — findability**: search over pages (SQLite FTS5), paginated
   listings, RSS/Atom for dated content.
 - **F11 — history**: page revisions with restore, scheduled

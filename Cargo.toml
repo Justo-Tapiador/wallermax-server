@@ -10,7 +10,7 @@ keywords = ["web-server", "http", "middleware", "modular", "axum"]
 categories = ["web-programming::http-server"]
 
 [dependencies]
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "time"] }
 tower-http = { version = "0.6", features = ["cors", "limit", "fs"] }
 serde = { version = "1", features = ["derive"] }
@@ -37,9 +37,14 @@ url = "2"
 # CMS Markdown bodies (F8): the pull parser + HTML writer, raw HTML
 # disabled at the call site (safe subset for editor-authored content).
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+# CMS media library (F9): magic-byte sniffing + decode with limits +
+# thumbnails. Only the four accepted codecs are compiled in.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 [dev-dependencies]
 rcgen = "0.14.7"
+# The media integration battery encodes its own PNG/JPEG/GIF fixtures.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 
 [profile.release]
 lto = "thin"

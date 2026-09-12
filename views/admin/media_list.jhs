@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Biblioteca de medios — CMS wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+    <div class="panel-barra">
+      <h1>Biblioteca de medios</h1>
+      <a class="btn btn-fantasma" href="/admin">Panel</a>
+    </div>
+
+<?jhs if (query.ok == "eliminado") { ?>
+    <p class="aviso aviso-ok">Archivo eliminado. Recuerda: las páginas que aún lo enlacen
+       mostrarán un hueco — su &lt;img&gt; apuntaba a esa URL.</p>
+<?jhs } ?>
+<?jhs if (form_error) { ?>
+    <p class="aviso aviso-error"><?= form_error ?></p>
+<?jhs } ?>
+
+    <section class="tarjeta" aria-labelledby="subida-titulo">
+      <h2 id="subida-titulo">Subir una imagen</h2>
+      <form method="post" action="/admin/media" enctype="multipart/form-data">
+        <div class="campo">
+          <label for="archivo">Archivo (PNG, JPEG, GIF o WebP)</label>
+          <input id="archivo" type="file" name="file" required
+                 accept="image/png,image/jpeg,image/gif,image/webp">
+          <p class="ayuda">El servidor comprueba la firma real de bytes y decodifica la
+             imagen antes de guardarla: un archivo renombrado o corrupto no pasa. El
+             límite de tamaño lo configura <code>[cms] media_max_bytes</code>.</p>
+        </div>
+        <div class="campo">
+          <label for="alt">Texto alternativo (opcional, editable después)</label>
+          <input id="alt" type="text" name="alt" maxlength="500" value="<?= alt_text ?>"
+                 placeholder="Logo de la empresa sobre fondo blanco">
+          <p class="ayuda">Describe la imagen para lectores de pantalla y buscadores;
+             la página de detalle te lo devuelve listo para pegar en el Markdown.</p>
+        </div>
+        <button class="btn btn-primario" type="submit">Subir</button>
+      </form>
+    </section>
+
+    <section class="tarjeta" aria-labelledby="medios-titulo">
+      <h2 id="medios-titulo">Archivos</h2>
+<?jhs if (media_items && media_items.length) { ?>
+      <div class="rejilla-media">
+<?jhs media_items.forEach(function (medio) { ?>
+        <div class="tarjeta-medio">
+          <a href="/admin/media/<?= medio.id ?>" class="miniatura-enlace">
+            <img class="miniatura" src="<?= medio.thumb_url ?>" alt="<?= medio.alt_text ?>"
+                 loading="lazy">
+          </a>
+          <div class="medio-datos">
+            <a class="medio-nombre" href="/admin/media/<?= medio.id ?>"><?= medio.original_name ?></a>
+            <div class="secundario"><?= medio.width ?> × <?= medio.height ?> ·
+              <?= medio.size_h ?> · <?= medio.created_at_h ?></div>
+            <div class="medio-alt"><?= medio.alt_text ?></div>
+          </div>
+        </div>
+<?jhs }); ?>
+      </div>
+<?jhs } else { ?>
+      <p class="vacio">La biblioteca está vacía: sube la primera imagen con el
+         formulario de arriba.</p>
+<?jhs } ?>
+      <p class="ayuda">Se muestran los últimos <?= media_items ? media_items.length : 0 ?>
+         archivos. Cada subida recibe una URL definitiva e inmutable
+         (<code>/media/&lt;id&gt;/&lt;nombre&gt;</code>): la página de detalle trae los
+         fragmentos listos para copiar.</p>
+    </section>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

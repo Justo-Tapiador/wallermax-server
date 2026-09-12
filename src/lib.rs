@@ -68,6 +68,7 @@ pub mod state;
 pub mod template_engine;
 
 mod markdown;
+mod media;
 mod util;
 
 /// Loads the configuration, initializes logging and runs the server until

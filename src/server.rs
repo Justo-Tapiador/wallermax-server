@@ -24,9 +24,11 @@ use tokio::sync::watch;
 
 use crate::auth::JwtService;
 use crate::config::AppConfig;
-use crate::db::{self, SqliteMenuRepository, SqlitePageRepository, SqliteUserRepository};
+use crate::db::{
+    self, SqliteMediaRepository, SqliteMenuRepository, SqlitePageRepository, SqliteUserRepository,
+};
 use crate::routes;
-use crate::state::{AppState, AuthContext, CmsContext};
+use crate::state::{self, AppState, AuthContext, CmsContext};
 
 /// Startup/serving error type (kept simple on purpose; a dedicated error
 /// enum can be introduced in a later phase if the surface grows).
@@ -151,16 +153,47 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
     // auth, templates) are on — `validate_cms` enforces the same rule
     // at load time, so the silent skip here only guards embedders that
     // build states directly.
+    //
+    // The media directory (F9) is resolved and created right here:
+    // request handling only ever joins flat server-generated names onto
+    // the frozen absolute path, and a missing directory is a startup
+    // problem (fail fast), never a per-upload one.
     let cms = match (auth.is_some(), config.cms.enabled, config.templates.enabled) {
-        (true, true, true) => Some(CmsContext {
-            pages: Arc::new(SqlitePageRepository::new(pool.clone())),
-            menus: Arc::new(SqliteMenuRepository::new(pool)),
-        }),
+        (true, true, true) => {
+            let media_root = state::absolutize(&config.cms.media_dir);
+            if let Err(error) = std::fs::create_dir_all(&media_root) {
+                return Err(format!(
+                    "failed to create the media directory `{}`: {error}",
+                    media_root.display()
+                )
+                .into());
+            }
+            Some(CmsContext {
+                pages: Arc::new(SqlitePageRepository::new(pool.clone())),
+                menus: Arc::new(SqliteMenuRepository::new(pool.clone())),
+                media: Arc::new(SqliteMediaRepository::new(pool)),
+                media_root,
+            })
+        }
         _ => None,
     };
     if config.cms.enabled && cms.is_none() {
         tracing::warn!(
             "cms.enabled is set but database/auth/templates are off; the CMS stays unmounted"
+        );
+    }
+
+    // Uploads are multipart bodies: the request-body limit has to make
+    // room for the file plus the framing, or the server answers 413
+    // before the friendly form error can fire (F9).
+    if cms.is_some()
+        && config.cms.media_max_bytes + 1_024 > config.server.max_body_size_bytes as u64
+    {
+        tracing::warn!(
+            media_max_bytes = config.cms.media_max_bytes,
+            max_body_size_bytes = config.server.max_body_size_bytes,
+            "cms media_max_bytes is at or above the request body limit; uploads near the cap \
+             will be rejected with 413 — raise server.max_body_size_bytes alongside"
         );
     }
 
@@ -188,8 +221,9 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
     if cms.is_some() {
         tracing::info!(
             "cms enabled (public pages at /p, admin panel at /admin, menus at /admin/menus, \
-             sitemap at /sitemap.xml while [cms] sitemap; content and users — server \
-             configuration stays in wallermax.toml)"
+             sitemap at /sitemap.xml while [cms] sitemap; media library at /admin/media \
+             serving /media/{{id}}/{{name}}, uploads capped by [cms] media_max_bytes; content, \
+             media and users — server configuration stays in wallermax.toml)"
         );
         if let Some(slug) = config.cms.default_page.as_deref() {
             tracing::info!(

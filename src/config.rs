@@ -46,6 +46,21 @@ const DEFAULT_MAX_BODY_SIZE_BYTES: usize = 1_048_576;
 /// Upper bound for `external_api.response_limit_bytes`: 16 MiB.
 const MAX_EXTERNAL_API_RESPONSE_BYTES: usize = 16 * 1_048_576;
 
+/// Lowest accepted `[cms] media_max_bytes` (F9): a kilobyte floor keeps
+/// the key honest without forbidding genuinely tiny icon libraries.
+const MIN_MEDIA_MAX_BYTES: u64 = 1_024;
+
+/// Highest accepted `[cms] media_max_bytes` (F9): the whole upload is
+/// buffered in memory before validation, so the ceiling is deliberately
+/// modest — 64 MiB.
+const MAX_MEDIA_MAX_BYTES: u64 = 64 * 1_048_576;
+
+/// Default `[cms] media_max_bytes` (F9): 512 KiB — chosen to fit under
+/// the default 1 MiB `server.max_body_size_bytes` with multipart
+/// framing headroom, so uploads work out of the box; operators with
+/// real photography raise both keys together.
+const DEFAULT_MEDIA_MAX_BYTES: u64 = 512 * 1_024;
+
 /// Root application configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -537,10 +552,30 @@ pub struct CmsConfig {
     ///
     /// `WALLERMAX_CMS__SITE_URL` overrides the file value.
     pub site_url: Option<String>,
+    /// Directory the media library stores its uploads in (F9).
+    ///
+    /// Resolved against the working directory at startup (exactly like
+    /// `templates.views_dir`) and created if missing. It is **not** the
+    /// static root: media files are served by their own route
+    /// (`GET /media/{id}/{name}`) with their own caching rules, and the
+    /// library never writes into `public/`.
+    ///
+    /// `WALLERMAX_CMS__MEDIA_DIR` overrides the file value.
+    pub media_dir: String,
+    /// Upper bound on one uploaded file's bytes (F9). The whole file is
+    /// buffered in memory before validation, so this also bounds the
+    /// per-request cost; it must stay comfortably below
+    /// `server.max_body_size_bytes` (multipart framing adds a few
+    /// hundred bytes) or uploads will be rejected by the body limit
+    /// with a 413 before the friendly form error can fire.
+    ///
+    /// `WALLERMAX_CMS__MEDIA_MAX_BYTES` overrides the file value.
+    pub media_max_bytes: u64,
 }
 
 impl Default for CmsConfig {
     /// The shipped defaults: sitemap on (public information), the
+    /// media budget at 512 KiB (under the default body limit), the
     /// rest off/empty — opting into the CMS is still explicit.
     fn default() -> Self {
         Self {
@@ -548,6 +583,8 @@ impl Default for CmsConfig {
             default_page: None,
             sitemap: true,
             site_url: None,
+            media_dir: String::from("media"),
+            media_max_bytes: DEFAULT_MEDIA_MAX_BYTES,
         }
     }
 }
@@ -1128,6 +1165,27 @@ impl AppConfig {
                      `https://www.example.com` without a trailing slash"
                 )));
             }
+        }
+        // The media directory shape is checked while off too, for the
+        // same reason: a typo'd path is a mistake regardless of the
+        // switch. The path itself is resolved (and created) by the
+        // startup wiring, never by request handling.
+        if self.cms.media_dir.is_empty() || self.cms.media_dir.contains('\0') {
+            return Err(ConfigError::Message(
+                "`cms.media_dir` must be a non-empty path".to_owned(),
+            ));
+        }
+        if has_parent_segment(&self.cms.media_dir) {
+            return Err(ConfigError::Message(format!(
+                "`cms.media_dir` must not contain `..` path segments: {:?}",
+                self.cms.media_dir
+            )));
+        }
+        if !(MIN_MEDIA_MAX_BYTES..=MAX_MEDIA_MAX_BYTES).contains(&self.cms.media_max_bytes) {
+            return Err(ConfigError::Message(format!(
+                "`cms.media_max_bytes` must be between {} and {} bytes (got {})",
+                MIN_MEDIA_MAX_BYTES, MAX_MEDIA_MAX_BYTES, self.cms.media_max_bytes
+            )));
         }
         if !self.cms.enabled {
             return Ok(());

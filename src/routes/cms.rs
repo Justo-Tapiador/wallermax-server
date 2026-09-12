@@ -48,7 +48,10 @@
 //!   into a new draft page (read-only on the static tree: the CMS
 //!   never writes into `public/`);
 //! - `GET/POST /admin/menus…` — the named navigation menus and their
-//!   items (F7).
+//!   items (F7);
+//! - `GET/POST /admin/media…` and the public `GET /media/{id}/{name}`
+//!   family — the media library (F9, [`crate::routes::media`]): the
+//!   same panel conventions with a `multipart/form-data` upload.
 //!
 //! **User management** (`admin` only, `/admin/users`): create, change
 //! role, reset password, delete — with the last-admin and self-edit
@@ -235,7 +238,10 @@ fn utf8_percent_encode(value: &str) -> String {
 
 /// A minimal, script-free HTML error page (same style as the auth form
 /// errors: browsers get pages, API clients get envelopes).
-fn html_error_page(status: StatusCode, title: &str, message: &str) -> Response {
+///
+/// Crate-visible for the media routes (F9) — their public 404s match
+/// the `/p/{slug}` behaviour by construction.
+pub(crate) fn html_error_page(status: StatusCode, title: &str, message: &str) -> Response {
     let html = format!(
         "<!DOCTYPE html>\n<html lang=\"es\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
@@ -294,7 +300,10 @@ impl PageParts {
 
 /// Renders `views/<view>.jhs` with the base globals plus `extra`,
 /// answering with `status`.
-async fn render_view(
+///
+/// Crate-visible: the media library routes (F9) share the exact same
+/// render pipeline for their admin views.
+pub(crate) async fn render_view(
     state: &AppState,
     parts: &PageParts,
     view: &str,
@@ -339,15 +348,18 @@ async fn render_view_with_data(
 }
 
 /// The CMS context (routes are only mounted while it exists).
+/// Crate-visible for the media routes (F9), which ride the same mount.
 #[allow(clippy::result_large_err)] // the Err is a one-shot browser response
-fn cms_context(state: &AppState) -> Result<&CmsContext, Response> {
+pub(crate) fn cms_context(state: &AppState) -> Result<&CmsContext, Response> {
     state
         .cms()
         .ok_or_else(|| AppError::internal("the CMS is not initialized").into_response())
 }
 
 /// A bare `303 See Other`.
-fn see_other(location: &str) -> Response {
+///
+/// Crate-visible for the media routes (F9): same PRG convention.
+pub(crate) fn see_other(location: &str) -> Response {
     Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header(header::LOCATION, location)

@@ -90,10 +90,12 @@
           ?></textarea>
 <?jhs if (form.body_format == "markdown") { ?>
           <p class="ayuda">Encabezados #, listas, citas, bloques de código, tablas y
-             enlaces. El HTML crudo se descarta y los enlaces a esquemas extraños
-             (javascript:, data:) se degradan: la página nunca puede convertirse en
-             portadora de scripts. Pulsa «Previsualizar» abajo para ver el render
-             exacto antes de guardar.</p>
+             enlaces. Las imágenes van con <code>![texto alt](/media/…)</code>: sube el
+             archivo en la <a href="/admin/media">biblioteca de medios</a> y copia el
+             fragmento listo desde su página de detalle. El HTML crudo se descarta y
+             los enlaces a esquemas extraños (javascript:, data:) se degradan: la
+             página nunca puede convertirse en portadora de scripts. Pulsa
+             «Previsualizar» abajo para ver el render exacto antes de guardar.</p>
 <?jhs } else { ?>
           <p class="ayuda">Es HTML con etiquetas <code>&lt;?= expresión ?&gt;</code> y
              <code>&lt;?jhs código ?&gt;</code> (el mismo motor de las vistas). Los

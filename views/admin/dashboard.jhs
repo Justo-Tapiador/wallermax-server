@@ -63,6 +63,14 @@
           </div>
           <div class="acciones"><a class="btn btn-fantasma" href="/admin/menus">Gestionar</a></div>
         </li>
+        <li>
+          <div class="principal">
+            <a href="/admin/media">Biblioteca de medios</a>
+            <div class="secundario">Sube imágenes con validación real de bytes y copia su
+               URL definitiva para usarla en las páginas.</div>
+          </div>
+          <div class="acciones"><a class="btn btn-fantasma" href="/admin/media">Subir una imagen</a></div>
+        </li>
 <?jhs if (user && user.role == "admin") { ?>
         <li>
           <div class="principal">

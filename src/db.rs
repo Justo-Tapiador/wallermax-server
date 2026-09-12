@@ -1548,6 +1548,198 @@ impl MenuRepository for SqliteMenuRepository {
     }
 }
 
+// ─── The media library (F9) ──────────────────────────────────────────
+
+/// Values needed to insert a media row. The file bytes themselves live
+/// on disk under `media_dir`; the row carries the names and the
+/// provenance.
+#[derive(Debug, Clone)]
+pub struct NewMedia {
+    /// Flat server-generated file name (`<32-hex>.<ext>`).
+    pub stored_name: String,
+    /// Flat server-generated thumbnail name (`<32-hex>_t.png`).
+    pub thumb_name: String,
+    /// The uploader's file name, display-only.
+    pub original_name: String,
+    /// The sniffed mime type (see `src/media.rs`).
+    pub mime_type: String,
+    pub bytes: i64,
+    pub width: i64,
+    pub height: i64,
+    pub alt_text: String,
+    pub created_by: Option<i64>,
+}
+
+/// A persisted media row (see `migrations/0006_*`).
+#[derive(Debug, Clone)]
+pub struct MediaRecord {
+    pub id: i64,
+    pub stored_name: String,
+    pub thumb_name: String,
+    pub original_name: String,
+    pub mime_type: String,
+    pub bytes: i64,
+    pub width: i64,
+    pub height: i64,
+    pub alt_text: String,
+    /// Creation time, unix seconds.
+    pub created_at: i64,
+    pub created_by: Option<i64>,
+}
+
+impl<'r> FromRow<'r, SqliteRow> for MediaRecord {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, SqlxError> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            stored_name: row.try_get("stored_name")?,
+            thumb_name: row.try_get("thumb_name")?,
+            original_name: row.try_get("original_name")?,
+            mime_type: row.try_get("mime_type")?,
+            bytes: row.try_get("bytes")?,
+            width: row.try_get("width")?,
+            height: row.try_get("height")?,
+            alt_text: row.try_get("alt_text")?,
+            created_at: row.try_get("created_at")?,
+            created_by: row.try_get("created_by")?,
+        })
+    }
+}
+
+/// Column list shared by every `SELECT` on the `media` table.
+const MEDIA_COLUMNS: &str = "id, stored_name, thumb_name, original_name, mime_type, \
+                           bytes, width, height, alt_text, created_at, created_by";
+
+/// Storage abstraction for the media library (F9).
+///
+/// Same shape as [`PageRepository`]: handlers depend on the trait, not
+/// on SQLite. The files themselves are written by the upload route
+/// around the row insert; this layer only owns the metadata.
+#[async_trait]
+pub trait MediaRepository: Send + Sync + 'static {
+    /// Inserts a media row. The caller has already written the files;
+    /// on failure it removes them again (the row and the disk never
+    /// disagree for long).
+    async fn create(&self, media: &NewMedia) -> Result<MediaRecord, RepositoryError>;
+
+    /// Looks up a media row by id (the serving and detail routes).
+    async fn find_by_id(&self, id: i64) -> Result<Option<MediaRecord>, RepositoryError>;
+
+    /// The newest rows, up to `limit` (the admin listing).
+    async fn list(&self, limit: i64) -> Result<Vec<MediaRecord>, RepositoryError>;
+
+    /// Replaces the alt text. Returns the updated row, or `None` when
+    /// the id does not exist.
+    async fn update_alt(
+        &self,
+        id: i64,
+        alt_text: &str,
+    ) -> Result<Option<MediaRecord>, RepositoryError>;
+
+    /// Deletes the row. The caller removes the files afterwards.
+    /// Returns whether a row was removed.
+    async fn delete(&self, id: i64) -> Result<bool, RepositoryError>;
+}
+
+/// SQLite-backed [`MediaRepository`] over a shared pool.
+#[derive(Clone)]
+pub struct SqliteMediaRepository {
+    pool: SqlitePool,
+}
+
+impl SqliteMediaRepository {
+    /// Wraps an already-migrated pool into a repository.
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl MediaRepository for SqliteMediaRepository {
+    async fn create(&self, media: &NewMedia) -> Result<MediaRecord, RepositoryError> {
+        let now = unix_now();
+        let result = sqlx::query(
+            "INSERT INTO media (stored_name, thumb_name, original_name, mime_type, \
+             bytes, width, height, alt_text, created_at, created_by) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )
+        .bind(&media.stored_name)
+        .bind(&media.thumb_name)
+        .bind(&media.original_name)
+        .bind(&media.mime_type)
+        .bind(media.bytes)
+        .bind(media.width)
+        .bind(media.height)
+        .bind(&media.alt_text)
+        .bind(now)
+        .bind(media.created_by)
+        .execute(&self.pool)
+        .await;
+
+        match result {
+            Ok(done) => Ok(MediaRecord {
+                id: done.last_insert_rowid(),
+                stored_name: media.stored_name.clone(),
+                thumb_name: media.thumb_name.clone(),
+                original_name: media.original_name.clone(),
+                mime_type: media.mime_type.clone(),
+                bytes: media.bytes,
+                width: media.width,
+                height: media.height,
+                alt_text: media.alt_text.clone(),
+                created_at: now,
+                created_by: media.created_by,
+            }),
+            Err(error) => Err(RepositoryError::from_sqlx(error)),
+        }
+    }
+
+    async fn find_by_id(&self, id: i64) -> Result<Option<MediaRecord>, RepositoryError> {
+        sqlx::query_as(&format!("SELECT {MEDIA_COLUMNS} FROM media WHERE id = ?1"))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn list(&self, limit: i64) -> Result<Vec<MediaRecord>, RepositoryError> {
+        sqlx::query_as(&format!(
+            "SELECT {MEDIA_COLUMNS} FROM media ORDER BY id DESC LIMIT ?1"
+        ))
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn update_alt(
+        &self,
+        id: i64,
+        alt_text: &str,
+    ) -> Result<Option<MediaRecord>, RepositoryError> {
+        let updated = sqlx::query("UPDATE media SET alt_text = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(alt_text)
+            .execute(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)?;
+
+        if updated.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.find_by_id(id).await
+    }
+
+    async fn delete(&self, id: i64) -> Result<bool, RepositoryError> {
+        let removed = sqlx::query("DELETE FROM media WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)?;
+
+        Ok(removed.rows_affected() > 0)
+    }
+}
+
 /// Opens a SQLite pool with the project's recommended settings.
 ///
 /// # Errors

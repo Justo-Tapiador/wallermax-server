@@ -25,7 +25,7 @@ use axum::http::{HeaderName, HeaderValue};
 
 use crate::auth::JwtService;
 use crate::config::AppConfig;
-use crate::db::{MenuRepository, PageRepository, UserRepository};
+use crate::db::{MediaRepository, MenuRepository, PageRepository, UserRepository};
 use crate::external_api::ExternalApi;
 use crate::metrics::Metrics;
 use crate::proxy::{self, Cidr};
@@ -68,6 +68,14 @@ pub struct CmsContext {
     /// Named navigation menus behind the [`MenuRepository`] abstraction
     /// (F7): the `menus` template global and `/admin/menus` read here.
     pub menus: Arc<dyn MenuRepository>,
+    /// Media library metadata behind the [`MediaRepository`]
+    /// abstraction (F9).
+    pub media: Arc<dyn MediaRepository>,
+    /// Absolute, startup-frozen directory the media files live in
+    /// (F9). Resolved from `[cms] media_dir` exactly like `views_dir`
+    /// and created at startup, so request handling only ever *joins*
+    /// flat server-generated names onto it.
+    pub media_root: std::path::PathBuf,
 }
 
 /// Dynamic template rendering services shared by the template
@@ -231,8 +239,10 @@ impl TemplateEngine {
 /// and `[templates] views_dir`). Freezing the resolution at construction
 /// keeps template candidate paths stable regardless of later CWD
 /// changes and prevents the sandbox from re-joining an already-resolved
-/// candidate onto the views path.
-fn absolutize(path: &str) -> std::path::PathBuf {
+/// candidate onto the views path. The same resolution now backs the
+/// media directory (F9): every handler joins onto a frozen absolute
+/// path, never a re-resolved one.
+pub(crate) fn absolutize(path: &str) -> std::path::PathBuf {
     let path = std::path::Path::new(path);
     if path.is_absolute() {
         path.to_path_buf()

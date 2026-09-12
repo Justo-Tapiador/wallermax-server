@@ -449,6 +449,30 @@ sitemap = true
 # Override with WALLERMAX_CMS__DEFAULT_PAGE.
 # default_page = "inicio"
 
+# ── The media library (F9) ─────────────────────────────────────
+# Editors upload images at /admin/media (multipart form, zero JS):
+# every file is sniffed, whitelisted (PNG/JPEG/GIF/WebP) and fully
+# decoded under dimension/allocation limits before touching the disk.
+# Serving is public and immutable-cached at /media/<id>/<name> with
+# /media/thumb/<id> for listings. Full documentation: README-CMS.md.
+
+# Directory the uploads live in (F9). Its own directory — the library
+# NEVER writes into public/. Created at startup; relative paths
+# resolve against the working directory. Validated: non-empty, no `..`.
+# Override with WALLERMAX_CMS__MEDIA_DIR.
+#
+# media_dir = "media"
+
+# Cap on one uploaded file's bytes (F9). Default 512 KiB so uploads
+# work under the DEFAULT 1 MiB server.max_body_size_bytes: raising
+# this beyond the body limit gets uploads 413-rejected before the
+# friendly form error (a startup warning tells you). For real
+# photography raise BOTH, e.g. media_max_bytes = 8388608 AND
+# server.max_body_size_bytes = 10485760. Validated: 1 KiB .. 64 MiB.
+# Override with WALLERMAX_CMS__MEDIA_MAX_BYTES.
+#
+# media_max_bytes = 524288
+
 [metrics]
 # Prometheus exposition endpoint: scrapes return every collected metric
 # in the text exposition format. Unauthenticated by design — restrict at
