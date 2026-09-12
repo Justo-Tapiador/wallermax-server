@@ -62,13 +62,15 @@ FROM debian:bookworm-slim AS runtime
 # sidecar (`[templates] backend = "auto"` by default — without Node the
 # server silently renders on the in-process boa engine instead); the
 # dedicated user owns the database directory so the server never runs
-# as root.
+# as root. The media root (F9) is pre-created under /data alongside it:
+# the server would create it at startup anyway, but baking it in means
+# a fresh volume inherits the right ownership from the image.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates nodejs \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --home-dir /app wallermax \
-    && mkdir /data \
-    && chown wallermax:wallermax /data
+    && mkdir /data /data/media \
+    && chown wallermax:wallermax /data /data/media
 
 WORKDIR /app
 
@@ -88,8 +90,18 @@ COPY sidecar/ /app/sidecar/
 # Container-friendly defaults; each can be overridden with `docker run -e`.
 #   * bind all interfaces so published ports work
 #   * keep the SQLite database on the /data volume
+#   * keep the media library on the /data volume too: uploads are site
+#     content (like the database, unlike the static assets baked into
+#     the image), and the default relative "media" would resolve under
+#     /app — root-owned and read-only for the app user, so the F9
+#     startup check (create the media root, fail fast) would kill the
+#     container before it could bind the port.
+#     Bind-mounting an empty host directory over /data skips the image's
+#     ownership seeding: chown it to uid 10001 (the app user), the same
+#     rule the SQLite file already follows.
 ENV WALLERMAX_SERVER__HOST=0.0.0.0 \
-    WALLERMAX_DATABASE__URL=sqlite:///data/wallermax.db?mode=rwc
+    WALLERMAX_DATABASE__URL=sqlite:///data/wallermax.db?mode=rwc \
+    WALLERMAX_CMS__MEDIA_DIR=/data/media
 
 USER wallermax
 VOLUME /data

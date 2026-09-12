@@ -91,17 +91,30 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke test (/health, /metrics, static index, JHS sidecar)
+      - name: Smoke test (/health, /metrics, static index, JHS sidecar, media)
         run: |
           docker run -d --name wallermax-ci -p 8080:8080 wallermax-server:ci
 
           # Wait for startup (migrations + sidecar + listener) with a timeout.
+          healthy=0
           for _ in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8080/health > /dev/null 2>&1; then
+              healthy=1
               break
             fi
             sleep 1
           done
+
+          # A timeout here almost always means the process died at boot
+          # (config validation, permissions, migrations) — surface the
+          # container's own log instead of failing on a bare curl exit 7
+          # with no clue. docker logs works on stopped containers too.
+          if [ "$healthy" -ne 1 ]; then
+            echo "::error::the container never answered /health within 30s"
+            echo "----- docker logs wallermax-ci -----"
+            docker logs --tail 200 wallermax-ci || true
+            exit 1
+          fi
 
           curl -fsS http://127.0.0.1:8080/health
           echo
@@ -115,5 +128,13 @@ jobs:
           # in-process boa sandbox cannot resolve (it would answer the
           # module banner as a 500 and fail this curl -f).
           curl -fsS 'http://127.0.0.1:8080/sidecar-check.jhs?probe=7' | grep -F 'sidecar-ok:7'
+
+          # v0.13.x: the media library root must live on the writable
+          # /data volume (WALLERMAX_CMS__MEDIA_DIR) — the F9 startup
+          # check creates it as the app user, so "exists and is writable"
+          # proves the whole path the docker boot fix opened up.
+          docker exec wallermax-ci test -d /data/media
+          docker exec wallermax-ci test -w /data/media
+          echo 'media root: /data/media exists and is writable'
 
           docker rm -f wallermax-ci

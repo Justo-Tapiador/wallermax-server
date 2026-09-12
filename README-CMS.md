@@ -332,6 +332,16 @@ The uploader's original file name is kept for display only (last
 path segment, control characters stripped, 200 characters), and the
 `alt` text travels with the upload.
 
+A relative `media_dir` resolves against the working directory, so a
+bare `wallermax-server` run keeps its media next to itself. In the
+container image the story is different: the app user cannot write under
+`/app`, so the image pins `WALLERMAX_CMS__MEDIA_DIR=/data/media` —
+uploads share the `/data` volume with the SQLite database (site
+content, not image content) and survive container replacement the same
+way the database does. A startup failure to create the media root is
+deliberately fatal: the server refuses to run with a media library it
+cannot write to.
+
 ### Serving: immutable by construction
 
 | Route | Who | What |
