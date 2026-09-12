@@ -8,7 +8,7 @@
 
 > A modular, secure and high-performance web server written in Rust.
 
-**Status: v0.12.0 — the roadmap phases done, a dynamic template engine with require() running on the original node-jhs2 engine, 
+**Status: v0.14.0 — the roadmap phases done, a dynamic template engine with require() running on the original node-jhs2 engine, 
 browser sessions, and a small built-in CMS that owns the homepage, and a server-side proxy for external APIs.** Phase 4 added rotating
 refresh tokens with family revocation, a Prometheus `/metrics` endpoint, HTTPS via
 rustls (plus an HTTP-to-HTTPS redirect listener), trusted-proxy `X-Forwarded-For`
@@ -192,7 +192,7 @@ upstream CORS entirely). See
 
 ```console
 $ cargo run
-   Compiling wallermax-server v0.12.0
+   Compiling wallermax-server v0.14.0
     Finished dev [unoptimized + debuginfo] target(s)
      Running `target/debug/wallermax-server`
 
@@ -204,7 +204,7 @@ INFO wallermax_server::server: sqlite pool ready (migrations applied) url=sqlite
 INFO wallermax_server::server: authentication enabled (the first registered user becomes the admin) registration_enabled=true token_ttl_secs=3600 refresh_tokens_enabled=true refresh_token_ttl_secs=2592000
 INFO wallermax_server::server: cms enabled (public pages at /p, admin panel at /admin; content and users — server configuration stays in wallermax.toml)
 INFO wallermax_server::server: prometheus metrics enabled path=/metrics
-INFO wallermax_server::server: wallermax-server listening address=127.0.0.1:8080 version=0.12.0
+INFO wallermax_server::server: wallermax-server listening address=127.0.0.1:8080 version=0.14.0
 INFO wallermax_server::server: route map ready routes="GET / (static) | GET /api | GET /health | GET /api/stats | POST /api/echo | GET /metrics | POST /api/auth/register | POST /api/auth/login | GET /api/auth/me | POST /api/auth/refresh | POST /api/auth/logout | POST /api/auth/logout_all | GET /api/admin/users | GET /p/{slug} | GET /admin | POST /perfil/password | + static files | + .jhs templates"
 ```
 
@@ -232,7 +232,7 @@ $ curl http://127.0.0.1:8080/api
 {"service":"wallermax-server",...}
 
 $ curl http://127.0.0.1:8080/health
-{"status":"ok","version":"0.12.0","template_backend":"sidecar"}
+{"status":"ok","version":"0.14.0","template_backend":"sidecar"}
 
 $ curl http://127.0.0.1:8080/hello.jhs     # .jhs template, rendered on the fly
 <h1>Hola desde una plantilla .jhs</h1>
@@ -624,10 +624,10 @@ Example responses:
 
 ```json
 // GET /api
-{"service":"wallermax-server","version":"0.12.0","description":"...","endpoints":["GET / (static index + files)","GET /api","GET /health","GET /api/stats","POST /api/echo","GET /metrics","POST /api/auth/register","POST /api/auth/login","GET /api/auth/me","GET /api/admin/users","POST /api/auth/refresh","POST /api/auth/logout","POST /api/auth/logout_all"]}
+{"service":"wallermax-server","version":"0.14.0","description":"...","endpoints":["GET / (static index + files)","GET /api","GET /health","GET /api/stats","POST /api/echo","GET /metrics","POST /api/auth/register","POST /api/auth/login","GET /api/auth/me","GET /api/admin/users","POST /api/auth/refresh","POST /api/auth/logout","POST /api/auth/logout_all"]}
 
 // GET /health
-{"status":"ok","version":"0.12.0","template_backend":"sidecar"}
+{"status":"ok","version":"0.14.0","template_backend":"sidecar"}
 
 // GET /api/stats
 {"service":"wallermax-server","version":"0.12.0","uptime_seconds":10.244,"total_requests":12,"requests_per_second":1.171,"rate_limited_requests":0,"registered_users":2}
