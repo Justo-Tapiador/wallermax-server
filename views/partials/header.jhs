@@ -39,6 +39,10 @@
 <?jhs if (esEditor) { ?>
       <a href="/admin">CMS</a>
 <?jhs } ?>
+      <form class="buscador" method="get" action="/buscar" role="search">
+        <input type="search" name="q" maxlength="200" placeholder="Buscar…"
+               aria-label="Buscar en las páginas">
+      </form>
     </nav>
     <div class="sesion">
 <?jhs if (user) { ?>

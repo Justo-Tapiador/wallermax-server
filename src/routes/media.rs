@@ -33,14 +33,17 @@ use serde_json::{json, Value};
 use crate::db::{MediaRecord, NewMedia};
 use crate::error::AppError;
 use crate::routes::cms::{
-    cms_context, html_error_page, render_view, see_other, CmsEditor, PageParts,
+    clamp_page, cms_context, html_error_page, listing_query, pages_for, pagination_value,
+    render_view, see_other, CmsEditor, PageParts,
 };
 use crate::state::AppState;
 use crate::util::{format_timestamp, read_form};
 
-/// How many items the admin listing shows (newest first). Pagination
-/// is F10's business; the cap keeps the panel page bounded meanwhile.
-const MAX_LISTED: i64 = 200;
+/// The media grid's page size (F10): 24 thumbnails — four rows of the
+/// desktop grid, dense enough to scan, light enough to render. The
+/// panel sizes its own grids; `index_page_size` stays a public-listing
+/// key.
+const MEDIA_PAGE_SIZE: i64 = 24;
 
 /// Upper bound on the alt text (the SEO `meta_description` budget).
 const MAX_ALT_TEXT: usize = 500;
@@ -65,29 +68,47 @@ pub fn routes() -> Router<AppState> {
 
 // ─── Admin: `GET/POST /admin/media` ─────────────────────────────────
 
-/// `GET /admin/media`: the upload form and the newest items.
+/// `GET /admin/media`: the upload form and the newest items, one page
+/// of the grid at a time (F10). Uploads and deletions land back on
+/// page one — the freshest row is the one you want to see next.
 async fn list_media(
     State(state): State<AppState>,
     _editor: CmsEditor,
     request: Request,
 ) -> Response {
     let parts = PageParts::of(&request);
-    render_media_list(&state, &parts, None, "").await
+    let (_, requested) = listing_query(parts.uri());
+    render_media_list(&state, &parts, None, "", requested).await
 }
 
 /// Renders the listing with an optional inline form error (and the
-/// half-typed alt text kept — nothing typed is ever lost).
+/// half-typed alt text kept — nothing typed is ever lost) at the
+/// requested page, clamped to the real range (F10).
 async fn render_media_list(
     state: &AppState,
     parts: &PageParts,
     error: Option<&str>,
     alt_text: &str,
+    requested_page: i64,
 ) -> Response {
     let Ok(cms) = cms_context(state) else {
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    let items = match cms.media.list(MAX_LISTED).await {
+    let total = match cms.media.count().await {
+        Ok(total) => total,
+        Err(message) => {
+            tracing::error!(%message, "media count failed");
+            return AppError::internal("media storage failure").into_response();
+        }
+    };
+    let page = clamp_page(requested_page, pages_for(total, MEDIA_PAGE_SIZE).max(1));
+
+    let items = match cms
+        .media
+        .list_paged(MEDIA_PAGE_SIZE, (page - 1) * MEDIA_PAGE_SIZE)
+        .await
+    {
         Ok(items) => items,
         Err(message) => {
             tracing::error!(%message, "media listing failed");
@@ -109,6 +130,10 @@ async fn render_media_list(
                     .unwrap_or(Value::Null),
             ),
             ("alt_text", Value::String(alt_text.to_owned())),
+            (
+                "paginacion",
+                pagination_value(page, total, MEDIA_PAGE_SIZE, "/admin/media"),
+            ),
         ],
         StatusCode::OK,
     )
@@ -136,7 +161,7 @@ async fn upload_media(
     let mut multipart = match Multipart::from_request(request, &state).await {
         Ok(multipart) => multipart,
         Err(rejection) => {
-            return render_media_list(&state, &parts, Some(&rejection.to_string()), "").await;
+            return render_media_list(&state, &parts, Some(&rejection.to_string()), "", 1).await;
         }
     };
 
@@ -153,6 +178,7 @@ async fn upload_media(
                 &parts,
                 Some(&format!("No se pudo leer la subida: {error}")),
                 &alt_text,
+                1,
             )
             .await;
         }
@@ -168,6 +194,7 @@ async fn upload_media(
                             &parts,
                             Some(&format!("No se pudo leer el texto alternativo: {error}")),
                             "",
+                            1,
                         )
                         .await;
                     }
@@ -178,6 +205,7 @@ async fn upload_media(
                         &parts,
                         Some("El texto alternativo es demasiado largo (máximo 500 caracteres)."),
                         "",
+                        1,
                     )
                     .await;
                 }
@@ -193,6 +221,7 @@ async fn upload_media(
                             &parts,
                             Some(&format!("No se pudo leer el archivo: {error}")),
                             &alt_text,
+                            1,
                         )
                         .await;
                     }
@@ -207,6 +236,7 @@ async fn upload_media(
                             human_bytes(max_bytes as i64)
                         )),
                         &alt_text,
+                        1,
                     )
                     .await;
                 }
@@ -225,11 +255,13 @@ async fn upload_media(
             &parts,
             Some("Elige un archivo: la subida no traía el campo «file»."),
             &alt_text,
+            1,
         )
         .await;
     };
     if file_bytes.is_empty() {
-        return render_media_list(&state, &parts, Some("El archivo está vacío."), &alt_text).await;
+        return render_media_list(&state, &parts, Some("El archivo está vacío."), &alt_text, 1)
+            .await;
     }
 
     // Sniff, whitelist and decode under limits — off the async runtime
@@ -243,7 +275,7 @@ async fn upload_media(
     {
         Ok(Ok(pair)) => pair,
         Ok(Err(error)) => {
-            return render_media_list(&state, &parts, Some(error), &alt_text).await;
+            return render_media_list(&state, &parts, Some(error), &alt_text, 1).await;
         }
         Err(join_error) => {
             tracing::error!(%join_error, "the image pipeline panicked");
@@ -252,6 +284,7 @@ async fn upload_media(
                 &parts,
                 Some("No se pudo procesar la imagen (error interno)."),
                 &alt_text,
+                1,
             )
             .await;
         }
@@ -264,6 +297,7 @@ async fn upload_media(
             &parts,
             Some("El texto alternativo no puede pasar de 500 caracteres."),
             &alt_text,
+            1,
         )
         .await;
     }
@@ -284,6 +318,7 @@ async fn upload_media(
             &parts,
             Some("No se pudo guardar el archivo en el disco."),
             &alt_text,
+            1,
         )
         .await;
     }
@@ -297,6 +332,7 @@ async fn upload_media(
             &parts,
             Some("No se pudo guardar la miniatura en el disco."),
             &alt_text,
+            1,
         )
         .await;
     }
@@ -325,6 +361,7 @@ async fn upload_media(
                 &parts,
                 Some("No se pudo guardar (error interno)."),
                 &alt_text,
+                1,
             )
             .await
         }

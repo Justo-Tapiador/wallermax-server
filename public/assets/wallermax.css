@@ -451,6 +451,70 @@ main { flex: 1; padding: 34px 0 46px; }
   padding: 10px;
 }
 
+/* ── Findability (F10): buscador, resultados y paginación ──────── */
+
+.buscador {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+
+.nav .buscador { margin: 0; }
+
+.buscador input[type="search"] {
+  flex: 1;
+  min-width: 180px;
+  padding: 8px 12px;
+  border: 1px solid var(--borde);
+  border-radius: 8px;
+  background: var(--papel-tarjeta);
+  color: var(--tinta);
+  font: inherit;
+}
+
+.nav .buscador input[type="search"] {
+  flex: none;
+  width: 140px;
+  min-width: 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+}
+
+.buscador input[type="search"]:focus {
+  outline: 2px solid var(--acento-suave);
+  border-color: var(--acento);
+}
+
+.resultado .fragmento {
+  margin: 4px 0 0;
+  color: var(--tinta-suave);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.resultado .fragmento mark {
+  background: var(--acento-suave);
+  color: var(--acento-oscuro);
+  border-radius: 3px;
+  padding: 0 2px;
+}
+
+.paginacion {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin: 16px 0 4px;
+}
+
+.paginacion-info {
+  color: var(--tinta-flojo);
+  font-size: 0.85rem;
+}
+
 /* ── Responsivo ───────────────────────────────────────────────── */
 
 @media (max-width: 640px) {

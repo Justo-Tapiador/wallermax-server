@@ -61,6 +61,15 @@ const MAX_MEDIA_MAX_BYTES: u64 = 64 * 1_048_576;
 /// real photography raise both keys together.
 const DEFAULT_MEDIA_MAX_BYTES: u64 = 512 * 1_024;
 
+/// Bounds for `[cms] index_page_size` (F10): one page of a listing
+/// never collapses to zero rows nor grows unbounded — 1 to 100.
+const MIN_INDEX_PAGE_SIZE: u32 = 1;
+const MAX_INDEX_PAGE_SIZE: u32 = 100;
+
+/// Default `[cms] index_page_size` (F10): ten rows per page of the
+/// public listings (`GET /p` and the search results).
+const DEFAULT_INDEX_PAGE_SIZE: u32 = 10;
+
 /// Root application configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -571,6 +580,23 @@ pub struct CmsConfig {
     ///
     /// `WALLERMAX_CMS__MEDIA_MAX_BYTES` overrides the file value.
     pub media_max_bytes: u64,
+    /// Page size of the public listings (F10): `GET /p` and the search
+    /// results at `GET /buscar` — ten rows per page by default,
+    /// validated to 1–100. One key for both because they are one
+    /// concept: how long a public list may run before it paginates.
+    /// The admin panel sizes its own grids (the media grid is 24).
+    ///
+    /// `WALLERMAX_CMS__INDEX_PAGE_SIZE` overrides the file value.
+    pub index_page_size: u32,
+    /// Serves `GET /feed.xml` (RSS 2.0) and `GET /atom.xml` (Atom)
+    /// with the published pages while the CMS is enabled (F10). Feeds
+    /// are public information — the `/p` index already lists the same
+    /// pages — so the default is `true`; set `false` to keep syndication
+    /// off. Absolute item URLs follow `cms.site_url` (or the request's
+    /// `Host` header, the same fallback rule the sitemap uses).
+    ///
+    /// `WALLERMAX_CMS__FEED` overrides the file value.
+    pub feed: bool,
 }
 
 impl Default for CmsConfig {
@@ -585,6 +611,8 @@ impl Default for CmsConfig {
             site_url: None,
             media_dir: String::from("media"),
             media_max_bytes: DEFAULT_MEDIA_MAX_BYTES,
+            index_page_size: DEFAULT_INDEX_PAGE_SIZE,
+            feed: true,
         }
     }
 }
@@ -1187,6 +1215,14 @@ impl AppConfig {
                 MIN_MEDIA_MAX_BYTES, MAX_MEDIA_MAX_BYTES, self.cms.media_max_bytes
             )));
         }
+        // Checked while the CMS is off too, like the keys above it: a
+        // typo'd page size is a mistake regardless of the switch (F10).
+        if !(MIN_INDEX_PAGE_SIZE..=MAX_INDEX_PAGE_SIZE).contains(&self.cms.index_page_size) {
+            return Err(ConfigError::Message(format!(
+                "`cms.index_page_size` must be between {} and {} (got {})",
+                MIN_INDEX_PAGE_SIZE, MAX_INDEX_PAGE_SIZE, self.cms.index_page_size
+            )));
+        }
         if !self.cms.enabled {
             return Ok(());
         }
@@ -1618,6 +1654,21 @@ mod tests {
         config.security_headers.x_frame_options = String::from("bad\nvalue");
 
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn cms_index_page_size_is_range_checked() {
+        let mut config = AppConfig::default();
+        config.cms.index_page_size = 0;
+        assert!(config.validate().is_err(), "zero pages rejected");
+
+        let mut config = AppConfig::default();
+        config.cms.index_page_size = 101;
+        assert!(config.validate().is_err(), "101 rejected");
+
+        let mut config = AppConfig::default();
+        config.cms.index_page_size = 100;
+        config.validate().expect("the inclusive upper edge is fine");
     }
 
     #[test]

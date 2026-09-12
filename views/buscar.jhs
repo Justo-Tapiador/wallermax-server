@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Buscar — wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+    <div class="panel-barra">
+      <h1>Buscar</h1>
+      <a class="btn btn-fantasma" href="/p">Todas las páginas</a>
+    </div>
+
+    <section class="tarjeta">
+      <form class="buscador" method="get" action="/buscar" role="search">
+        <input type="search" name="q" value="<?= busqueda ?>" maxlength="200"
+               placeholder="Palabras a buscar en título y contenido…" aria-label="Buscar en las páginas">
+        <button class="btn btn-primario" type="submit">Buscar</button>
+      </form>
+
+<?jhs if (busqueda && resultados.length) { ?>
+      <p class="ayuda"><?= total_resultados ?> resultado(s) de «<?= busqueda ?>»</p>
+      <ul class="lista resultados">
+<?jhs resultados.forEach(function (resultado) { ?>
+        <li class="resultado">
+          <div class="principal">
+            <a href="/p/<?= resultado.slug ?>"><?= resultado.title ?></a>
+            <p class="fragmento"><?jhs resultado.fragmento.forEach(function (segmento) { ?><?jhs if (segmento.hit) { ?><mark><?= segmento.texto ?></mark><?jhs } else { ?><?= segmento.texto ?><?jhs } ?><?jhs }); ?></p>
+            <div class="secundario">/p/<?= resultado.slug ?> · actualizada <?= resultado.updated_at_h ?></div>
+          </div>
+        </li>
+<?jhs }); ?>
+      </ul>
+<?jhs include("partials/paginacion") ?>
+<?jhs } else if (busqueda) { ?>
+      <p class="vacio">No hay resultados para «<?= busqueda ?>».
+         Prueba con otras palabras o revisa la lista completa.</p>
+<?jhs } else { ?>
+      <p class="vacio">Escribe lo que buscas y pulsa «Buscar».
+         El índice cubre el título y el contenido de todas las
+         páginas publicadas.</p>
+<?jhs } ?>
+    </section>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

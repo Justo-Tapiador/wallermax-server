@@ -347,7 +347,7 @@ async fn the_home_lists_published_pages_for_everyone() {
 }
 
 #[tokio::test]
-async fn the_public_pages_index_auto_routes() {
+async fn the_public_pages_index_lists_published_pages() {
     let (config, _db) = cms_config();
     let server = TestServer::start_full(config).await;
     register_admin(&server, "root-admin", "sup3r-secret!").await;

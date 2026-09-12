@@ -473,6 +473,24 @@ sitemap = true
 #
 # media_max_bytes = 524288
 
+# ── Findability (F10) ──────────────────────────────────────────
+# GET /buscar searches the published pages (SQLite FTS5 over title
+# and body), GET /p and the search results paginate with this many
+# rows, and GET /feed.xml (RSS 2.0) + GET /atom.xml syndicate the
+# newest published pages. The admin page filter (/admin/pages?q=)
+# searches drafts too. Full documentation: README-CMS.md.
+# Override with WALLERMAX_CMS__INDEX_PAGE_SIZE.
+#
+# index_page_size = 10
+
+# The feeds' master switch. Feeds are public information (the /p index
+# already lists the same pages), so the default is true; set false to
+# answer 404 at /feed.xml and /atom.xml. Item links follow site_url
+# above (or the request's Host header). Override with
+# WALLERMAX_CMS__FEED.
+#
+# feed = true
+
 [metrics]
 # Prometheus exposition endpoint: scrapes return every collected metric
 # in the text exposition format. Unauthenticated by design — restrict at

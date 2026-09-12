@@ -55,6 +55,45 @@ pub(crate) fn iso_date(seconds: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
+/// Formats unix seconds as an RFC 3339 UTC datetime (F10) — the
+/// `<updated>` shape Atom requires. Same civil-date source as
+/// [`iso_date`], down to the second.
+pub(crate) fn iso_datetime(seconds: i64) -> String {
+    let days = seconds.div_euclid(86_400);
+    let time_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        time_of_day / 3_600,
+        (time_of_day % 3_600) / 60,
+        time_of_day % 60
+    )
+}
+
+/// Formats unix seconds as an RFC 822/1123 date (F10) — the `<pubDate>`
+/// shape RSS 2.0 requires, always UTC (`+0000`). 1970-01-01 was a
+/// Thursday, which anchors the weekday arithmetic.
+pub(crate) fn rfc2822_date(seconds: i64) -> String {
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    let days = seconds.div_euclid(86_400);
+    let time_of_day = seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let weekday = WEEKDAYS[((days + 4).rem_euclid(7)) as usize];
+    format!(
+        "{}, {:02} {} {year:04} {:02}:{:02}:{:02} +0000",
+        weekday,
+        day,
+        MONTHS[(month - 1) as usize],
+        time_of_day / 3_600,
+        (time_of_day % 3_600) / 60,
+        time_of_day % 60
+    )
+}
+
 /// Converts a count of days since 1970-01-01 into a civil date
 /// (Howard Hinnant's algorithm).
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
@@ -133,5 +172,33 @@ mod tests {
         assert_eq!(iso_date(1_788_739_200), "2026-09-07");
         assert_eq!(iso_date(1_788_739_199), "2026-09-06");
         assert_eq!(iso_date(951_782_400), "2000-02-29");
+    }
+
+    #[test]
+    fn iso_datetime_carries_the_rfc3339_shape() {
+        // The epoch, verbatim.
+        assert_eq!(iso_datetime(0), "1970-01-01T00:00:00Z");
+        // One second past midnight on a leap day.
+        assert_eq!(iso_datetime(951_782_401), "2000-02-29T00:00:01Z");
+        // 2026-09-12 15:15:38 UTC (the F10 probe timestamp).
+        assert_eq!(iso_datetime(1_789_226_138), "2026-09-12T15:15:38Z");
+    }
+
+    #[test]
+    fn rfc2822_dates_carry_the_weekday_and_utc_offset() {
+        // 1970-01-01 was a Thursday — the formula's anchor.
+        assert_eq!(rfc2822_date(0), "Thu, 01 Jan 1970 00:00:00 +0000");
+        // Leap day, one second in.
+        assert_eq!(rfc2822_date(951_782_401), "Tue, 29 Feb 2000 00:00:01 +0000");
+        // 2026-09-12 15:15:38 UTC is a Saturday (the probe output).
+        assert_eq!(
+            rfc2822_date(1_789_226_138),
+            "Sat, 12 Sep 2026 15:15:38 +0000"
+        );
+        // Year-end rollover: 2024-12-31 23:59:59 is a Tuesday.
+        assert_eq!(
+            rfc2822_date(1_735_689_599),
+            "Tue, 31 Dec 2024 23:59:59 +0000"
+        );
     }
 }

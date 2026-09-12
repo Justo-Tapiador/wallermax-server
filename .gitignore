@@ -19,3 +19,7 @@ wallermax.local.toml
 /certs
 
 target/
+
+# Media library uploads produced by local runs and test batteries
+# (F9/F10: [cms] media_dir, default "media/" next to the binary)
+/media

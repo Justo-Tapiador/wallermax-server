@@ -1,3 +1,10 @@
+<?jhs
+  // Índice de páginas publicadas (F10): `/p` es ahora una ruta real
+  // que entrega una ventana del listado (`paginas`) más la
+  // `paginacion`. El fallback al global `pages` cubre el CMS apagado
+  // (el auto-ruta vuelve a servir esta vista y solo pasa el global).
+  var lista = (typeof paginas !== "undefined" && paginas) ? paginas : (pages || []);
+?>
 <!DOCTYPE html>
 <html lang="es">
 <head>
@@ -18,9 +25,9 @@
     </div>
 
     <section class="tarjeta">
-<?jhs if (pages && pages.length) { ?>
+<?jhs if (lista && lista.length) { ?>
       <ul class="lista">
-<?jhs pages.forEach(function (pagina) { ?>
+<?jhs lista.forEach(function (pagina) { ?>
         <li>
           <div class="principal">
             <a href="/p/<?= pagina.slug ?>"><?= pagina.title ?></a>
@@ -29,6 +36,7 @@
         </li>
 <?jhs }); ?>
       </ul>
+<?jhs include("partials/paginacion") ?>
 <?jhs } else { ?>
       <p class="vacio">Todavía no hay páginas publicadas.
          Los editores pueden <a href="/admin/pages/new">crear la primera</a>.</p>

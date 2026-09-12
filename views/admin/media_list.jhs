@@ -64,12 +64,14 @@
         </div>
 <?jhs }); ?>
       </div>
+<?jhs include("partials/paginacion") ?>
 <?jhs } else { ?>
       <p class="vacio">La biblioteca está vacía: sube la primera imagen con el
          formulario de arriba.</p>
 <?jhs } ?>
-      <p class="ayuda">Se muestran los últimos <?= media_items ? media_items.length : 0 ?>
-         archivos. Cada subida recibe una URL definitiva e inmutable
+      <p class="ayuda">La rejilla muestra la página más reciente de la biblioteca
+         (<?= paginacion ? paginacion.total_items : 0 ?> archivos en total, 24 por página).
+         Cada subida recibe una URL definitiva e inmutable
          (<code>/media/&lt;id&gt;/&lt;nombre&gt;</code>): la página de detalle trae los
          fragmentos listos para copiar.</p>
     </section>

@@ -1,0 +1,20 @@
+<?jhs
+  // Paginación compartida (F10). Global: `paginacion` — { pagina,
+  // total_paginas, total_items, anterior, siguiente, base }, con
+  // anterior/siguiente a null en los bordes. El guard con typeof
+  // cubre las vistas que pueden renderizarse por el auto-ruta sin
+  // haber pasado por una ruta con paginación.
+  var hay = typeof paginacion !== "undefined" && paginacion &&
+             paginacion.total_paginas > 1;
+?>
+<?jhs if (hay) { ?>
+<nav class="paginacion" aria-label="Paginación de resultados">
+<?jhs if (paginacion.anterior) { ?>
+  <a class="btn btn-fantasma" href="<?= paginacion.anterior ?>">&#8592; Anterior</a>
+<?jhs } ?>
+  <span class="paginacion-info">Página <?= paginacion.pagina ?> de <?= paginacion.total_paginas ?></span>
+<?jhs if (paginacion.siguiente) { ?>
+  <a class="btn btn-fantasma" href="<?= paginacion.siguiente ?>">Siguiente &#8594;</a>
+<?jhs } ?>
+</nav>
+<?jhs } ?>

@@ -88,8 +88,9 @@ use crate::error::AppError;
 use crate::extractors::AuthUser;
 use crate::middleware::request_id::RequestId;
 use crate::middleware::templates::{base_data, redirect_response, render_response};
+use crate::routes::search::fragment_segments;
 use crate::state::{AppState, CmsContext};
-use crate::util::{format_timestamp, iso_date, read_form};
+use crate::util::{format_timestamp, iso_date, iso_datetime, read_form, rfc2822_date, unix_now};
 
 /// Maximum listed pages / users in the admin panels.
 const MAX_LISTED: i64 = 200;
@@ -125,6 +126,11 @@ const MAX_POSITION: i64 = 99_999;
 /// How many pages the sitemap lists (F7) — the protocol's own advised
 /// per-file ceiling.
 const SITEMAP_LIMIT: i64 = 50_000;
+
+/// How many items `/feed.xml` and `/atom.xml` carry at most (F10). A
+/// feed is a window over the site, not an archive: readers follow the
+/// site for the rest.
+const FEED_MAX_ITEMS: i64 = 20;
 
 // ─── Browser-friendly guards ─────────────────────────────────────────
 
@@ -295,6 +301,13 @@ impl PageParts {
                 .get::<RequestId>()
                 .map(|id| id.0.clone()),
         }
+    }
+
+    /// The request URI — crate-visible so the F10 listing routes
+    /// outside this module (`/admin/media`, `/buscar`) can read their
+    /// `?q=`/`?page=` parameters the same way the handlers here do.
+    pub(crate) fn uri(&self) -> &Uri {
+        &self.uri
     }
 }
 
@@ -759,7 +772,8 @@ fn parse_position(raw: Option<&str>) -> Result<Option<i64>, &'static str> {
     }
 }
 
-/// `GET /admin/pages`: every page, drafts included.
+/// `GET /admin/pages`: every page, drafts included — as the tree, or
+/// as a flat ranked result list while `?q=` filters (F10).
 async fn list_pages(
     State(state): State<AppState>,
     _editor: CmsEditor,
@@ -769,6 +783,46 @@ async fn list_pages(
     let Ok(cms) = cms_context(&state) else {
         return AppError::internal("the CMS is not initialized").into_response();
     };
+
+    // F10: with a filter the tree flattens into ranked hits — the
+    // editor's way of finding content (and references: a media URL
+    // inside a body is just words to FTS5). Without it, the full
+    // hierarchy tree as always.
+    let (filter, _) = listing_query(&parts.uri);
+    if !filter.is_empty() {
+        let hits = match cms.pages.search(&filter, true, MAX_LISTED, 0).await {
+            Ok(hits) => hits,
+            Err(error) => {
+                tracing::error!(%error, "page search failed");
+                return AppError::internal("storage failure").into_response();
+            }
+        };
+        let admin_resultados: Vec<Value> = hits
+            .iter()
+            .map(|hit| {
+                json!({
+                    "id": hit.id,
+                    "slug": hit.slug,
+                    "title": hit.title,
+                    "is_published": hit.is_published,
+                    "updated_at_h": format_timestamp(hit.updated_at),
+                    "fragmento": fragment_segments(&hit.fragment),
+                })
+            })
+            .collect();
+        return render_view(
+            &state,
+            &parts,
+            "admin/pages.jhs",
+            vec![
+                ("admin_pages", Value::Array(Vec::new())),
+                ("admin_resultados", Value::Array(admin_resultados)),
+                ("filtro", Value::String(filter)),
+            ],
+            StatusCode::OK,
+        )
+        .await;
+    }
 
     let pages = match cms.pages.list(true, MAX_LISTED).await {
         Ok(pages) => pages,
@@ -794,7 +848,11 @@ async fn list_pages(
         &state,
         &parts,
         "admin/pages.jhs",
-        vec![("admin_pages", Value::Array(admin_pages))],
+        vec![
+            ("admin_pages", Value::Array(admin_pages)),
+            ("admin_resultados", Value::Null),
+            ("filtro", Value::String(String::new())),
+        ],
         StatusCode::OK,
     )
     .await
@@ -2325,6 +2383,287 @@ async fn load_menu_item(
     }
 }
 
+// ─── Public: `GET /p` and the listings' shared scaffolding (F10) ────
+
+/// The `q` and `page` query parameters of the listing routes (F10):
+/// `q` arrives raw but trimmed and capped (the search box caps at the
+/// browser too — this is the server-side backstop), and `page` is
+/// forgiving: anything that is not an integer falls back to 1, and the
+/// callers clamp the range.
+pub(crate) fn listing_query(uri: &Uri) -> (String, i64) {
+    let mut query = String::new();
+    let mut page: i64 = 1;
+    if let Some(pairs) = uri.query() {
+        for (key, value) in url::form_urlencoded::parse(pairs.as_bytes()) {
+            match key.as_ref() {
+                "q" => query = value.as_ref().trim().chars().take(200).collect(),
+                "page" => {
+                    if let Ok(parsed) = value.parse::<i64>() {
+                        page = parsed;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (query, page)
+}
+
+/// Ceiling page count without `div_ceil` (the signed flavor is still
+/// unstable): exact for any `total >= 0` with `page_size >= 1`, and
+/// the callers add the `.max(1)` edge for empty listings.
+pub(crate) fn pages_for(total: i64, page_size: i64) -> i64 {
+    (total / page_size) + i64::from(total % page_size != 0)
+}
+
+/// Clamps a requested page number into `1..=total_pages` (an empty
+/// listing keeps page 1). Out-of-range numbers are not errors: the
+/// visitor just lands on the nearest real page.
+pub(crate) fn clamp_page(requested: i64, total_pages: i64) -> i64 {
+    requested.clamp(1, total_pages.max(1))
+}
+
+/// `?page=N` link over a base that may already carry its own query
+/// (`/buscar?q=hola`): the separator picks itself.
+fn page_link(base: &str, page: i64) -> String {
+    let separator = if base.contains('?') { '&' } else { '?' };
+    format!("{base}{separator}page={page}")
+}
+
+/// The `paginacion` global every paginated view renders (F10): the
+/// current page, the totals, and ready-made prev/next links (`null` at
+/// the edges) over `base`. One shape, three listings — `/p`, `/buscar`
+/// and the admin media grid all include the same partial.
+pub(crate) fn pagination_value(page: i64, total_items: i64, page_size: i64, base: &str) -> Value {
+    let total_pages = pages_for(total_items, page_size).max(1);
+    // `Option<String>` serializes to `null` at the edges — the view
+    // simply checks truthiness.
+    let anterior = (page > 1).then(|| page_link(base, page - 1));
+    let siguiente = (page < total_pages).then(|| page_link(base, page + 1));
+    json!({
+        "pagina": page,
+        "total_paginas": total_pages,
+        "total_items": total_items,
+        "anterior": anterior,
+        "siguiente": siguiente,
+        "base": base,
+    })
+}
+
+/// `GET /p` — the published-pages index, one page at a time (F10).
+///
+/// Pre-F10 `/p` was auto-routed to `views/p.jhs` rendering the `pages`
+/// global; the explicit route keeps the very same view but feeds it
+/// one window of the listing plus `paginacion`. The `pages` global
+/// stays in [`crate::middleware::templates::base_data`] for the other
+/// templates, and the view falls back to it while the CMS is off (the
+/// auto-route then serves `/p` again with an empty global).
+async fn page_index(State(state): State<AppState>, request: Request) -> Response {
+    let parts = PageParts::of(&request);
+    let Ok(cms) = cms_context(&state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+    let page_size = i64::from(state.config().cms.index_page_size);
+
+    let total = match cms.pages.count_published().await {
+        Ok(total) => total,
+        Err(error) => {
+            tracing::error!(%error, "page count failed");
+            return AppError::internal("storage failure").into_response();
+        }
+    };
+    let (_, requested) = listing_query(&parts.uri);
+    let page = clamp_page(requested, pages_for(total, page_size).max(1));
+
+    let pages = match cms
+        .pages
+        .list_paged(false, page_size, (page - 1) * page_size)
+        .await
+    {
+        Ok(pages) => pages,
+        Err(error) => {
+            tracing::error!(%error, "page listing failed");
+            return AppError::internal("storage failure").into_response();
+        }
+    };
+
+    let paginas: Vec<Value> = pages
+        .iter()
+        .map(|pagina| {
+            json!({
+                "slug": pagina.slug,
+                "title": pagina.title,
+                "updated_at_h": format_timestamp(pagina.updated_at),
+            })
+        })
+        .collect();
+
+    render_view(
+        &state,
+        &parts,
+        "p.jhs",
+        vec![
+            ("paginas", Value::Array(paginas)),
+            ("paginacion", pagination_value(page, total, page_size, "/p")),
+        ],
+        StatusCode::OK,
+    )
+    .await
+}
+
+// ─── Public: `GET /feed.xml` and `GET /atom.xml` (F10) ──────────────
+
+/// The absolute origin the sitemap and the feeds (F10) build their
+/// URLs from: `[cms] site_url` when configured (validated absolute
+/// http(s) at load), the request's `Host` header with `http://`
+/// otherwise — correct for plain-HTTP setups, wrong behind TLS or a
+/// reverse proxy (the docs say so on the key).
+fn absolute_origin(state: &AppState, request: &Request) -> String {
+    state.config().cms.site_url.clone().unwrap_or_else(|| {
+        let host = request
+            .headers()
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("127.0.0.1");
+        format!("http://{host}")
+    })
+}
+
+/// `GET /feed.xml`: the published pages as RSS 2.0 (F10), newest
+/// first, capped at [`FEED_MAX_ITEMS`]. Item descriptions come from
+/// each page's SEO `meta_description` — set when absent is the
+/// editor's call, the element is simply omitted.
+async fn rss_feed(State(state): State<AppState>, request: Request) -> Response {
+    if !state.config().cms.feed {
+        return AppError::not_found("GET", "/feed.xml").into_response();
+    }
+    let Ok(cms) = cms_context(&state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+    let entries = match cms.pages.feed_entries(FEED_MAX_ITEMS).await {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::error!(%error, "feed page listing failed");
+            return AppError::internal("storage failure").into_response();
+        }
+    };
+
+    let base = absolute_origin(&state, &request);
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <rss version=\"2.0\" xmlns:atom=\"http://www.w3.org/2005/Atom\">\n  <channel>\n",
+    );
+    xml.push_str(&format!(
+        "    <title>{}</title>\n    <link>{}/p</link>\n    \
+         <description>Páginas publicadas del CMS de wallermax</description>\n    \
+         <atom:link rel=\"self\" href=\"{}/feed.xml\" \
+         type=\"application/rss+xml\"/>\n    <language>es</language>\n",
+        xml_escape("Páginas — wallermax"),
+        xml_escape(&base),
+        xml_escape(&base)
+    ));
+    for entry in entries {
+        let link = format!("{base}/p/{}", entry.slug);
+        xml.push_str(&format!(
+            "    <item>\n      <title>{}</title>\n      <link>{}</link>\n      \
+             <guid isPermaLink=\"true\">{}</guid>\n      <pubDate>{}</pubDate>\n",
+            xml_escape(&entry.title),
+            xml_escape(&link),
+            xml_escape(&link),
+            rfc2822_date(entry.updated_at)
+        ));
+        if let Some(description) = entry
+            .meta_description
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            xml.push_str(&format!(
+                "      <description>{}</description>\n",
+                xml_escape(description)
+            ));
+        }
+        xml.push_str("    </item>\n");
+    }
+    xml.push_str("  </channel>\n</rss>\n");
+
+    xml_response(xml, "application/rss+xml; charset=utf-8")
+}
+
+/// `GET /atom.xml`: the same entries as Atom 1.0 (F10) — RFC 3339
+/// timestamps, one `<entry>` per published page, `<summary>` only for
+/// pages with an SEO description.
+async fn atom_feed(State(state): State<AppState>, request: Request) -> Response {
+    if !state.config().cms.feed {
+        return AppError::not_found("GET", "/atom.xml").into_response();
+    }
+    let Ok(cms) = cms_context(&state) else {
+        return AppError::internal("the CMS is not initialized").into_response();
+    };
+    let entries = match cms.pages.feed_entries(FEED_MAX_ITEMS).await {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::error!(%error, "feed page listing failed");
+            return AppError::internal("storage failure").into_response();
+        }
+    };
+
+    let base = absolute_origin(&state, &request);
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <feed xmlns=\"http://www.w3.org/2005/Atom\">\n",
+    );
+    xml.push_str(&format!(
+        "  <title>{}</title>\n  <id>{}/atom.xml</id>\n  \
+         <link rel=\"alternate\" type=\"text/html\" href=\"{}/p\"/>\n  \
+         <link rel=\"self\" href=\"{}/atom.xml\"/>\n  <updated>{}</updated>\n",
+        xml_escape("Páginas — wallermax"),
+        xml_escape(&base),
+        xml_escape(&base),
+        xml_escape(&base),
+        iso_datetime(
+            entries
+                .first()
+                .map_or_else(unix_now, |entry| entry.updated_at)
+        )
+    ));
+    for entry in entries {
+        let link = format!("{base}/p/{}", entry.slug);
+        xml.push_str(&format!(
+            "  <entry>\n    <title>{}</title>\n    <link rel=\"alternate\" \
+             href=\"{}\"/>\n    <id>{}</id>\n    <updated>{}</updated>\n",
+            xml_escape(&entry.title),
+            xml_escape(&link),
+            xml_escape(&link),
+            iso_datetime(entry.updated_at)
+        ));
+        if let Some(summary) = entry
+            .meta_description
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            xml.push_str(&format!("    <summary>{}</summary>\n", xml_escape(summary)));
+        }
+        xml.push_str("  </entry>\n");
+    }
+    xml.push_str("</feed>\n");
+
+    xml_response(xml, "application/atom+xml; charset=utf-8")
+}
+
+/// A finished feed document: its own content type, the same public
+/// one-hour cache the sitemap gets.
+fn xml_response(xml: String, content_type: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "public, max-age=3600")
+        .body(axum::body::Body::from(xml))
+        .unwrap_or_else(|error| {
+            tracing::error!(%error, "failed to build the feed response");
+            AppError::internal("failed to build the feed response".to_owned()).into_response()
+        })
+}
+
 // ─── Public: `GET /sitemap.xml` (F7) ────────────────────────────────
 
 /// `GET /sitemap.xml`: the published CMS pages (and the canonical
@@ -2352,14 +2691,7 @@ async fn sitemap(State(state): State<AppState>, request: Request) -> Response {
         }
     };
 
-    let base = state.config().cms.site_url.clone().unwrap_or_else(|| {
-        let host = request
-            .headers()
-            .get(header::HOST)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("127.0.0.1");
-        format!("http://{host}")
-    });
+    let base = absolute_origin(&state, &request);
 
     let mut xml =
         String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
@@ -2931,8 +3263,11 @@ fn password_error(redirect: &str, code: &str) -> Response {
 /// Route fragment for this module (merged while the CMS is enabled).
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/p", get(page_index))
         .route("/p/{slug}", get(public_page))
         .route("/sitemap.xml", get(sitemap))
+        .route("/feed.xml", get(rss_feed))
+        .route("/atom.xml", get(atom_feed))
         .route("/perfil/password", post(change_password))
         .route("/admin", get(dashboard))
         .route("/admin/pages", get(list_pages).post(create_page))

@@ -729,6 +729,50 @@ pub struct PageSummary {
     pub position: i64,
 }
 
+/// One full-text search result (F10): the page fields the results
+/// pages need plus a body snippet, with the hits wrapped in the `⟦`/
+/// `⟧` markers the handlers split into escaped `<mark>` segments —
+/// the fragment is raw SQL output, never template-bound as-is.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SearchHit {
+    pub id: i64,
+    pub slug: String,
+    pub title: String,
+    pub is_published: bool,
+    pub updated_at: i64,
+    /// Body snippet around the hits, markers included.
+    pub fragment: String,
+}
+
+/// One published page as a feed entry (F10): the newest-first
+/// projection `/feed.xml` and `/atom.xml` render, with the SEO
+/// description riders the `<description>`/`<summary>` elements use
+/// when set.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct FeedEntry {
+    pub id: i64,
+    pub slug: String,
+    pub title: String,
+    pub updated_at: i64,
+    /// Per-page SEO description; feeds omit the element when unset.
+    pub meta_description: Option<String>,
+}
+
+/// Sanitizes a visitor query into an FTS5 `MATCH` expression (F10):
+/// every whitespace token becomes a quoted phrase, so FTS5's own
+/// operators (`OR`, `NOT`, `*`, column filters…) typed by a visitor can
+/// only act as inert literals, and embedded quotes are stripped
+/// rather than escaped. Returns `None` when nothing quotable remains —
+/// the caller skips the search instead of matching everything.
+pub(crate) fn fts_match_query(terms: &str) -> Option<String> {
+    let phrases: Vec<String> = terms
+        .split_whitespace()
+        .map(|token| format!("\"{}\"", token.replace('"', "")))
+        .filter(|phrase| phrase != "\"\"")
+        .collect();
+    (!phrases.is_empty()).then(|| phrases.join(" "))
+}
+
 impl PageRecord {
     /// The listing projection of the record.
     pub fn summary(&self) -> PageSummary {
@@ -809,6 +853,39 @@ pub trait PageRepository: Send + Sync + 'static {
         include_drafts: bool,
         limit: i64,
     ) -> Result<Vec<PageSummary>, RepositoryError>;
+
+    /// The same listing, one window of it (F10): `limit` rows from
+    /// `offset`, newest first — the paginated `GET /p` index.
+    async fn list_paged(
+        &self,
+        include_drafts: bool,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<PageSummary>, RepositoryError>;
+
+    /// Full-text search over title + content (F10). `terms` is the raw
+    /// visitor query — the implementation sanitizes it into
+    /// `MATCH`-safe quoted phrases ([`fts_match_query`]) before it
+    /// reaches FTS5, and results are ranked by `bm25` with a snippet
+    /// fragment of the body (hits wrapped in `⟦ ⟧` markers). Drafts
+    /// ride along only while `include_drafts` (the admin filter); the
+    /// public search page always passes `false`.
+    async fn search(
+        &self,
+        terms: &str,
+        include_drafts: bool,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<SearchHit>, RepositoryError>;
+
+    /// How many rows [`PageRepository::search`] can return — the count
+    /// the results pagination needs.
+    async fn search_count(&self, terms: &str, include_drafts: bool)
+        -> Result<i64, RepositoryError>;
+
+    /// The published pages as feed entries (F10): newest first, up to
+    /// `limit`, with the SEO description riders.
+    async fn feed_entries(&self, limit: i64) -> Result<Vec<FeedEntry>, RepositoryError>;
 
     /// Applies `update` to the page with `id`. Returns `None` when the
     /// page does not exist, and fails with
@@ -963,6 +1040,93 @@ impl PageRepository for SqlitePageRepository {
             .fetch_all(&self.pool)
             .await
             .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn list_paged(
+        &self,
+        include_drafts: bool,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<PageSummary>, RepositoryError> {
+        let sql = if include_drafts {
+            format!(
+                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages \
+                 ORDER BY updated_at DESC, id DESC LIMIT ?1 OFFSET ?2"
+            )
+        } else {
+            format!(
+                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE is_published = 1 \
+                 ORDER BY updated_at DESC, id DESC LIMIT ?1 OFFSET ?2"
+            )
+        };
+
+        sqlx::query_as(&sql)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn search(
+        &self,
+        terms: &str,
+        include_drafts: bool,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<SearchHit>, RepositoryError> {
+        // An unsanitizable query is not an error — it is no query.
+        let Some(match_query) = fts_match_query(terms) else {
+            return Ok(Vec::new());
+        };
+        // `snippet` reads column 1 (`content`; column 0 is `title`) and
+        // wraps the hits in the markers the handlers split on. The
+        // draft gate lives in the JOIN's WHERE, decided by the caller.
+        sqlx::query_as(
+            "SELECT p.id AS id, p.slug AS slug, p.title AS title, \
+             p.is_published AS is_published, p.updated_at AS updated_at, \
+             snippet(pages_fts, 1, '⟦', '⟧', '…', 12) AS fragment \
+             FROM pages_fts JOIN pages p ON p.id = pages_fts.rowid \
+             WHERE pages_fts MATCH ?1 AND (p.is_published = 1 OR ?2) \
+             ORDER BY bm25(pages_fts), p.id LIMIT ?3 OFFSET ?4",
+        )
+        .bind(match_query)
+        .bind(include_drafts)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn search_count(
+        &self,
+        terms: &str,
+        include_drafts: bool,
+    ) -> Result<i64, RepositoryError> {
+        let Some(match_query) = fts_match_query(terms) else {
+            return Ok(0);
+        };
+        sqlx::query_scalar(
+            "SELECT count(*) FROM pages_fts JOIN pages p ON p.id = pages_fts.rowid \
+             WHERE pages_fts MATCH ?1 AND (p.is_published = 1 OR ?2)",
+        )
+        .bind(match_query)
+        .bind(include_drafts)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn feed_entries(&self, limit: i64) -> Result<Vec<FeedEntry>, RepositoryError> {
+        sqlx::query_as(
+            "SELECT id, slug, title, updated_at, meta_description FROM pages \
+             WHERE is_published = 1 ORDER BY updated_at DESC, id DESC LIMIT ?1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
     }
 
     async fn update(
@@ -1624,8 +1788,17 @@ pub trait MediaRepository: Send + Sync + 'static {
     /// Looks up a media row by id (the serving and detail routes).
     async fn find_by_id(&self, id: i64) -> Result<Option<MediaRecord>, RepositoryError>;
 
-    /// The newest rows, up to `limit` (the admin listing).
-    async fn list(&self, limit: i64) -> Result<Vec<MediaRecord>, RepositoryError>;
+    /// The listing window (F10): `limit` newest rows from `offset` —
+    /// the paginated admin grid. `count` reports the total.
+    async fn list_paged(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<MediaRecord>, RepositoryError>;
+
+    /// How many media rows exist in total (the pagination's other
+    /// half).
+    async fn count(&self) -> Result<i64, RepositoryError>;
 
     /// Replaces the alt text. Returns the updated row, or `None` when
     /// the id does not exist.
@@ -1701,14 +1874,26 @@ impl MediaRepository for SqliteMediaRepository {
             .map_err(RepositoryError::from_sqlx)
     }
 
-    async fn list(&self, limit: i64) -> Result<Vec<MediaRecord>, RepositoryError> {
+    async fn list_paged(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<MediaRecord>, RepositoryError> {
         sqlx::query_as(&format!(
-            "SELECT {MEDIA_COLUMNS} FROM media ORDER BY id DESC LIMIT ?1"
+            "SELECT {MEDIA_COLUMNS} FROM media ORDER BY id DESC LIMIT ?1 OFFSET ?2"
         ))
         .bind(limit)
+        .bind(offset)
         .fetch_all(&self.pool)
         .await
         .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn count(&self) -> Result<i64, RepositoryError> {
+        sqlx::query_scalar("SELECT count(*) FROM media")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)
     }
 
     async fn update_alt(
@@ -2209,5 +2394,40 @@ mod tests {
             .await
             .expect("query ok")
             .is_some());
+    }
+
+    #[test]
+    fn fts_match_query_quotes_every_token_inertly() {
+        // Plain words become quoted phrases joined by implicit AND.
+        assert_eq!(
+            fts_match_query("hola mundo").as_deref(),
+            Some("\"hola\" \"mundo\"")
+        );
+        // FTS5 operators can only act as literals inside the quotes.
+        assert_eq!(
+            fts_match_query("OR NOT *").as_deref(),
+            Some("\"OR\" \"NOT\" \"*\"")
+        );
+        assert_eq!(
+            fts_match_query("title:guia NEAR(x)").as_deref(),
+            Some("\"title:guia\" \"NEAR(x)\"")
+        );
+    }
+
+    #[test]
+    fn fts_match_query_strips_embedded_quotes() {
+        // An embedded quote is dropped, never escaped into the phrase —
+        // the phrase stays a phrase no matter what the visitor typed.
+        assert_eq!(
+            fts_match_query("el \"menu\" del sitio").as_deref(),
+            Some("\"el\" \"menu\" \"del\" \"sitio\"")
+        );
+    }
+
+    #[test]
+    fn fts_match_query_returns_none_when_nothing_quotable_remains() {
+        assert_eq!(fts_match_query(""), None);
+        assert_eq!(fts_match_query("   "), None);
+        assert_eq!(fts_match_query(" \" \" \"\""), None);
     }
 }

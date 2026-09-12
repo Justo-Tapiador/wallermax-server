@@ -381,28 +381,103 @@ syntax expects.
 Deleting removes the row and both files; the public URL then answers
 404, and any page still referencing it shows a hole. The detail page
 warns about exactly that before the button — finding *which* pages
-reference a file is search work (F10). The listing shows the latest
-200 items (full pagination is F10's business too).
+reference a file is one search away now: the admin filter
+(`GET /admin/pages?q=<the 32-hex stem>`) matches the URL inside page
+bodies (F10). The grid is paginated, 24 thumbnails per page.
+
+## Findability: search, pagination, feeds (F10)
+
+Content nobody can find is content that does not exist. F10 gives the
+published tree three discovery paths, all server-rendered, all
+JavaScript-free:
+
+| Route | Who | What |
+|---|---|---|
+| `GET /buscar?q=…` | public | The search page: ranked hits with highlighted snippets. |
+| `GET /p?page=N` | public | The pages index, one window at a time (`[cms] index_page_size` rows). |
+| `GET /feed.xml` | public | RSS 2.0 with the newest published pages. |
+| `GET /atom.xml` | public | The same entries as Atom 1.0. |
+| `GET /admin/pages?q=…` | editor/admin | The flat, ranked filter over every page, drafts included. |
+
+### Search: FTS5, with the visitor's words defanged
+
+The index is a SQLite FTS5 table over the pages' `title` and
+`content` — the **stored source**, not a rendered projection. That is
+deliberate: the admin filter's job includes finding *references* (a
+media URL inside a body, an include), which a rendered-text index
+would hide. A classic external-content table with insert/update/delete
+triggers keeps index and rows in lockstep, and a one-command
+`rebuild` in the migration makes every pre-F10 page searchable the
+moment it applies.
+
+The visitor's query never reaches `MATCH` as typed: the repository
+(`fts_match_query` in `src/db.rs`) quotes every whitespace token into
+an inert phrase, so FTS5's own operators (`OR`, `NOT`, `*`, column
+filters) can only act as literals, and embedded quotes are stripped
+rather than escaped. Operators are words here, not syntax.
+
+Ranking is `bm25`. Snippets come from SQL `snippet()` with hits
+wrapped in `⟦ ⟧` markers — the handler splits those into
+`{ texto, hit }` segments and the view prints each one through the
+auto-escaping `<?= ?>`, wrapping the hits in `<mark>`. No `raw()`, no
+pre-escaped HTML: a page body cannot reach a browser as markup
+through a search result, and a faked marker can at worst split a
+segment (cosmetic).
+
+The public search sees **published pages only** — drafts are the
+admin filter's business. An empty or quotes-only query renders the
+page with an invitation, never an error. The shared header carries
+the search form on every page (`action="/buscar"`, plain GET).
+
+### Paginated listings
+
+`GET /p` is a real route now (it was an auto-routed view): same
+`views/p.jhs`, but fed one window of the listing plus a `paginacion`
+block — current page, totals, prev/next links. Out-of-range and
+garbage `?page=` values clamp to the nearest real page instead of
+erroring. Search results paginate with the same block, carrying the
+query along in the links (`/buscar?q=…&page=2`), and the media grid
+follows at 24 thumbnails per page.
+
+One key sizes the public lists: `[cms] index_page_size` (default 10,
+validated 1–100). The admin grids size themselves — a panel is not a
+public listing.
+
+### The feeds
+
+`/feed.xml` (RSS 2.0) and `/atom.xml` (Atom 1.0) carry the newest
+**published** pages, 20 at most — a feed is a window over the site,
+not an archive. Item titles and absolute links follow
+`[cms] site_url` (or the request's `Host` header, the sitemap's exact
+fallback rule); dates are RFC 822 and RFC 3339 respectively, always
+UTC. Descriptions come from each page's SEO `meta_description` —
+unset simply omits the element. Both are public information like the
+`/p` index, so the switch defaults to on: `[cms] feed = false` turns
+them into 404s.
 
 ## Configuration
 
-Two keys from F7, two from F9 (all optional) — and **F8 adds zero
-keys**: the body mode is per-page state in the database, not server
-configuration, so the `wallermax.toml` boundary stayed untouched
-through it.
+Two keys from F7, two from F9, two from F10 (all optional) — and
+**F8 adds zero keys**: the body mode is per-page state in the
+database, not server configuration, so the `wallermax.toml` boundary
+stayed untouched through it.
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|
 | `cms.sitemap` | bool | `true` | Serve `GET /sitemap.xml` with the published pages. |
-| `cms.site_url` | string | unset | Absolute origin for the sitemap's `<loc>` URLs; without it the request's `Host` header is used with `http://`. |
+| `cms.site_url` | string | unset | Absolute origin for the sitemap's `<loc>` URLs (and the feeds' links); without it the request's `Host` header is used with `http://`. |
 | `cms.media_dir` | path | `"media"` | Directory the media library stores uploads in (created at startup; its own directory — never `public/`). |
 | `cms.media_max_bytes` | bytes | `524288` | Cap on one uploaded file; the upload is streamed and refused past the cap. |
+| `cms.index_page_size` | int | `10` | Rows per page of the public listings (`/p` and `/buscar`); validated 1–100 (F10). |
+| `cms.feed` | bool | `true` | Serve `GET /feed.xml` and `GET /atom.xml` with the published pages (F10). |
 
 Environment overrides: `WALLERMAX_CMS__SITEMAP`,
 `WALLERMAX_CMS__SITE_URL`, `WALLERMAX_CMS__MEDIA_DIR`,
-`WALLERMAX_CMS__MEDIA_MAX_BYTES`. The keys are validated while the CMS
-is off too — a typo'd `site_url` or an out-of-range `media_max_bytes`
-(1 KiB .. 64 MiB) is a startup error regardless of the switch.
+`WALLERMAX_CMS__MEDIA_MAX_BYTES`, `WALLERMAX_CMS__INDEX_PAGE_SIZE`,
+`WALLERMAX_CMS__FEED`. The keys are validated while the CMS
+is off too — a typo'd `site_url`, an out-of-range `media_max_bytes`
+(1 KiB .. 64 MiB) or an out-of-range `index_page_size` (1–100)
+is a startup error regardless of the switch.
 
 **The one interplay worth knowing** (F9): the default `512 KiB`
 `media_max_bytes` fits under the default 1 MiB
@@ -450,6 +525,18 @@ the keys are out of step.
   404. `Cache-Control: immutable` is safe by construction: every
   upload is a new id and a new name, so the bytes under a URL never
   change.
+- **Search input never becomes query syntax** (F10): the visitor's
+  words are quoted into inert FTS5 phrases before `MATCH`, so
+  operators, column filters and embedded quotes act as literals —
+  there is no `MATCH` injection surface at all.
+- **Snippets are escaped by construction** (F10): highlighting is a
+  list of text segments printed through `<?= ?>` with `<mark>`
+  wrapped by the template — never a pre-escaped HTML string, never
+  `raw()`, so page bodies cannot ride into the browser as markup.
+- **Feeds are built like the sitemap** (F10): every value crosses
+  `xml_escape`, only published rows are ever listed, and the origin
+  is the validated `site_url` or the Host header — no
+  request-controlled path or query reaches the XML.
 
 ## The CMS roadmap
 
@@ -463,8 +550,10 @@ the same discipline as the phases before it:
 - **F9 — the media library** (done): uploads with magic-byte
   validation, size caps, thumbnails, alt text — served from a dedicated
   directory, never writing into `public/` — this document.
-- **F10 — findability**: search over pages (SQLite FTS5), paginated
-  listings, RSS/Atom for dated content.
+- **F10 — findability** (done): search over pages (SQLite FTS5, the
+  visitor's words defanged into inert phrases), paginated listings
+  (`/p`, search results, the media grid) and RSS/Atom feeds — this
+  document.
 - **F11 — history**: page revisions with restore, scheduled
   publishing.
 

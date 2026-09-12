@@ -20,6 +20,7 @@ pub mod health;
 pub mod index;
 pub mod media;
 pub mod metrics;
+pub mod search;
 pub mod static_files;
 pub mod stats;
 
@@ -79,7 +80,10 @@ pub fn routes(
     }
 
     if cms_enabled {
-        router = router.merge(cms::routes()).merge(media::routes());
+        router = router
+            .merge(cms::routes())
+            .merge(media::routes())
+            .merge(search::routes());
     }
 
     if external_api_enabled {
