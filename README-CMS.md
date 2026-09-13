@@ -5,10 +5,12 @@ This is the companion deep-dive for the CMS feature line: the main
 front door of the repository stays short while the content features
 get the room they deserve.
 
-**F7** adds four corporate-site capabilities, **F8** the editor and
+**F7** adds four corporate-site capabilities, **F8** the editor,
 **F9** the media library — all of them **zero-JavaScript** (the CSP
 keeps blocking scripts and every new screen works through plain HTML
-forms):
+forms). Later phases (search, history, the F12 panel redesign and
+F13's English-everywhere pass) build on the same spine — see the
+[roadmap](#the-cms-roadmap).
 
 | Capability | One line |
 |---|---|
@@ -18,6 +20,7 @@ forms):
 | [Sitemap](#sitemap) | `GET /sitemap.xml` with every published page, automatically. |
 | [The editor (F8)](#the-editor-two-body-modes) | Markdown bodies with a server-side preview — and the `.jhs` mode kept as-is. |
 | [The media library (F9)](#the-media-library-f9) | Image uploads validated at the byte level, immutable-cached serving, alt text and copy-paste snippets. |
+| [English everywhere + the shared error page (F13)](#english-everywhere--the-shared-error-page-f13) | Content-negotiated HTML error pages, the self-healing 429, the anglicized public site and the English routes. |
 
 Planned next phases live in [the roadmap](#the-cms-roadmap) at the
 bottom.
@@ -393,7 +396,7 @@ JavaScript-free:
 
 | Route | Who | What |
 |---|---|---|
-| `GET /buscar?q=…` | public | The search page: ranked hits with highlighted snippets. |
+| `GET /search?q=…` | public | The search page: ranked hits with highlighted snippets. |
 | `GET /p?page=N` | public | The pages index, one window at a time (`[cms] index_page_size` rows). |
 | `GET /feed.xml` | public | RSS 2.0 with the newest published pages. |
 | `GET /atom.xml` | public | The same entries as Atom 1.0. |
@@ -427,7 +430,7 @@ segment (cosmetic).
 The public search sees **published pages only** — drafts are the
 admin filter's business. An empty or quotes-only query renders the
 page with an invitation, never an error. The shared header carries
-the search form on every page (`action="/buscar"`, plain GET).
+the search form on every page (`action="/search"`, plain GET).
 
 ### Paginated listings
 
@@ -436,7 +439,7 @@ the search form on every page (`action="/buscar"`, plain GET).
 block — current page, totals, prev/next links. Out-of-range and
 garbage `?page=` values clamp to the nearest real page instead of
 erroring. Search results paginate with the same block, carrying the
-query along in the links (`/buscar?q=…&page=2`), and the media grid
+query along in the links (`/search?q=…&page=2`), and the media grid
 follows at 24 thumbnails per page.
 
 One key sizes the public lists: `[cms] index_page_size` (default 10,
@@ -533,9 +536,9 @@ own **app shell**: a fixed sidebar (collapsing to a 72px icon rail on
 small screens), a sticky topbar with a real pages filter, cards,
 tables, status pills, a two-column editor layout and a media grid —
 `public/assets/admin.css`, a design system independent from the
-site's `wallermax.css`. The panel speaks English now; the public site
-stays Spanish (and untouched), including the shared error pages and
-the feeds.
+site's `wallermax.css`. The panel speaks English now — and F13 later
+carried that English voice over to the public site, the feeds and
+the shared error pages.
 
 The redesign is **zero new keys, zero JavaScript and one new route**:
 
@@ -574,9 +577,91 @@ The redesign is **zero new keys, zero JavaScript and one new route**:
   N." The state codes behind the pills are `published` / `scheduled`
   / `draft`.
 
-What deliberately did **not** change: the form field names, the
-routes, the `?ok=` flash codes, the role gates and the profile/login
-pages — every POST flow from v0.15.0 keeps working unchanged.
+What deliberately did **not** change in F12: the form field names,
+the routes, the `?ok=` flash codes, the role gates and the profile/login
+pages — every POST flow from v0.15.0 keeps working unchanged. (F13
+later anglicized the public surface and the flash codes; the forms
+themselves kept their field names.)
+
+## English everywhere + the shared error page (F13)
+
+F12 gave the panel an English voice; F13 finishes the job for every
+other surface a visitor can see, and — more importantly — it stops
+the server from answering **people** with **JSON**.
+
+### The shared error page: content negotiation
+
+Until F13, every 4xx/5xx was the JSON envelope — perfect for API
+clients, alien for a browser. The trigger was mundane: a fast review
+of the panel can trip the per-IP burst limiter, and the theme
+toggle's 303 had already pinned the cookie when the 429 JSON
+appeared (which is why a manual refresh "fixed" the panel).
+
+The fix is a new middleware, `src/middleware/error_pages.rs`, second
+in the pipeline (inside the security-headers layer, outside CORS,
+the request id and the limiter, so it sees every envelope the server
+produces). On a response that is 4xx/5xx **and** carries the JSON
+error envelope **and** was asked for with an `Accept` that prefers
+`text/html`, it swaps the body for the shared English error page and
+keeps everything else — status, `Retry-After`, `X-Request-Id`, the
+rate-limit fields. The negotiation model is deliberately simple
+because the site is script-free: every HTML-preferring request **is**
+a human navigation. Stylesheets, images and `Accept: */*` (curl,
+health checks, Prometheus) keep the envelope byte-for-byte, so every
+API contract and test written before F13 still holds.
+
+The page itself — `HtmlErrorPage` in `src/error.rs`, styled by
+`public/assets/error.css` — is script-free and inline-style-free
+(the CSP serves it untouched), shows the status, the code, the
+message, the request id (for log correlation) and the way-out links
+(401s lead with *Sign in*), carries `noindex`, and **honors the
+pinned panel theme**: the `wm_theme` cookie is read in Rust, so an
+editor with a dark panel gets dark error pages. Two hand-built
+pre-F13 error pages (`html_error_page` in cms.rs, `form_error_response`
+in auth.rs) were deleted; their call sites now raise standard
+envelopes negotiated by the same middleware — one error system, not
+three.
+
+### The 429 self-heal
+
+A 429 page carries `<meta http-equiv="refresh" content="N">` with `N`
+taken from `Retry-After` (capped at 5 s): the browser reloads on its
+own once the token bucket has refilled, no F5 needed. The toggle
+flow that surfaced the bug now finishes by itself.
+
+### The anglicized public surface
+
+Every shipped view speaks English now: the shared `partials/header`
+(the `#register` modal id — it was `#registrar` —, the sign-in and
+sign-up messages), `footer`, `paginacion` (Previous/Next, "Page N of
+M"), `index`, `p`, `search`, `cms_page` (the draft banner, the
+breadcrumbs, "updated …"), `404`, `login`, `register`, `profile` and
+`contact`. The public demo `public/hello.jhs` is English too. Feeds
+carry `<title>Pages — wallermax</title>`, the English description and
+`<language>en</language>`. The flash codes in URLs are English —
+`?login_error=invalid|post_register`,
+`?register_error=taken|username|password|closed|error`,
+`?pw_error=current|new|form|session|error`, `?ok=password` (public)
+and `?ok=created|saved|deleted|restored|item-*` (panel) — the views'
+dictionaries match, and old links with Spanish codes simply fall
+back to the generic message. The CMS role errors and the media 404
+message are English as well.
+
+### English URLs, Spanish aliases
+
+| Now | Was | Behavior |
+|---|---|---|
+| `/search?q=…` | `/buscar?q=…` | `301`, query preserved (route alias). |
+| `/register` | `/registro` | `301` via a one-line `res.redirect` stub view. |
+| `/profile` | `/perfil` | `301` via a stub view. |
+| `/contact` | `/contacto` | `301` via a stub view. |
+| `POST /profile/password` | `POST /perfil/password` | `307` — the POST replays verbatim at the new path. |
+
+The old spellings are kept working on purpose: bookmarks, embedded
+forms and muscle memory survive the rename. Data contracts under
+the hood (the `paginacion` block keys, `resultados`, `fragmento`…)
+keep their names — they are template-internal, documented, and
+renaming them would break every view already written against them.
 
 ## Configuration
 
@@ -700,6 +785,13 @@ the same discipline as the phases before it:
   topbar, cards, tables, pills), `admin.css` with light/dark tokens,
   the no-JS theme toggle, the enriched dashboard, and the panel's
   English voice — this document.
+- **F13 — English everywhere + the shared error page** (done):
+  content-negotiated HTML error pages for browsers (the JSON envelope
+  stays for API clients), the self-healing 429, the anglicized public
+  site, feeds, login/register/profile flows and flash codes, and the
+  English public routes (`/search`, `/register`, `/profile`,
+  `/contact`) with permanent redirects from the Spanish spellings —
+  this document.
 
 Each phase ships as one patch with tests and this document updated;
 nothing lands half-featured.

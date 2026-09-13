@@ -12,7 +12,7 @@
       </div>
     </div>
 
-<?jhs if (query.ok == "eliminado") { ?>
+<?jhs if (query.ok == "deleted") { ?>
     <p class="notice notice-ok">File deleted. Remember: pages still linking to it will show a gap — their <code>&lt;img&gt;</code> pointed at that URL.</p>
 <?jhs } ?>
 <?jhs if (form_error) { ?>

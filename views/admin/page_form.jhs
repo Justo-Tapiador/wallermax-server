@@ -32,7 +32,7 @@
 <?jhs if (query.ok == "importada") { ?>
     <p class="notice notice-ok">Content imported as a draft: review it and publish whenever you want.</p>
 <?jhs } ?>
-<?jhs if (query.ok == "restaurada") { ?>
+<?jhs if (query.ok == "restored") { ?>
     <p class="notice notice-ok">Revision restored: the content is back, and the restoration itself is recorded as a new revision (reversible, like everything).</p>
 <?jhs } ?>
 <?jhs if (form_error) { ?>

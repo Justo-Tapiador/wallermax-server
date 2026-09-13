@@ -16,19 +16,19 @@
       </div>
     </div>
 
-<?jhs if (query.ok == "creado") { ?>
+<?jhs if (query.ok == "created") { ?>
     <p class="notice notice-ok">Menu created: add the first item below.</p>
 <?jhs } ?>
-<?jhs if (query.ok == "guardado") { ?>
+<?jhs if (query.ok == "saved") { ?>
     <p class="notice notice-ok">Title saved.</p>
 <?jhs } ?>
-<?jhs if (query.ok == "item-creado") { ?>
+<?jhs if (query.ok == "item-created") { ?>
     <p class="notice notice-ok">Item added.</p>
 <?jhs } ?>
-<?jhs if (query.ok == "item-guardado") { ?>
+<?jhs if (query.ok == "item-saved") { ?>
     <p class="notice notice-ok">Item saved.</p>
 <?jhs } ?>
-<?jhs if (query.ok == "item-eliminado") { ?>
+<?jhs if (query.ok == "item-deleted") { ?>
     <p class="notice notice-ok">Item deleted.</p>
 <?jhs } ?>
 <?jhs if (form_error) { ?>

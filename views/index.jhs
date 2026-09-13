@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Inicio — wallermax</title>
+  <title>Home — wallermax</title>
   <link rel="stylesheet" href="/assets/wallermax.css">
 </head>
 <body>
@@ -11,42 +11,42 @@
 <main>
   <div class="wrap">
     <div class="hero">
-      <h1>Un sitio que administra su contenido a sí mismo</h1>
-      <p>Estás viendo la página dinámica servida desde SQLite a través del
-         pequeño CMS de wallermax-server: las páginas que ves abajo viven en
-         la base de datos, se editan desde el panel y se renderizan como
-         plantillas <code>.jhs</code> en el servidor.</p>
+      <h1>A site that manages its own content</h1>
+      <p>You are looking at the dynamic page served from SQLite through
+         the small CMS inside wallermax-server: the pages listed below
+         live in the database, are edited from the panel and render as
+         <code>.jhs</code> templates on the server.</p>
     </div>
 
 <?jhs if (query.login_error || query.register_error) { ?>
-    <p class="aviso aviso-error">No se pudo completar la operación: prueba a
-       abrir el diálogo de <a href="#login">Entrar</a> o
-       <a href="#registrar">Registro</a> de nuevo.</p>
+    <p class="aviso aviso-error">The operation could not be completed: try
+       opening the <a href="#login">Sign in</a> or
+       <a href="#register">Register</a> dialog again.</p>
 <?jhs } ?>
 
-    <section class="tarjeta" aria-labelledby="paginas-titulo">
-      <h2 id="paginas-titulo">Páginas publicadas</h2>
+    <section class="tarjeta" aria-labelledby="pages-title">
+      <h2 id="pages-title">Published pages</h2>
 <?jhs if (pages && pages.length) { ?>
       <ul class="lista">
-<?jhs pages.forEach(function (pagina) { ?>
+<?jhs pages.forEach(function (page) { ?>
         <li>
           <div class="principal">
-            <a href="/p/<?= pagina.slug ?>"><?= pagina.title ?></a>
-            <div class="secundario">/p/<?= pagina.slug ?></div>
+            <a href="/p/<?= page.slug ?>"><?= page.title ?></a>
+            <div class="secundario">/p/<?= page.slug ?></div>
           </div>
         </li>
 <?jhs }); ?>
       </ul>
 <?jhs } else { ?>
-      <p class="vacio">Aún no hay páginas publicadas.</p>
+      <p class="vacio">No published pages yet.</p>
 <?jhs } ?>
     </section>
 
 <?jhs if (user && (user.role == "admin" || user.role == "editor")) { ?>
-    <section class="tarjeta aviso-info" aria-labelledby="cms-titulo">
-      <h2 id="cms-titulo">Panel del CMS</h2>
-      <p>Tienes rol de <strong><?= user.role ?></strong>: puedes
-         <a href="/admin">gestionar las páginas</a> del sitio.</p>
+    <section class="tarjeta aviso-info" aria-labelledby="cms-title">
+      <h2 id="cms-title">CMS panel</h2>
+      <p>You hold the <strong><?= user.role ?></strong> role: you can
+         <a href="/admin">manage the site's pages</a>.</p>
     </section>
 <?jhs } ?>
   </div>

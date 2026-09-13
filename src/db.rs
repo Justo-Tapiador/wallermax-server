@@ -272,7 +272,7 @@ pub trait UserRepository: Send + Sync + 'static {
     async fn list(&self, limit: i64) -> Result<Vec<User>, RepositoryError>;
 
     /// Replaces the password hash of `id` (the CMS "reset password"
-    /// and the self-service change on `/perfil`).
+    /// and the self-service change on `/profile`).
     async fn update_password(&self, id: i64, password_hash: &str) -> Result<(), RepositoryError>;
 
     /// Grants `role` to `id` (admin-only CMS action).

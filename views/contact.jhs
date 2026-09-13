@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Contact</title>
+</head>
+<body>
+  <h1>Contact</h1>
+<?jhs
+  var channels = [
+    { name: "Email", value: "hello@example.com" },
+    { name: "Phone", value: "+34 600 000 000" }
+  ];
+?>
+  <ul>
+<?jhs channels.forEach(function (channel) { ?>
+    <li><?= channel.name ?>: <?= channel.value ?></li>
+<?jhs }); ?>
+  </ul>
+  <p>Generated <?= 2 * 3 + 1 ?> seconds after the Big Bang (well, almost).</p>
+</body>
+</html>

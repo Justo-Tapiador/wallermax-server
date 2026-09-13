@@ -424,7 +424,7 @@ async fn restore_recovers_content_and_records_itself() {
         .expect("redirect location");
     assert_eq!(
         location,
-        format!("/admin/pages/{id}/edit?ok=restaurada"),
+        format!("/admin/pages/{id}/edit?ok=restored"),
         "the edit form greets the restored page"
     );
 
@@ -714,7 +714,7 @@ async fn scheduled_pages_hide_then_publish_at_read_time() {
     );
 
     let search = anon
-        .get(server.url("/buscar?q=criptob%C3%BAho"))
+        .get(server.url("/search?q=criptob%C3%BAho"))
         .send()
         .await
         .unwrap()
@@ -775,9 +775,9 @@ async fn scheduled_pages_hide_then_publish_at_read_time() {
         "editors preview the scheduled draft"
     );
     let preview = response.text().await.unwrap();
-    assert!(preview.contains("Borrador"));
+    assert!(preview.contains("Draft"));
     assert!(
-        preview.contains("Se publicará automáticamente"),
+        preview.contains("It will be published automatically"),
         "the banner states the schedule"
     );
 
@@ -808,7 +808,7 @@ async fn scheduled_pages_hide_then_publish_at_read_time() {
     let body = response.text().await.unwrap();
     assert!(body.contains("Contenido con la palabra única criptobúho"));
     assert!(
-        !body.contains("Borrador"),
+        !body.contains("Draft"),
         "the public render has no draft banner"
     );
 
@@ -826,7 +826,7 @@ async fn scheduled_pages_hide_then_publish_at_read_time() {
     );
 
     let search = anon
-        .get(server.url("/buscar?q=criptob%C3%BAho"))
+        .get(server.url("/search?q=criptob%C3%BAho"))
         .send()
         .await
         .unwrap()

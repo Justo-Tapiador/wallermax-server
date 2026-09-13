@@ -258,7 +258,7 @@ async fn regular_users_cannot_manage_content() {
         assert_eq!(response.status(), 403, "users cannot manage content");
         let body = response.text().await.expect("html body");
         assert!(
-            body.contains("rol de editor o administrador"),
+            body.contains("Editor or administrator role required"),
             "a human-readable privilege page: {body}"
         );
     }
@@ -329,10 +329,7 @@ async fn the_home_lists_published_pages_for_everyone() {
     let response = reqwest::get(server.url("/")).await.expect("home request");
     assert_eq!(response.status(), 200);
     let body = response.text().await.expect("home html");
-    assert!(
-        body.contains("Páginas publicadas"),
-        "listing section: {body}"
-    );
+    assert!(body.contains("Published pages"), "listing section: {body}");
     assert!(body.contains("Quiénes somos"), "the page is listed: {body}");
     assert!(
         body.contains("href=\"/p/quienes-somos\""),
@@ -343,7 +340,7 @@ async fn the_home_lists_published_pages_for_everyone() {
         "login modal opens: {body}"
     );
     assert!(
-        body.contains("href=\"#registrar\""),
+        body.contains("href=\"#register\""),
         "register modal opens: {body}"
     );
     assert!(body.contains("assets/wallermax.css"), "stylesheet: {body}");
@@ -381,7 +378,7 @@ async fn drafts_are_invisible_to_the_public_and_visible_to_editors() {
         &server,
         &admin,
         "borrador-secreto",
-        "Borrador",
+        "Draft",
         "<p>Secreto.</p>",
         false,
     )
@@ -405,7 +402,7 @@ async fn drafts_are_invisible_to_the_public_and_visible_to_editors() {
         .expect("editor preview");
     assert_eq!(response.status(), 200, "editors preview drafts");
     let body = response.text().await.expect("html body");
-    assert!(body.contains("Borrador:"), "the draft banner: {body}");
+    assert!(body.contains("Draft:"), "the draft banner: {body}");
 }
 
 // ── The v0.11.0 homepage takeover (`[cms] default_page`) ─────────────
@@ -616,7 +613,7 @@ async fn default_page_draft_follows_the_p_gating() {
         .expect("editor preview");
     assert_eq!(response.status(), 200);
     let body = response.text().await.expect("html body");
-    assert!(body.contains("Borrador:"), "the draft banner: {body}");
+    assert!(body.contains("Draft:"), "the draft banner: {body}");
     assert!(body.contains("secreto-portada"), "the draft body: {body}");
 }
 
@@ -635,7 +632,7 @@ async fn default_page_is_ignored_while_the_cms_is_disabled() {
     assert_eq!(response.status(), 200);
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("Páginas publicadas"),
+        body.contains("Published pages"),
         "the normal views/index.jhs chain serves the homepage: {body}"
     );
 }
@@ -702,7 +699,7 @@ async fn cms_page_bodies_can_include_the_shared_partials() {
     assert_eq!(response.status(), 200);
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("sin una línea de JavaScript"),
+        body.contains("served without a line of JavaScript"),
         "the footer partial is embedded: {body}"
     );
 }
@@ -1192,7 +1189,7 @@ async fn the_full_browser_circle_login_logout_modal() {
     let body = response.text().await.expect("html body");
     assert!(body.contains("href=\"#login\""), "entrar link: {body}");
     assert!(body.contains("id=\"login\""), "login modal: {body}");
-    assert!(body.contains("id=\"registrar\""), "register modal: {body}");
+    assert!(body.contains("id=\"register\""), "register modal: {body}");
     assert!(
         body.contains("name=\"redirect\" value=\"/\""),
         "the modal posts the current path: {body}"
@@ -1227,25 +1224,25 @@ async fn the_full_browser_circle_login_logout_modal() {
     let response = client.get(server.url("/")).send().await.expect("home");
     let body = response.text().await.expect("html body");
     assert!(body.contains("root-admin"), "the username appears: {body}");
-    assert!(body.contains("Salir"), "the logout control: {body}");
+    assert!(body.contains("Sign out"), "the logout control: {body}");
     assert!(
         body.contains("action=\"/api/auth/logout\""),
         "logout form: {body}"
     );
     assert!(
-        !body.contains("id=\"registrar\""),
+        !body.contains("id=\"register\""),
         "no register modal while logged in: {body}"
     );
 
-    // The /perfil page shows the password-change form.
+    // The /profile page shows the password-change form.
     let response = client
-        .get(server.url("/perfil"))
+        .get(server.url("/profile"))
         .send()
         .await
-        .expect("perfil");
+        .expect("profile");
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("action=\"/perfil/password\""),
+        body.contains("action=\"/profile/password\""),
         "password form: {body}"
     );
 
@@ -1295,10 +1292,10 @@ async fn form_registration_logs_the_fresh_account_in() {
     );
 
     let response = client
-        .get(server.url("/perfil"))
+        .get(server.url("/profile"))
         .send()
         .await
-        .expect("perfil");
+        .expect("profile");
     let body = response.text().await.expect("html body");
     assert!(body.contains("nuevo"), "the session is live: {body}");
     assert!(
@@ -1328,11 +1325,11 @@ async fn form_registration_failures_bounce_back_with_the_error() {
         .and_then(|value| value.to_str().ok())
         .expect("redirect");
     assert_eq!(
-        location, "/p?register_error=tomado#registrar",
+        location, "/p?register_error=taken#register",
         "the modal re-opens with the message"
     );
 
-    // Short password → the contrasena code.
+    // Short password → the password code.
     let response = browser_client()
         .post(server.url("/api/auth/register"))
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -1347,7 +1344,7 @@ async fn form_registration_failures_bounce_back_with_the_error() {
         .and_then(|value| value.to_str().ok())
         .expect("redirect");
     assert_eq!(
-        location, "/?register_error=contrasena#registrar",
+        location, "/?register_error=password#register",
         "location: {location}"
     );
 
@@ -1370,7 +1367,7 @@ async fn form_registration_failures_bounce_back_with_the_error() {
     let response = client.get(server.url(path)).send().await.expect("landing");
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("La contraseña no cumple los requisitos"),
+        body.contains("The password does not meet the requirements"),
         "the message shows in the modal: {body}"
     );
 }
@@ -1384,9 +1381,9 @@ async fn the_self_service_password_change_requires_the_current_one() {
 
     // Wrong current password.
     let response = client
-        .post(server.url("/perfil/password"))
+        .post(server.url("/profile/password"))
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .body("current_password=wrong-one&new_password=nueva-clave-9&redirect=/perfil")
+        .body("current_password=wrong-one&new_password=nueva-clave-9&redirect=/profile")
         .send()
         .await
         .expect("wrong current");
@@ -1396,13 +1393,16 @@ async fn the_self_service_password_change_requires_the_current_one() {
         .get("location")
         .and_then(|value| value.to_str().ok())
         .expect("redirect");
-    assert_eq!(location, "/perfil?pw_error=actual", "location: {location}");
+    assert_eq!(
+        location, "/profile?pw_error=current",
+        "location: {location}"
+    );
 
     // The right one.
     let response = client
-        .post(server.url("/perfil/password"))
+        .post(server.url("/profile/password"))
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .body("current_password=sup3r-secret!&new_password=nueva-clave-9&redirect=/perfil")
+        .body("current_password=sup3r-secret!&new_password=nueva-clave-9&redirect=/profile")
         .send()
         .await
         .expect("password change");
@@ -1412,7 +1412,7 @@ async fn the_self_service_password_change_requires_the_current_one() {
         .get("location")
         .and_then(|value| value.to_str().ok())
         .expect("redirect");
-    assert_eq!(location, "/perfil?ok=contrasena", "location: {location}");
+    assert_eq!(location, "/profile?ok=password", "location: {location}");
 
     // The old password stops working, the new one works.
     let response = reqwest::Client::new()
@@ -1466,18 +1466,18 @@ async fn redirect_following_browser_completes_the_login_circle() {
     let server = TestServer::start_full(config).await;
     register_admin(&server, "root-admin", "sup3r-secret!").await;
 
-    // A real browser follows the 303: login → /perfil personalised.
+    // A real browser follows the 303: login → /profile personalised.
     let client = following_browser();
     let response = client
         .post(server.url("/api/auth/login"))
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .body("username=root-admin&password=sup3r-secret!&redirect=/perfil")
+        .body("username=root-admin&password=sup3r-secret!&redirect=/profile")
         .send()
         .await
         .expect("login");
     assert_eq!(response.status(), 200, "the redirect landed");
     let url = response.url().to_string();
-    assert!(url.ends_with("/perfil"), "landed on /perfil: {url}");
+    assert!(url.ends_with("/profile"), "landed on /profile: {url}");
     let body = response.text().await.expect("html body");
     assert!(
         body.contains("root-admin"),

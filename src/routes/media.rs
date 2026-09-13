@@ -33,8 +33,8 @@ use serde_json::{json, Value};
 use crate::db::{MediaRecord, NewMedia};
 use crate::error::AppError;
 use crate::routes::cms::{
-    clamp_page, cms_context, html_error_page, listing_query, pages_for, pagination_value,
-    render_view, see_other, CmsEditor, PageParts,
+    clamp_page, cms_context, listing_query, pages_for, pagination_value, render_view, see_other,
+    CmsEditor, PageParts,
 };
 use crate::state::AppState;
 use crate::util::{format_timestamp, read_form};
@@ -479,7 +479,7 @@ async fn delete_media(
                     tracing::warn!(%error, path = %path.display(), "media file left behind");
                 }
             }
-            see_other("/admin/media?ok=eliminado")
+            see_other("/admin/media?ok=deleted")
         }
         Ok(false) => media_not_found(),
         Err(message) => {
@@ -616,11 +616,10 @@ fn file_response(bytes: &[u8], mime_type: &str) -> Response {
 
 /// The shared 404 for every public media miss.
 fn media_not_found() -> Response {
-    html_error_page(
-        StatusCode::NOT_FOUND,
-        "No encontrado",
-        "Ese archivo de medios no existe (o su nombre no es el canónico).",
+    AppError::not_found_message(
+        "That media file does not exist (or its name is not the canonical one).",
     )
+    .into_response()
 }
 
 /// One media row as template data: the URLs, the display-ready sizes

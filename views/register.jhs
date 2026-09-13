@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Create an account — wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+<?jhs
+  var registerErrors = {
+    taken: "That username is already in use.",
+    username: "The username is not valid (3-32 characters: letters, numbers, dash and underscore).",
+    password: "The password does not meet the requirements (minimum length 8).",
+    closed: "Registration of new accounts is disabled on this server.",
+    error: "The account could not be created; try again."
+  };
+  var registerError = query.register_error
+    ? (registerErrors[query.register_error] || "The account could not be created.")
+    : null;
+?>
+<?jhs if (user) { ?>
+    <section class="tarjeta tarjeta-angosta">
+      <h1>You already have a session</h1>
+      <p>You are signed in as <strong><?= user.username ?></strong>; to use
+         another account, sign out first from the header.</p>
+      <p><a class="btn btn-primario" href="/profile">Go to your profile</a></p>
+    </section>
+<?jhs } else { ?>
+    <section class="tarjeta tarjeta-angosta">
+      <h1>Create an account</h1>
+<?jhs if (registerError) { ?>
+      <p class="aviso aviso-error"><?= registerError ?></p>
+<?jhs } ?>
+      <p>When you finish you stay inside: the server signs you in
+         automatically with its <code>HttpOnly</code> cookie.</p>
+      <form method="post" action="/api/auth/register">
+        <input type="hidden" name="redirect" value="<?= query.redirect || "/" ?>">
+        <div class="campo">
+          <label for="usuario">Username</label>
+          <input id="usuario" type="text" name="username" required
+                 minlength="3" maxlength="32" autocomplete="username">
+          <p class="ayuda">3-32 characters: letters, numbers, dash and underscore.</p>
+        </div>
+        <div class="campo">
+          <label for="clave">Password</label>
+          <input id="clave" type="password" name="password" required
+                 minlength="8" autocomplete="new-password">
+          <p class="ayuda">At least 8 characters.</p>
+        </div>
+        <button class="btn btn-primario" type="submit">Create account and sign in</button>
+      </form>
+      <p>The first account on a fresh database becomes the administrator.</p>
+    </section>
+<?jhs } ?>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

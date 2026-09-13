@@ -1,118 +1,118 @@
 <?jhs
-  // Cabecera compartida del sitio y del CMS (v0.8.0).
+  // Shared header of the public site and the CMS (v0.8.0).
   //
-  // Globales disponibles: user, path, query, pages.
+  // Available globals: user, path, query, pages.
   //
-  // Sin JavaScript: los modales de login y registro se abren con el
-  // truco CSS :target (el enlace apunta a #login / #registrar y la CSS
-  // muestra el diálogo cuando es el :target), y se cierran navegando
-  // a #modal-cerrada. Los formularios se envían por POST normal y el
-  // servidor responde con 303.
-  var esEditor = user && (user.role == "admin" || user.role == "editor");
+  // No JavaScript: the login and register modals open with the CSS
+  // :target trick (the links point to #login / #register and the
+  // stylesheet reveals the dialog while it is the :target), and close
+  // by navigating to #modal-closed. Forms post normally and the server
+  // answers with 303.
+  var isEditor = user && (user.role == "admin" || user.role == "editor");
 
-  var erroresLogin = {
-    credenciales: "Usuario o contraseña incorrectos.",
-    postregistro: "La cuenta se creó, pero no se pudo iniciar sesión: prueba a entrar de nuevo."
+  var loginErrors = {
+    invalid: "Wrong username or password.",
+    post_register: "The account was created, but sign-in failed: try signing in again."
   };
-  var errorLogin = query.login_error
-    ? (erroresLogin[query.login_error] || "No se pudo iniciar sesión.")
+  var loginError = query.login_error
+    ? (loginErrors[query.login_error] || "Sign-in failed.")
     : null;
 
-  var erroresRegistro = {
-    tomado: "Ese nombre de usuario ya está en uso.",
-    usuario: "El nombre de usuario no es válido (3-32 caracteres: letras, números, guion y guion bajo).",
-    contrasena: "La contraseña no cumple los requisitos (longitud mínima 8).",
-    cerrado: "El registro de nuevas cuentas está desactivado en este servidor.",
-    error: "No se pudo crear la cuenta; inténtalo de nuevo."
+  var registerErrors = {
+    taken: "That username is already in use.",
+    username: "The username is not valid (3-32 characters: letters, numbers, dash and underscore).",
+    password: "The password does not meet the requirements (minimum length 8).",
+    closed: "Registration of new accounts is disabled on this server.",
+    error: "The account could not be created; try again."
   };
-  var errorRegistro = query.register_error
-    ? (erroresRegistro[query.register_error] || "No se pudo crear la cuenta.")
+  var registerError = query.register_error
+    ? (registerErrors[query.register_error] || "The account could not be created.")
     : null;
 ?>
-<div id="modal-cerrada"></div>
+<div id="modal-closed"></div>
 <header class="cab">
   <div class="wrap cab-fila">
     <a class="marca" href="/">wallermax<span>cms</span></a>
-    <nav class="nav" aria-label="Principal">
-      <a href="/">Inicio</a>
-      <a href="/p">Páginas</a>
-<?jhs if (esEditor) { ?>
+    <nav class="nav" aria-label="Main">
+      <a href="/">Home</a>
+      <a href="/p">Pages</a>
+<?jhs if (isEditor) { ?>
       <a href="/admin">CMS</a>
 <?jhs } ?>
-      <form class="buscador" method="get" action="/buscar" role="search">
-        <input type="search" name="q" maxlength="200" placeholder="Buscar…"
-               aria-label="Buscar en las páginas">
+      <form class="buscador" method="get" action="/search" role="search">
+        <input type="search" name="q" maxlength="200" placeholder="Search…"
+               aria-label="Search the pages">
       </form>
     </nav>
     <div class="sesion">
 <?jhs if (user) { ?>
       <span class="chip chip-acento"><?= user.username ?></span>
       <span class="chip"><?= user.role ?></span>
-      <a class="btn btn-fantasma" href="/perfil">Perfil</a>
+      <a class="btn btn-fantasma" href="/profile">Profile</a>
       <form method="post" action="/api/auth/logout">
         <input type="hidden" name="redirect" value="<?= path ?>">
-        <button class="btn-apariencia-enlace" type="submit">Salir</button>
+        <button class="btn-apariencia-enlace" type="submit">Sign out</button>
       </form>
 <?jhs } else { ?>
-      <a class="btn btn-fantasma" href="#login">Entrar</a>
-      <a class="btn btn-primario" href="#registrar">Registrarse</a>
+      <a class="btn btn-fantasma" href="#login">Sign in</a>
+      <a class="btn btn-primario" href="#register">Register</a>
 <?jhs } ?>
     </div>
   </div>
 </header>
 
 <?jhs if (!user) { ?>
-<div class="modal" id="login" role="dialog" aria-modal="true" aria-labelledby="login-titulo">
-  <a class="modal-fondo" href="#modal-cerrada" aria-label="Cerrar el diálogo"></a>
+<div class="modal" id="login" role="dialog" aria-modal="true" aria-labelledby="login-title">
+  <a class="modal-fondo" href="#modal-closed" aria-label="Close the dialog"></a>
   <div class="modal-tarjeta">
-    <a class="modal-cierre" href="#modal-cerrada" aria-label="Cerrar">&#215;</a>
-    <h2 id="login-titulo">Iniciar sesión</h2>
-<?jhs if (errorLogin) { ?>
-    <p class="aviso aviso-error"><?= errorLogin ?></p>
+    <a class="modal-cierre" href="#modal-closed" aria-label="Close">&#215;</a>
+    <h2 id="login-title">Sign in</h2>
+<?jhs if (loginError) { ?>
+    <p class="aviso aviso-error"><?= loginError ?></p>
 <?jhs } ?>
     <form method="post" action="/api/auth/login">
       <input type="hidden" name="redirect" value="<?= path ?>">
       <div class="campo">
-        <label for="login-usuario">Usuario</label>
+        <label for="login-usuario">Username</label>
         <input id="login-usuario" type="text" name="username" required
                minlength="3" maxlength="32" autocomplete="username">
       </div>
       <div class="campo">
-        <label for="login-clave">Contraseña</label>
+        <label for="login-clave">Password</label>
         <input id="login-clave" type="password" name="password" required
                autocomplete="current-password">
       </div>
-      <button class="btn btn-primario" type="submit">Entrar</button>
+      <button class="btn btn-primario" type="submit">Sign in</button>
     </form>
-    <p class="modal-pie">¿Sin cuenta? <a href="#registrar">Regístrate</a> desde aquí mismo.</p>
+    <p class="modal-pie">No account yet? <a href="#register">Register</a> from right here.</p>
   </div>
 </div>
 
-<div class="modal" id="registrar" role="dialog" aria-modal="true" aria-labelledby="registro-titulo">
-  <a class="modal-fondo" href="#modal-cerrada" aria-label="Cerrar el diálogo"></a>
+<div class="modal" id="register" role="dialog" aria-modal="true" aria-labelledby="register-title">
+  <a class="modal-fondo" href="#modal-closed" aria-label="Close the dialog"></a>
   <div class="modal-tarjeta">
-    <a class="modal-cierre" href="#modal-cerrada" aria-label="Cerrar">&#215;</a>
-    <h2 id="registro-titulo">Crear una cuenta</h2>
-<?jhs if (errorRegistro) { ?>
-    <p class="aviso aviso-error"><?= errorRegistro ?></p>
+    <a class="modal-cierre" href="#modal-closed" aria-label="Close">&#215;</a>
+    <h2 id="register-title">Create an account</h2>
+<?jhs if (registerError) { ?>
+    <p class="aviso aviso-error"><?= registerError ?></p>
 <?jhs } ?>
     <form method="post" action="/api/auth/register">
       <input type="hidden" name="redirect" value="<?= path ?>">
       <div class="campo">
-        <label for="registro-usuario">Usuario</label>
-        <input id="registro-usuario" type="text" name="username" required
+        <label for="register-usuario">Username</label>
+        <input id="register-usuario" type="text" name="username" required
                minlength="3" maxlength="32" autocomplete="username">
-        <p class="ayuda">3-32 caracteres: letras, números, guion y guion bajo.</p>
+        <p class="ayuda">3-32 characters: letters, numbers, dash and underscore.</p>
       </div>
       <div class="campo">
-        <label for="registro-clave">Contraseña</label>
-        <input id="registro-clave" type="password" name="password" required
+        <label for="register-clave">Password</label>
+        <input id="register-clave" type="password" name="password" required
                minlength="8" autocomplete="new-password">
-        <p class="ayuda">Al menos 8 caracteres.</p>
+        <p class="ayuda">At least 8 characters.</p>
       </div>
-      <button class="btn btn-primario" type="submit">Crear cuenta y entrar</button>
+      <button class="btn btn-primario" type="submit">Create account and sign in</button>
     </form>
-    <p class="modal-pie">La primera cuenta de una base de datos nueva se convierte en el administrador.</p>
+    <p class="modal-pie">The first account on a fresh database becomes the administrator.</p>
   </div>
 </div>
 <?jhs } ?>

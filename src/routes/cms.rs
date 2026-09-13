@@ -67,7 +67,7 @@
 //! guards so a panel mis-click can never lock the server out of its
 //! own CMS.
 //!
-//! **Self-service**: `POST /perfil/password` lets any session change
+//! **Self-service**: `POST /profile/password` lets any session change
 //! its own password (the current one must be presented).
 //!
 //! Everything is JavaScript-free on purpose: the default CSP blocks
@@ -186,11 +186,10 @@ impl axum::extract::FromRequestParts<AppState> for CmsEditor {
             })?;
 
         if !user.role.is_editor() {
-            return Err(html_error_page(
-                StatusCode::FORBIDDEN,
-                "Se requiere el rol de editor o administrador",
-                "Tu cuenta no puede gestionar el contenido del CMS.",
-            ));
+            return Err(AppError::forbidden(
+                "Editor or administrator role required — this account cannot manage the CMS content.",
+            )
+            .into_response());
         }
 
         Ok(Self { user })
@@ -221,11 +220,10 @@ impl axum::extract::FromRequestParts<AppState> for CmsAdmin {
             })?;
 
         if user.role != UserRole::Admin {
-            return Err(html_error_page(
-                StatusCode::FORBIDDEN,
-                "Se requiere el rol de administrador",
-                "Solo los administradores pueden gestionar las cuentas del CMS.",
-            ));
+            return Err(AppError::forbidden(
+                "Administrator role required — only administrators can manage the CMS accounts.",
+            )
+            .into_response());
         }
 
         Ok(Self { user })
@@ -266,38 +264,6 @@ fn utf8_percent_encode(value: &str) -> String {
     out
 }
 
-/// A minimal, script-free HTML error page (same style as the auth form
-/// errors: browsers get pages, API clients get envelopes).
-///
-/// Crate-visible for the media routes (F9) — their public 404s match
-/// the `/p/{slug}` behaviour by construction.
-pub(crate) fn html_error_page(status: StatusCode, title: &str, message: &str) -> Response {
-    let html = format!(
-        "<!DOCTYPE html>\n<html lang=\"es\">\n<head>\n<meta charset=\"utf-8\">\n\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>{title}</title>\n</head>\n<body>\n<h1>{title}</h1>\n\
-         <p>{message}</p>\n<p><a href=\"/\">Volver al inicio</a></p>\n\
-         </body>\n</html>\n",
-        title = escape_html(title),
-        message = escape_html(message),
-    );
-
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .body(axum::body::Body::from(html))
-        .expect("valid error page")
-}
-
-/// HTML-escapes a text for the server-built pages.
-fn escape_html(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#039;")
-}
-
 // ─── Shared rendering plumbing ───────────────────────────────────────
 
 /// The request facts the page flows need (method, headers, uri,
@@ -328,7 +294,7 @@ impl PageParts {
     }
 
     /// The request URI — crate-visible so the F10 listing routes
-    /// outside this module (`/admin/media`, `/buscar`) can read their
+    /// outside this module (`/admin/media`, `/search`) can read their
     /// `?q=`/`?page=` parameters the same way the handlers here do.
     pub(crate) fn uri(&self) -> &Uri {
         &self.uri
@@ -1621,8 +1587,8 @@ async fn restore_revision(
                 &page,
                 &snapshot,
                 Some(
-                    "El padre que la revisión nombra es la propia página: muévela a otro \
-                     nivel antes de restaurar.",
+                    "The parent named by the revision is the page itself: move it to \
+                     another level before restoring.",
                 ),
             )
             .await;
@@ -1654,8 +1620,8 @@ async fn restore_revision(
                 &page,
                 &snapshot,
                 Some(
-                    "El padre de la revisión ahora cuelga de esta página: restaurar crearía \
-                     un ciclo.",
+                    "The revision's parent now hangs under this page: restoring would \
+                     create a cycle.",
                 ),
             )
             .await;
@@ -1682,7 +1648,7 @@ async fn restore_revision(
     };
 
     match cms.pages.update(id, &update).await {
-        Ok(Some(_)) => see_other(&format!("/admin/pages/{id}/edit?ok=restaurada")),
+        Ok(Some(_)) => see_other(&format!("/admin/pages/{id}/edit?ok=restored")),
         Ok(None) => see_other("/admin/pages"),
         Err(RepositoryError::Duplicate) => {
             render_revision_view(
@@ -2336,14 +2302,14 @@ async fn create_menu(
     };
 
     match cms.menus.create(&new_menu).await {
-        Ok(menu) => see_other(&format!("/admin/menus/{}?ok=creado", menu.id)),
+        Ok(menu) => see_other(&format!("/admin/menus/{}?ok=created", menu.id)),
         Err(RepositoryError::Duplicate) => {
             render_menus_view(
                 &state,
                 &parts,
                 Some(
-                    "Ese nombre de menú ya existe: es la clave que leen las plantillas \
-                      (menus.<nombre>).",
+                    "That menu name already exists: it is the key the templates read \
+                      (menus.<name>).",
                 ),
             )
             .await
@@ -2481,7 +2447,7 @@ async fn rename_menu(
     }
 
     match cms.menus.update_title(id, title).await {
-        Ok(Some(_)) => see_other(&format!("/admin/menus/{id}?ok=guardado")),
+        Ok(Some(_)) => see_other(&format!("/admin/menus/{id}?ok=saved")),
         Ok(None) => see_other("/admin/menus"),
         Err(RepositoryError::Internal(message)) => {
             tracing::error!(%message, "menu rename failed");
@@ -2506,7 +2472,7 @@ async fn delete_menu(
     };
 
     match cms.menus.delete(id).await {
-        Ok(_) => see_other("/admin/menus?ok=eliminado"),
+        Ok(_) => see_other("/admin/menus?ok=deleted"),
         Err(error) => {
             tracing::error!(%error, "menu deletion failed");
             AppError::internal("storage failure").into_response()
@@ -2573,7 +2539,7 @@ async fn create_item(
     };
 
     match cms.menus.add_item(&new_item).await {
-        Ok(_) => see_other(&format!("/admin/menus/{id}?ok=item-creado")),
+        Ok(_) => see_other(&format!("/admin/menus/{id}?ok=item-created")),
         Err(RepositoryError::Internal(message)) => {
             tracing::error!(%message, "menu item creation failed");
             render_item_form_view(
@@ -2670,7 +2636,7 @@ async fn update_item(
     };
 
     match cms.menus.update_item(item_id, &new_item).await {
-        Ok(Some(_)) => see_other(&format!("/admin/menus/{id}?ok=item-guardado")),
+        Ok(Some(_)) => see_other(&format!("/admin/menus/{id}?ok=item-saved")),
         Ok(None) => see_other(&format!("/admin/menus/{id}")),
         Err(RepositoryError::Internal(message)) => {
             tracing::error!(%message, "menu item update failed");
@@ -2719,7 +2685,7 @@ async fn delete_item(
         }
     }
 
-    see_other(&format!("/admin/menus/{id}?ok=item-eliminado"))
+    see_other(&format!("/admin/menus/{id}?ok=item-deleted"))
 }
 
 /// Renders the menu item form (create or edit) with the submitted
@@ -2906,7 +2872,7 @@ pub(crate) fn clamp_page(requested: i64, total_pages: i64) -> i64 {
 }
 
 /// `?page=N` link over a base that may already carry its own query
-/// (`/buscar?q=hola`): the separator picks itself.
+/// (`/search?q=hola`): the separator picks itself.
 fn page_link(base: &str, page: i64) -> String {
     let separator = if base.contains('?') { '&' } else { '?' };
     format!("{base}{separator}page={page}")
@@ -2914,7 +2880,7 @@ fn page_link(base: &str, page: i64) -> String {
 
 /// The `paginacion` global every paginated view renders (F10): the
 /// current page, the totals, and ready-made prev/next links (`null` at
-/// the edges) over `base`. One shape, three listings — `/p`, `/buscar`
+/// the edges) over `base`. One shape, three listings — `/p`, `/search`
 /// and the admin media grid all include the same partial.
 pub(crate) fn pagination_value(page: i64, total_items: i64, page_size: i64, base: &str) -> Value {
     let total_pages = pages_for(total_items, page_size).max(1);
@@ -3037,10 +3003,10 @@ async fn rss_feed(State(state): State<AppState>, request: Request) -> Response {
     );
     xml.push_str(&format!(
         "    <title>{}</title>\n    <link>{}/p</link>\n    \
-         <description>Páginas publicadas del CMS de wallermax</description>\n    \
+         <description>Published pages from the wallermax CMS</description>\n    \
          <atom:link rel=\"self\" href=\"{}/feed.xml\" \
-         type=\"application/rss+xml\"/>\n    <language>es</language>\n",
-        xml_escape("Páginas — wallermax"),
+         type=\"application/rss+xml\"/>\n    <language>en</language>\n",
+        xml_escape("Pages — wallermax"),
         xml_escape(&base),
         xml_escape(&base)
     ));
@@ -3098,7 +3064,7 @@ async fn atom_feed(State(state): State<AppState>, request: Request) -> Response 
         "  <title>{}</title>\n  <id>{}/atom.xml</id>\n  \
          <link rel=\"alternate\" type=\"text/html\" href=\"{}/p\"/>\n  \
          <link rel=\"self\" href=\"{}/atom.xml\"/>\n  <updated>{}</updated>\n",
-        xml_escape("Páginas — wallermax"),
+        xml_escape("Pages — wallermax"),
         xml_escape(&base),
         xml_escape(&base),
         xml_escape(&base),
@@ -3363,7 +3329,7 @@ async fn create_user(
         .create(&form.username, &password_hash, role)
         .await
     {
-        Ok(_) => see_other("/admin/users?ok=creado"),
+        Ok(_) => see_other("/admin/users?ok=created"),
         Err(RepositoryError::Duplicate) => {
             render_user_error(
                 &state,
@@ -3560,7 +3526,7 @@ async fn update_user(
         }
     }
 
-    see_other("/admin/users?ok=guardado")
+    see_other("/admin/users?ok=saved")
 }
 
 /// `POST /admin/users/{id}/delete`: removes an account (refresh tokens
@@ -3596,7 +3562,7 @@ async fn delete_user(
     }
 
     match auth.repository.delete(id).await {
-        Ok(()) => see_other("/admin/users?ok=eliminado"),
+        Ok(()) => see_other("/admin/users?ok=deleted"),
         Err(error) => {
             tracing::error!(%error, "user deletion failed");
             AppError::internal("storage failure").into_response()
@@ -3648,9 +3614,9 @@ async fn render_user_error(
     .await
 }
 
-// ─── Self-service: `POST /perfil/password` ───────────────────────────
+// ─── Self-service: `POST /profile/password` ───────────────────────────
 
-/// `POST /perfil/password`: changes the caller's own password after
+/// `POST /profile/password`: changes the caller's own password after
 /// verifying the current one.
 #[derive(Deserialize, Default)]
 struct PasswordForm {
@@ -3674,10 +3640,10 @@ async fn change_password(
 
     let form = match read_form::<PasswordForm>(request, max_body).await {
         Ok(form) => form,
-        Err(_) => return password_error("/perfil", "forma"),
+        Err(_) => return password_error("/profile", "form"),
     };
 
-    // The form lives on `/perfil`; the optional field lets a future
+    // The form lives on `/profile`; the optional field lets a future
     // embedding post it from anywhere local.
     let redirect = local_redirect(form.redirect.as_deref());
 
@@ -3688,14 +3654,14 @@ async fn change_password(
         .ok()
         .flatten()
     else {
-        return password_error(&redirect, "sesion");
+        return password_error(&redirect, "session");
     };
 
     if !verify_password(&form.current_password, &record.password_hash) {
-        return password_error(&redirect, "actual");
+        return password_error(&redirect, "current");
     }
     if validate_password(&form.new_password, auth.min_password_len).is_err() {
-        return password_error(&redirect, "nueva");
+        return password_error(&redirect, "new");
     }
 
     let password_hash = match hash_password(&form.new_password) {
@@ -3717,11 +3683,11 @@ async fn change_password(
 
     tracing::info!(user_id = user.user_id, "password changed by its owner");
     let separator = if redirect.contains('?') { '&' } else { '?' };
-    see_other(&format!("{redirect}{separator}ok=contrasena"))
+    see_other(&format!("{redirect}{separator}ok=password"))
 }
 
 /// Where the password form lands after the `303` (a local path, or
-/// `/perfil` — the page the form lives on).
+/// `/profile` — the page the form lives on).
 fn local_redirect(target: Option<&str>) -> String {
     match target {
         Some(path)
@@ -3732,7 +3698,7 @@ fn local_redirect(target: Option<&str>) -> String {
         {
             path.to_owned()
         }
-        _ => String::from("/perfil"),
+        _ => String::from("/profile"),
     }
 }
 
@@ -3740,6 +3706,16 @@ fn local_redirect(target: Option<&str>) -> String {
 fn password_error(redirect: &str, code: &str) -> Response {
     let separator = if redirect.contains('?') { '&' } else { '?' };
     see_other(&format!("{redirect}{separator}pw_error={code}"))
+}
+
+/// `POST /perfil/password` (pre-F13 spelling): answers `307` so the
+/// client replays the same POST at `/profile/password`.
+async fn legacy_password_redirect() -> Response {
+    Response::builder()
+        .status(StatusCode::TEMPORARY_REDIRECT)
+        .header(header::LOCATION, "/profile/password")
+        .body(axum::body::Body::empty())
+        .expect("valid redirect")
 }
 
 // ─── Route fragment ──────────────────────────────────────────────────
@@ -3752,7 +3728,11 @@ pub fn routes() -> Router<AppState> {
         .route("/sitemap.xml", get(sitemap))
         .route("/feed.xml", get(rss_feed))
         .route("/atom.xml", get(atom_feed))
-        .route("/perfil/password", post(change_password))
+        .route("/profile/password", post(change_password))
+        // The F13 anglicization moved the form to /profile/password;
+        // a 307 keeps old bookmarks and embedded forms working by
+        // re-issuing the POST verbatim at the new address.
+        .route("/perfil/password", post(legacy_password_redirect))
         .route("/admin", get(dashboard))
         .route("/admin/theme", get(admin_theme))
         .route("/admin/pages", get(list_pages).post(create_page))
@@ -3862,10 +3842,10 @@ mod tests {
 
     #[test]
     fn query_safe_paths_are_kept_as_redirects() {
-        assert_eq!(local_redirect(Some("/perfil")), "/perfil");
+        assert_eq!(local_redirect(Some("/profile")), "/profile");
         assert_eq!(local_redirect(Some("/p/x?a=1")), "/p/x?a=1");
-        assert_eq!(local_redirect(Some("http://evil.example")), "/perfil");
-        assert_eq!(local_redirect(Some("//evil.example")), "/perfil");
-        assert_eq!(local_redirect(None), "/perfil");
+        assert_eq!(local_redirect(Some("http://evil.example")), "/profile");
+        assert_eq!(local_redirect(Some("//evil.example")), "/profile");
+        assert_eq!(local_redirect(None), "/profile");
     }
 }

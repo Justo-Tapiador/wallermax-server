@@ -71,7 +71,7 @@ async fn index(State(state): State<AppState>) -> Json<IndexResponse> {
             "GET /p (public pages index)",
             "GET /p/{slug} (CMS page)",
             "GET /admin (CMS panel)",
-            "POST /perfil/password (self password change)",
+            "POST /profile/password (self password change)",
         ]);
     }
 

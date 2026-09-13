@@ -1,22 +1,5 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <title>Contacto</title>
-</head>
-<body>
-  <h1>Contacto</h1>
 <?jhs
-  var canales = [
-    { nombre: "Email", valor: "hola@ejemplo.com" },
-    { nombre: "Teléfono", valor: "+34 600 000 000" }
-  ];
+  // Legacy Spanish URL (pre-F13): /contacto now lives at /contact.
+  // A permanent redirect keeps old links and bookmarks working.
+  res.redirect("/contact", 301);
 ?>
-  <ul>
-<?jhs canales.forEach(function (canal) { ?>
-    <li><?= canal.nombre ?>: <?= canal.valor ?></li>
-<?jhs }); ?>
-  </ul>
-  <p>Generado <?= 2 * 3 + 1 ?> segundos después del Big Bang (bueno, casi).</p>
-</body>
-</html>

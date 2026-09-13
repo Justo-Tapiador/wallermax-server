@@ -592,7 +592,7 @@ pub struct CmsConfig {
     /// `WALLERMAX_CMS__MEDIA_MAX_BYTES` overrides the file value.
     pub media_max_bytes: u64,
     /// Page size of the public listings (F10): `GET /p` and the search
-    /// results at `GET /buscar` — ten rows per page by default,
+    /// results at `GET /search` — ten rows per page by default,
     /// validated to 1–100. One key for both because they are one
     /// concept: how long a public list may run before it paginates.
     /// The admin panel sizes its own grids (the media grid is 24).
@@ -684,8 +684,8 @@ impl Default for StaticConfig {
 /// - `GET`/`HEAD` requests for an existing `*.jhs` file under the
 ///   `[static]` root are **rendered** (the source is never served
 ///   raw);
-/// - otherwise-unmatched paths auto-route to views: `GET /contacto`
-///   renders `views_dir/contacto.jhs`, `GET /blog` renders
+/// - otherwise-unmatched paths auto-route to views: `GET /contact`
+///   renders `views_dir/contact.jhs`, `GET /blog` renders
 ///   `views_dir/blog.jhs` or `views_dir/blog/index.jhs`, and `GET /`
 ///   falls back to `views_dir/index.jhs` when the static index file
 ///   is missing;

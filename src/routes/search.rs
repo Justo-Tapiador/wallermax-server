@@ -1,10 +1,11 @@
 //! The public search page (F10) — zero JavaScript, like everything
 //! else in the CMS.
 //!
-//! `GET /buscar?q=...` answers a plain HTML page: the form (a twin of
-//! the one living in the shared header), the ranked hits with
-//! highlighted snippets, and the same pagination the `/p` index uses.
-//! The search runs on SQLite FTS5 through
+//! `GET /search?q=...` (the pre-F13 Spanish spelling `/buscar` answers
+//! a `301` that preserves the query) returns a plain HTML page: the
+//! form (a twin of the one living in the shared header), the ranked
+//! hits with highlighted snippets, and the same pagination the `/p`
+//! index uses. The search runs on SQLite FTS5 through
 //! [`crate::db::PageRepository::search`], and the visitor's words are
 //! quoted into inert phrases first ([`crate::db::fts_match_query`]),
 //! so FTS5's own query operators can never be typed in from a browser.
@@ -20,8 +21,9 @@
 //! filter's business (`GET /admin/pages?q=`, in
 //! [`crate::routes::cms`]).
 
+use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -37,10 +39,33 @@ use crate::util::format_timestamp;
 
 /// Route fragment for this module (merged while the CMS is enabled).
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/buscar", get(search_page))
+    Router::new()
+        .route("/search", get(search_page))
+        // The F13 anglicization moved the search to /search; the old
+        // Spanish spelling stays as a permanent redirect so existing
+        // links and bookmarks keep working.
+        .route("/buscar", get(legacy_search_redirect))
 }
 
-/// `GET /buscar`: the search form and its results, paginated with
+/// `GET /buscar` (pre-F13 spelling): `301` to `/search`, query
+/// preserved. The raw query is echoed only while it stays printable
+/// ASCII (the URI parser already rejects control bytes, so this is
+/// belt-and-braces against a header-injection reflex).
+async fn legacy_search_redirect(request: Request) -> Response {
+    let target = request
+        .uri()
+        .query()
+        .filter(|query| query.bytes().all(|byte| byte.is_ascii_graphic()))
+        .map(|query| format!("/search?{query}"))
+        .unwrap_or_else(|| String::from("/search"));
+    Response::builder()
+        .status(StatusCode::MOVED_PERMANENTLY)
+        .header(header::LOCATION, target)
+        .body(Body::empty())
+        .expect("valid redirect")
+}
+
+/// `GET /search`: the search form and its results, paginated with
 /// `[cms] index_page_size`. An empty — or quotes-only, which sanitizes
 /// to nothing — query renders the page with an invitation instead of
 /// an error: a search box should never answer 4xx.
@@ -104,7 +129,7 @@ async fn search_page(State(state): State<AppState>, request: Request) -> Respons
     // The pagination links must carry the query along, re-encoded so
     // the visitor's words survive intact (spaces, accents, operators).
     let base = format!(
-        "/buscar?{}",
+        "/search?{}",
         url::form_urlencoded::Serializer::new(String::new())
             .append_pair("q", &terms)
             .finish()
@@ -113,7 +138,7 @@ async fn search_page(State(state): State<AppState>, request: Request) -> Respons
     render_view(
         &state,
         &parts,
-        "buscar.jhs",
+        "search.jhs",
         vec![
             ("busqueda", Value::String(terms)),
             ("resultados", Value::Array(resultados)),

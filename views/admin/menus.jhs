@@ -12,7 +12,7 @@
       </div>
     </div>
 
-<?jhs if (query.ok == "eliminado") { ?>
+<?jhs if (query.ok == "deleted") { ?>
     <p class="notice notice-ok">Menu deleted (with all its items).</p>
 <?jhs } ?>
 <?jhs if (form_error) { ?>

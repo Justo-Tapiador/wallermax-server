@@ -142,7 +142,7 @@ struct LoginResponse {
 ///   used by the registration modal: on success the fresh account is
 ///   logged in directly (session cookie attached) and the browser gets
 ///   a `303` to the same-origin `redirect` field (default `/`);
-///   failures bounce back with `?register_error=<code>#registrar` so
+///   failures bounce back with `?register_error=<code>#register` so
 ///   the modal re-opens with the message.
 async fn register(
     State(state): State<AppState>,
@@ -169,7 +169,7 @@ async fn register(
                     redirect,
                 )
             }
-            Err(message) => return form_error_response(StatusCode::BAD_REQUEST, &message),
+            Err(message) => return AppError::bad_request(&message).into_response(),
         }
     } else {
         match <JsonBody<Credentials> as FromRequest<()>>::from_request(request, &()).await {
@@ -274,7 +274,7 @@ async fn register(
             // signing failure): send the browser to the login page
             // instead of leaving it stranded on a redirect-less page.
             tracing::warn!(message = error.message(), "post-registration login failed");
-            let redirect = redirect_with_error("/login", "login_error", "postregistro", "");
+            let redirect = redirect_with_error("/login", "login_error", "post_register", "");
             see_other(&redirect)
         }
     }
@@ -295,20 +295,20 @@ fn register_failure(
     }
 
     let code = match error.status_code() {
-        StatusCode::CONFLICT => "tomado",
-        StatusCode::FORBIDDEN => "cerrado",
+        StatusCode::CONFLICT => "taken",
+        StatusCode::FORBIDDEN => "closed",
         StatusCode::BAD_REQUEST => {
             if error.message().contains("username") {
-                "usuario"
+                "username"
             } else {
-                "contrasena"
+                "password"
             }
         }
         _ => "error",
     };
 
     let secure = secure_cookies(state);
-    let target = redirect_with_error(redirect, "register_error", code, "#registrar");
+    let target = redirect_with_error(redirect, "register_error", code, "#register");
     redirect_response(&target, Some(session::clear_cookie_value(secure)))
 }
 
@@ -361,7 +361,7 @@ async fn login(
                     redirect,
                 )
             }
-            Err(message) => return form_error_response(StatusCode::BAD_REQUEST, &message),
+            Err(message) => return AppError::bad_request(&message).into_response(),
         }
     } else {
         match <JsonBody<Credentials> as FromRequest<()>>::from_request(request, &()).await {
@@ -381,11 +381,10 @@ async fn login(
                 // error page: they are not retryable from the form.
                 if error.status_code() == StatusCode::UNAUTHORIZED {
                     let secure = secure_cookies(&state);
-                    let target =
-                        redirect_with_error(&redirect, "login_error", "credenciales", "#login");
+                    let target = redirect_with_error(&redirect, "login_error", "invalid", "#login");
                     redirect_response(&target, Some(session::clear_cookie_value(secure)))
                 } else {
-                    form_error_response(error.status_code(), error.message())
+                    error.into_response_with_request_id(request_id.as_deref())
                 }
             } else {
                 error.into_response_with_request_id(request_id.as_deref())
@@ -635,7 +634,7 @@ async fn logout(State(state): State<AppState>, request: Request) -> Response {
                 form.refresh_token,
                 safe_redirect(form.redirect.as_deref()).to_owned(),
             ),
-            Err(message) => return form_error_response(StatusCode::BAD_REQUEST, &message),
+            Err(message) => return AppError::bad_request(&message).into_response(),
         };
 
         // Lenient identity: whatever the cookie (or header) says, a
@@ -873,33 +872,6 @@ fn is_local_redirect(path: &str) -> bool {
         && !path.chars().any(char::is_control)
 }
 
-/// Minimal HTML error page for form submissions (browsers; the API
-/// keeps answering the JSON envelope). Deliberately script-free so the
-/// default CSP (`default-src 'none'`) allows it untouched.
-fn form_error_response(status: StatusCode, message: &str) -> Response {
-    let html = format!(
-        "<!DOCTYPE html>\n<html lang=\"es\">\n<head>\n<meta charset=\"utf-8\">\n<title>{title}</title>\n</head>\n<body>\n<h1>{title}</h1>\n<p>{message}</p>\n<p><a href=\"/login\">Volver a intentarlo</a></p>\n</body>\n</html>\n",
-        title = "No se pudo iniciar sesión",
-        message = escape_html(message),
-    );
-
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .body(Body::from(html))
-        .expect("valid error page")
-}
-
-/// HTML-escapes a text so server messages stay inert inside the error
-/// page.
-fn escape_html(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#039;")
-}
-
 /// A `204` response that expires the `wallermax_session` cookie.
 fn cleared_session_response(state: &AppState) -> Response {
     let mut response = Response::builder()
@@ -1022,19 +994,19 @@ mod tests {
     #[test]
     fn error_redirects_compose_query_and_fragment() {
         assert_eq!(
-            redirect_with_error("/", "login_error", "credenciales", "#login"),
-            "/?login_error=credenciales#login"
+            redirect_with_error("/", "login_error", "invalid", "#login"),
+            "/?login_error=invalid#login"
         );
         assert_eq!(
-            redirect_with_error("/p/x?a=b", "register_error", "tomado", ""),
-            "/p/x?a=b&register_error=tomado"
+            redirect_with_error("/p/x?a=b", "register_error", "taken", ""),
+            "/p/x?a=b&register_error=taken"
         );
     }
 
     #[test]
     fn html_escaping_neutralizes_markup() {
         assert_eq!(
-            escape_html("<script>alert('x')</script>&"),
+            crate::error::escape_html_text("<script>alert('x')</script>&"),
             "&lt;script&gt;alert(&#039;x&#039;)&lt;/script&gt;&amp;"
         );
     }

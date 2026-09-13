@@ -228,7 +228,7 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
             "cms enabled (public pages at /p, admin panel at /admin, menus at /admin/menus, \
              sitemap at /sitemap.xml while [cms] sitemap; media library at /admin/media \
              serving /media/{{id}}/{{name}}, uploads capped by [cms] media_max_bytes; search \
-             at /buscar and the admin page filter, feeds at /feed.xml and /atom.xml while \
+             at /search and the admin page filter, feeds at /feed.xml and /atom.xml while \
              [cms] feed, listings paginated with [cms] index_page_size; content, media and \
              users — server configuration stays in wallermax.toml)"
         );

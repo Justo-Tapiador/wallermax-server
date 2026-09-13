@@ -15,13 +15,13 @@
       </div>
     </div>
 
-<?jhs if (query.ok == "creado") { ?>
+<?jhs if (query.ok == "created") { ?>
     <p class="notice notice-ok">Account created.</p>
 <?jhs } ?>
-<?jhs if (query.ok == "guardado") { ?>
+<?jhs if (query.ok == "saved") { ?>
     <p class="notice notice-ok">Changes saved.</p>
 <?jhs } ?>
-<?jhs if (query.ok == "eliminado") { ?>
+<?jhs if (query.ok == "deleted") { ?>
     <p class="notice notice-ok">Account deleted (its refresh tokens are revoked; access tokens expire on their own within the hour).</p>
 <?jhs } ?>
 <?jhs if (query.error == "propia") { ?>

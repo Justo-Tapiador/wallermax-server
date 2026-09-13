@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -20,20 +20,20 @@
   <div class="wrap">
     <article class="tarjeta">
 <?jhs if (!page.is_published) { ?>
-      <p class="aviso aviso-info">Borrador: solo lo ven los editores; el
-         público recibe un 404 hasta que se publique.<?jhs if (page.scheduled_for_h) { ?>
-         Se publicará automáticamente el <?= page.scheduled_for_h ?> (UTC).<?jhs } ?></p>
+      <p class="aviso aviso-info">Draft: only editors can see it; the public
+         gets a 404 until it is published.<?jhs if (page.scheduled_for_h) { ?>
+         It will be published automatically on <?= page.scheduled_for_h ?> (UTC).<?jhs } ?></p>
 <?jhs } ?>
       <h1><?= page.title ?></h1>
 <?jhs if (page.breadcrumbs && page.breadcrumbs.length) { ?>
       <p class="pagina-meta migas">
-        <a href="/">Inicio</a><?jhs page.breadcrumbs.forEach(function (miga) { ?> · <a href="/p/<?= miga.slug ?>"><?= miga.title ?></a><?jhs }); ?>
+        <a href="/">Home</a><?jhs page.breadcrumbs.forEach(function (crumb) { ?> · <a href="/p/<?= crumb.slug ?>"><?= crumb.title ?></a><?jhs }); ?>
       </p>
 <?jhs } ?>
       <p class="pagina-meta">
-        /p/<?= page.slug ?> · actualizada <?= page.updated_at_h ?><?jhs if (page.author) { ?> · por <?= page.author ?><?jhs } ?>
+        /p/<?= page.slug ?> · updated <?= page.updated_at_h ?><?jhs if (page.author) { ?> · by <?= page.author ?><?jhs } ?>
 <?jhs if (user && (user.role == "admin" || user.role == "editor")) { ?>
-         · <a href="/admin/pages/<?= page.id ?>/edit">editar</a>
+         · <a href="/admin/pages/<?= page.id ?>/edit">edit</a>
 <?jhs } ?>
       </p>
       <div class="pagina-cuerpo">

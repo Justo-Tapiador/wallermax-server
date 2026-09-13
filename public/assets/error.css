@@ -1,0 +1,168 @@
+/* wallermax-server — the shared error page stylesheet (F13).
+ *
+ * One compact, standalone sheet for every 4xx/5xx page the server
+ * answers to browsers (content negotiation happens in
+ * src/middleware/error_pages.rs; API clients keep the JSON envelope).
+ *
+ * Design tokens mirror public/assets/admin.css (F12): same palette,
+ * same dark-mode strategy — `prefers-color-scheme` for visitors that
+ * never chose, and `[data-theme="dark"]` for panel editors whose
+ * `wm_theme` cookie the error middleware reads in Rust.
+ *
+ * Zero JavaScript, zero inline styles: the default CSP
+ * (`style-src 'self'`) serves this page untouched. */
+
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --text: #1f2430;
+  --muted: #6b7280;
+  --accent: #2f6fed;
+  --accent-ink: #ffffff;
+  --edge: #e3e6ec;
+  --code-bg: #eef1f5;
+  --danger: #b3261e;
+}
+
+[data-theme="dark"] {
+  --bg: #12151c;
+  --surface: #1a1f29;
+  --text: #e8eaf0;
+  --muted: #98a1b3;
+  --accent: #6c9bff;
+  --accent-ink: #0e1420;
+  --edge: #2a3140;
+  --code-bg: #232b39;
+  --danger: #ff8a80;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #12151c;
+    --surface: #1a1f29;
+    --text: #e8eaf0;
+    --muted: #98a1b3;
+    --accent: #6c9bff;
+    --accent-ink: #0e1420;
+    --edge: #2a3140;
+    --code-bg: #232b39;
+    --danger: #ff8a80;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  padding: 24px;
+}
+
+.error-card {
+  width: 100%;
+  max-width: 560px;
+  background: var(--surface);
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+  padding: 36px 40px;
+  box-shadow: 0 10px 30px rgba(15, 20, 32, 0.06);
+}
+
+.error-status {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.error-code {
+  font-size: 44px;
+  font-weight: 800;
+  letter-spacing: -1px;
+  color: var(--danger);
+  line-height: 1;
+}
+
+.error-code-name {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+h1 {
+  font-size: 22px;
+  margin: 0 0 12px;
+}
+
+.error-message {
+  color: var(--muted);
+  margin: 0 0 20px;
+}
+
+.error-detail {
+  background: var(--code-bg);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.error-detail dt {
+  color: var(--text);
+  font-weight: 600;
+  margin-top: 6px;
+}
+
+.error-detail dt:first-child { margin-top: 0; }
+
+.error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 24px;
+}
+
+.error-actions a {
+  display: inline-block;
+  padding: 9px 18px;
+  border-radius: 8px;
+  text-decoration: none;
+  font-weight: 600;
+  font-size: 14px;
+  border: 1px solid var(--edge);
+  color: var(--text);
+}
+
+.error-actions a:hover { border-color: var(--muted); }
+
+.error-actions a.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+}
+
+.error-retry {
+  margin: 16px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.error-brand {
+  margin-top: 28px;
+  padding-top: 16px;
+  border-top: 1px solid var(--edge);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.error-brand a { color: var(--muted); }

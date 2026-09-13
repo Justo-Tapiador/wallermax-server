@@ -7,18 +7,24 @@
 //! pipeline below reads naturally from top to bottom:
 //!
 //! ```text
-//! request  ->  security headers -> cors -> request id -> logging
-//!              -> rate limit -> body limit -> timeout -> templates
-//!              -> routes
-//! response <-  security headers <- cors <- request id <- logging
-//!              <- rate limit <- body limit <- timeout <- templates
-//!              <- routes
+//! request  ->  security headers -> error pages -> cors -> request id
+//!              -> logging -> rate limit -> body limit -> timeout
+//!              -> templates -> routes
+//! response <-  security headers <- error pages <- cors <- request id
+//!              <- logging <- rate limit <- body limit <- timeout
+//!              <- templates <- routes
 //! ```
 //!
 //! Ordering rationale:
 //!
 //! - **Security headers** is outermost so every response — including 404
 //!   fallbacks, timeouts and rate-limit rejections — carries them.
+//! - **Error pages** (F13) turns envelope errors into the shared HTML
+//!   error page for browser navigations. It sits inside the security
+//!   headers (the swapped page still receives CSP/HSTS on the way out)
+//!   and outside CORS, the request id and the limiter, so it sees every
+//!   envelope the pipeline produces — 429s included — while the logging
+//!   middleware keeps recording the true status.
 //! - **CORS** sits outside logging: preflight requests are answered
 //!   directly without polluting logs or stats.
 //! - **Request id** runs before the other feature middlewares so error
@@ -40,6 +46,7 @@
 
 pub mod body_limit;
 pub mod cors;
+pub mod error_pages;
 pub mod logging;
 pub mod rate_limit;
 pub mod request_id;
@@ -132,6 +139,12 @@ pub fn apply(config: &AppConfig, state: AppState, router: Router<AppState>) -> R
     } else {
         router
     };
+
+    // Error pages (F13) — always on, no toggle: negotiating a readable
+    // page for browser errors is correct the way a correct status code
+    // is correct. Applied just inside the security headers so the
+    // swapped page receives CSP on its way out.
+    let router = router.layer(middleware::from_fn(error_pages::run));
 
     // 1st (outermost): security headers on every response.
     if config.middleware.security_headers {

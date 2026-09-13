@@ -27,8 +27,8 @@
 //! 5. Everything else runs the normal pipeline (API routes first, then
 //!    static files).
 //! 6. A pipeline `404` auto-routes to the views directory before the
-//!    JSON envelope is returned: `GET /contacto` renders
-//!    `views/contacto.jhs`, `GET /blog` renders `views/blog.jhs` or
+//!    JSON envelope is returned: `GET /contact` renders
+//!    `views/contact.jhs`, `GET /blog` renders `views/blog.jhs` or
 //!    `views/blog/index.jhs`, and `GET /` falls back to
 //!    `views/index.jhs` when the static index file is missing (and no
 //!    CMS default page took it over).
@@ -255,6 +255,13 @@ pub(crate) async fn base_data(
 /// cookie header out of the `req` global — this Rust-side read is
 /// the only place templates can learn the preference from.
 fn theme_global(headers: &HeaderMap) -> Value {
+    pinned_theme(headers).map_or(Value::Null, |theme| Value::String(theme.to_owned()))
+}
+
+/// The raw `wm_theme` cookie value ("dark"/"light") for Rust-side
+/// pages that render outside the engine (the shared error page, F13)
+/// — the borrowed core of [`theme_global`].
+pub(crate) fn pinned_theme(headers: &HeaderMap) -> Option<&str> {
     for value in headers.get_all(header::COOKIE) {
         let Ok(raw) = value.to_str() else {
             continue;
@@ -263,12 +270,12 @@ fn theme_global(headers: &HeaderMap) -> Value {
             let pair = pair.trim();
             if let Some((name, theme)) = pair.split_once('=') {
                 if name == "wm_theme" && (theme == "dark" || theme == "light") {
-                    return Value::String(theme.to_owned());
+                    return Some(theme);
                 }
             }
         }
     }
-    Value::Null
+    None
 }
 
 /// The `req` global (v0.9.0): an Express-shaped request object with a
@@ -488,7 +495,7 @@ fn trim_leading_slash(path: &str) -> &str {
 ///
 /// - `/` → `views/index.jhs`;
 /// - `/x.jhs` → `views/x.jhs`;
-/// - `/contacto` → `views/contacto.jhs`, then `views/contacto/index.jhs`;
+/// - `/contact` → `views/contact.jhs`, then `views/contact/index.jhs`;
 /// - `/blog/` → the same two shapes as `/blog`.
 fn view_candidate(views_dir: &Path, decoded: &str) -> Option<PathBuf> {
     let relative = decoded.trim_matches('/');

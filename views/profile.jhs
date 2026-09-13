@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Your profile — wallermax</title>
+  <link rel="stylesheet" href="/assets/wallermax.css">
+</head>
+<body>
+<?jhs include("partials/header") ?>
+<main>
+  <div class="wrap">
+<?jhs
+  var pwMessages = {
+    current: "The current password does not match.",
+    new: "The new password does not meet the requirements (minimum length 8).",
+    form: "The form did not arrive correctly; try again.",
+    session: "Your session is no longer valid; sign in again.",
+    error: "The password could not be changed (internal error)."
+  };
+  var pwError = query.pw_error ? (pwMessages[query.pw_error] || "The password could not be changed.") : null;
+?>
+<?jhs if (user) { ?>
+<?jhs if (query.ok == "password") { ?>
+    <p class="aviso aviso-ok">Password updated.</p>
+<?jhs } ?>
+<?jhs if (pwError) { ?>
+    <p class="aviso aviso-error"><?= pwError ?></p>
+<?jhs } ?>
+    <section class="tarjeta tarjeta-angosta">
+      <h1>Your profile</h1>
+      <p>Signed in as <strong><?= user.username ?></strong> with the
+         <span class="chip chip-acento"><?= user.role ?></span> role.</p>
+      <p>The session lives in a <code>wallermax_session</code> cookie
+         managed by the server: <code>HttpOnly</code> (no script can read
+         it), <code>SameSite=Strict</code>, and expiry tied to the token.</p>
+<?jhs if (user.role == "admin" || user.role == "editor") { ?>
+      <p><a class="btn btn-fantasma" href="/admin">Open the CMS panel</a></p>
+<?jhs } ?>
+    </section>
+
+    <section class="tarjeta tarjeta-angosta" aria-labelledby="pw-title">
+      <h2 id="pw-title">Change your password</h2>
+      <form method="post" action="/profile/password">
+        <input type="hidden" name="redirect" value="/profile">
+        <div class="campo">
+          <label for="pw-actual">Current password</label>
+          <input id="pw-actual" type="password" name="current_password" required
+                 autocomplete="current-password">
+        </div>
+        <div class="campo">
+          <label for="pw-nueva">New password</label>
+          <input id="pw-nueva" type="password" name="new_password" required
+                 minlength="8" autocomplete="new-password">
+          <p class="ayuda">At least 8 characters.</p>
+        </div>
+        <button class="btn btn-primario" type="submit">Save the new password</button>
+      </form>
+    </section>
+<?jhs } else { ?>
+    <section class="tarjeta tarjeta-angosta">
+      <h1>Profile</h1>
+      <p>This page is only for signed-in sessions. Sign in with your
+         account from the header or go to the
+         <a href="/login">sign-in form</a>.</p>
+    </section>
+<?jhs } ?>
+  </div>
+</main>
+<?jhs include("partials/footer") ?>
+</body>
+</html>

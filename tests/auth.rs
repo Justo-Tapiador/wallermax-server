@@ -781,7 +781,7 @@ async fn form_login_failures_bounce_back_to_the_page() {
         .expect("form login attempt succeeds");
 
     // v0.8.0: browsers bounce back to the page they came from with
-    // `?login_error=credenciales#login`, which re-opens the modal and
+    // `?login_error=invalid#login`, which re-opens the modal and
     // shows the message. No cookie is set on failure.
     assert_eq!(response.status(), 303);
     let location = response
@@ -789,7 +789,7 @@ async fn form_login_failures_bounce_back_to_the_page() {
         .get("location")
         .and_then(|value| value.to_str().ok())
         .expect("redirect location");
-    assert_eq!(location, "/p/inicio?login_error=credenciales#login");
+    assert_eq!(location, "/p/inicio?login_error=invalid#login");
     assert!(
         response.headers().get("set-cookie").is_some(),
         "cookie cleared"

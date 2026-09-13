@@ -1,9 +1,9 @@
-/* wallermax — hoja de estilos del sitio y del CMS (v0.8.0).
+/* wallermax — the public site + CMS stylesheet (v0.8.0).
  *
- * Sin JavaScript: los modales de login/registro usan el truco CSS
- * :target (el enlace abre, "cerrar" navega a #modal-cerrada), y todo lo
- * demás son formularios y enlaces normales. La CSP por defecto
- * (`default-src 'none'; style-src 'self' …`) la permite tal cual.
+ * No JavaScript: the login/register modals use the CSS :target trick
+ * (the link opens, "close" navigates to #modal-closed), and everything
+ * else is plain forms and links. The default CSP
+ * (`default-src 'none'; style-src 'self' …`) allows it as is.
  */
 
 :root {
@@ -269,7 +269,7 @@ main { flex: 1; padding: 34px 0 46px; }
 .pagina-cuerpo img { max-width: 100%; }
 .pagina-cuerpo pre { overflow-x: auto; padding: 12px; background: var(--papel); border-radius: 8px; }
 
-/* ── Listas de páginas / usuarios ─────────────────────────── */
+/* ── Page / user listings ─────────────────────────────────── */
 
 .lista { list-style: none; margin: 0; padding: 0; }
 
@@ -295,7 +295,7 @@ main { flex: 1; padding: 34px 0 46px; }
 
 .vacio { color: var(--tinta-flojo); padding: 26px 0; text-align: center; }
 
-/* ── Panel de administración ──────────────────────────────── */
+/* ── Administration panel ─────────────────────────────────── */
 
 .panel-barra {
   display: flex;
@@ -451,7 +451,7 @@ main { flex: 1; padding: 34px 0 46px; }
   padding: 10px;
 }
 
-/* ── Findability (F10): buscador, resultados y paginación ──────── */
+/* ── Findability (F10): search box, results and pagination ───── */
 
 .buscador {
   display: flex;

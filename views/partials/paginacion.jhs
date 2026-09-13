@@ -1,20 +1,20 @@
 <?jhs
-  // Paginación compartida (F10). Global: `paginacion` — { pagina,
-  // total_paginas, total_items, anterior, siguiente, base }, con
-  // anterior/siguiente a null en los bordes. El guard con typeof
-  // cubre las vistas que pueden renderizarse por el auto-ruta sin
-  // haber pasado por una ruta con paginación.
+  // Shared pagination (F10). Global: `paginacion` — { pagina,
+  // total_paginas, total_items, anterior, siguiente, base }, with
+  // anterior/siguiente null at the edges. The typeof guard covers
+  // views that can render through the auto-router without having
+  // passed through a paginated route.
   var hay = typeof paginacion !== "undefined" && paginacion &&
              paginacion.total_paginas > 1;
 ?>
 <?jhs if (hay) { ?>
-<nav class="paginacion" aria-label="Paginación de resultados">
+<nav class="paginacion" aria-label="Results pagination">
 <?jhs if (paginacion.anterior) { ?>
-  <a class="btn btn-fantasma" href="<?= paginacion.anterior ?>">&#8592; Anterior</a>
+  <a class="btn btn-fantasma" href="<?= paginacion.anterior ?>">&#8592; Previous</a>
 <?jhs } ?>
-  <span class="paginacion-info">Página <?= paginacion.pagina ?> de <?= paginacion.total_paginas ?></span>
+  <span class="paginacion-info">Page <?= paginacion.pagina ?> of <?= paginacion.total_paginas ?></span>
 <?jhs if (paginacion.siguiente) { ?>
-  <a class="btn btn-fantasma" href="<?= paginacion.siguiente ?>">Siguiente &#8594;</a>
+  <a class="btn btn-fantasma" href="<?= paginacion.siguiente ?>">Next &#8594;</a>
 <?jhs } ?>
 </nav>
 <?jhs } ?>

@@ -510,7 +510,7 @@ async fn deletion_removes_the_row_the_files_and_the_urls() {
         .and_then(|value| value.to_str().ok())
         .expect("redirect location")
         .to_owned();
-    assert_eq!(redirect, "/admin/media?ok=eliminado");
+    assert_eq!(redirect, "/admin/media?ok=deleted");
 
     // Files gone, row gone, URL gone.
     let files_after: Vec<String> = std::fs::read_dir(&media_dir.path)

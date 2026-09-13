@@ -1,10 +1,10 @@
 <?jhs
-const title ="Plantilla .jhs";
-const greeting ="Hola desde una plantilla .jhs";
+const title =".jhs template";
+const greeting ="Hello from a .jhs template";
 const favicon ="/assets/favicon.png";
 ?>
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <link rel="icon" type="image/png" href="<?= favicon ?>" />
@@ -14,21 +14,22 @@ const favicon ="/assets/favicon.png";
   <h1><?jhs echo(greeting) ?></h1>
 <ul>
 <?jhs
-  var items = ["uno", "dos", "tres"];
-  items.forEach(function (item, i) {?> <li><?jhs 
-    echo("elemento " + (i + 1) + ": " + item);
-    ?></li><?jhs 
+  var items = ["one", "two", "three"];
+  items.forEach(function (item, i) {?>
+ <li><?jhs
+    echo("element " + (i + 1) + ": " + item);
+    ?></li><?jhs
   });
-?> 
+?>
 </ul>
-  <p>Resultado de una expresión: <?= 40 + 2 ?></p>
-  <p>Con escape automático: <?= "<b>no en negrita</b>" ?></p>
-  <p>Sin escape (contenido de confianza): <?= raw("<b>sí en negrita</b>") ?></p>
-  <p>Año actual: <?= new Date().getFullYear() ?></p>
+  <p>The result of an expression: <?= 40 + 2 ?></p>
+  <p>With auto-escaping: <?= "<b>not bold</b>" ?></p>
+  <p>Without escaping (trusted content): <?= raw("<b>actually bold</b>") ?></p>
+  <p>Current year: <?= new Date().getFullYear() ?></p>
 <script>
-   console.log("<?= 'línea de depuración desde la plantilla'?>");
+   console.log("<?= 'debug line from the template'?>");
 </script>
-  <p>El global <code>user</code> (null para visitantes anónimos):</p>
+  <p>The <code>user</code> global (null for anonymous visitors):</p>
 <pre>
 <?jhs echo(JSON.stringify(user, null, 4)) ?>
 </pre>

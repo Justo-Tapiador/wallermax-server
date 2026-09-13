@@ -310,7 +310,7 @@ async fn drafts_gate_markdown_pages_like_any_other() {
         body.contains("<h1>Secreto</h1>"),
         "editor sees the render: {body}"
     );
-    assert!(body.contains("Borrador:"), "the draft banner: {body}");
+    assert!(body.contains("Draft:"), "the draft banner: {body}");
 }
 
 #[tokio::test]

@@ -44,7 +44,7 @@ use crate::state::AppState;
 /// path while enabled.
 ///
 /// `cms_enabled` mounts the CMS family (`/p/{slug}`, `/admin/*` and
-/// `/perfil/password`), which additionally requires the template
+/// `/profile/password`), which additionally requires the template
 /// rendering services in the application state. The media library
 /// routes (`/admin/media` and the public `/media/{id}/{name}`
 /// family, F9) ride the exact same mount: they live in the same

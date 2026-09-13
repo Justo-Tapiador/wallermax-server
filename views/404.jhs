@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Página no encontrada — wallermax</title>
+  <title>Page not found — wallermax</title>
   <link rel="stylesheet" href="/assets/wallermax.css">
 </head>
 <body>
@@ -11,10 +11,10 @@
 <main>
   <div class="wrap">
     <section class="tarjeta tarjeta-angosta">
-      <h1>404 — Página no encontrada</h1>
-      <p>No hay nada en <code><?= path ?></code>. Si esperabas una página del
-         CMS, puede que sea un borrador o que la hayan movido.</p>
-      <p><a class="btn btn-primario" href="/p">Ver las páginas publicadas</a></p>
+      <h1>404 — Page not found</h1>
+      <p>There is nothing at <code><?= path ?></code>. If you expected a CMS
+         page, it may be a draft or it may have been moved.</p>
+      <p><a class="btn btn-primario" href="/p">Browse the published pages</a></p>
     </section>
   </div>
 </main>
