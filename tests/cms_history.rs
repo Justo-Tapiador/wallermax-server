@@ -289,7 +289,7 @@ async fn history_body(server: &TestServer, client: &reqwest::Client, id: i64) ->
 
 /// How many revision rows the history page carries.
 fn revision_rows(body: &str) -> usize {
-    body.matches(">Revisión ").count()
+    body.matches(">Revision ").count()
 }
 
 /// Boots the standard battery server with the default revision cap.
@@ -323,13 +323,13 @@ async fn every_save_appends_a_revision() {
     // Revision 1: the creation snapshot, noted by its author.
     let body = history_body(&server, &client, id).await;
     assert_eq!(revision_rows(&body), 1, "creation leaves revision 1");
-    assert!(body.contains(">Revisión 1"), "the single row is revision 1");
+    assert!(body.contains(">Revision 1"), "the single row is revision 1");
     assert!(
-        body.contains("— actual"),
+        body.contains("— current"),
         "the newest revision is marked current"
     );
     assert!(body.contains("primera versión"), "the note rides along");
-    assert!(body.contains("por admin"), "the editor is attributed");
+    assert!(body.contains("by admin"), "the editor is attributed");
 
     // Two edits: one with a note, one without.
     update_page_full(
@@ -358,13 +358,13 @@ async fn every_save_appends_a_revision() {
     let body = history_body(&server, &client, id).await;
     assert_eq!(revision_rows(&body), 3, "every save appended one");
     // Newest first: revision 3 leads the list.
-    let first = body.find(">Revisión ").expect("a first row exists");
+    let first = body.find(">Revision ").expect("a first row exists");
     assert!(
-        body[first..].starts_with(">Revisión 3"),
+        body[first..].starts_with(">Revision 3"),
         "newest first (got {})",
         &body[first..first + 12]
     );
-    assert!(body.contains(">Revisión 2") && body.contains(">Revisión 1"));
+    assert!(body.contains(">Revision 2") && body.contains(">Revision 1"));
     assert!(body.contains("reescrita"), "the second note rides along");
 
     // The detail view of revision 1 shows the ORIGINAL body, escaped —
@@ -376,13 +376,13 @@ async fn every_save_appends_a_revision() {
         .expect("revision detail succeeds");
     assert_eq!(response.status(), 200);
     let detail = response.text().await.expect("revision body");
-    assert!(detail.contains("Revisión 1 de «La página con historial»"));
+    assert!(detail.contains("Revision 1 of «La página con historial»"));
     assert!(
         detail.contains("&lt;strong&gt;uno&lt;/strong&gt;"),
         "the body renders as escaped source, not HTML"
     );
     assert!(
-        detail.contains("Restaurar esta revisión"),
+        detail.contains("Restore this revision"),
         "the restore form is offered"
     );
 }
@@ -443,7 +443,7 @@ async fn restore_recovers_content_and_records_itself() {
     // The restore itself is recorded as revision 3, noted as such.
     let body = history_body(&server, &client, id).await;
     assert_eq!(revision_rows(&body), 3, "the restore appended a revision");
-    assert!(body.contains("Restaurada desde la revisión 1."));
+    assert!(body.contains("Restored from revision 1."));
 }
 
 #[tokio::test]
@@ -554,7 +554,7 @@ async fn restore_validates_todays_world() {
         "the slug conflict re-renders the revision view with the error"
     );
     let body = response.text().await.expect("revision body");
-    assert!(body.contains("Ese slug ya existe"));
+    assert!(body.contains("That slug already exists"));
     // Nothing was appended: the history still holds the two saves.
     let body = history_body(&server, &client, moved).await;
     assert_eq!(
@@ -610,7 +610,10 @@ async fn restore_validates_todays_world() {
         "the dead parent re-renders with the error"
     );
     let body = response.text().await.expect("revision body");
-    assert!(body.contains("La página padre de la revisión ya no existe"));
+    assert!(
+        body.contains("parent page no longer exists"),
+        "the dead-parent error: {body}"
+    );
 }
 
 #[tokio::test]
@@ -641,14 +644,14 @@ async fn revision_cap_prunes_the_oldest() {
         2,
         "the cap pruned the oldest snapshots"
     );
-    let first = body.find(">Revisión ").expect("a first row exists");
+    let first = body.find(">Revision ").expect("a first row exists");
     assert!(
-        body[first..].starts_with(">Revisión 5"),
+        body[first..].starts_with(">Revision 5"),
         "newest first (got {})",
         &body[first..first + 12]
     );
-    assert!(body.contains(">Revisión 4"));
-    assert!(!body.contains(">Revisión 1"), "the pruned ones are gone");
+    assert!(body.contains(">Revision 4"));
+    assert!(!body.contains(">Revision 1"), "the pruned ones are gone");
 
     // The pruned revision does not resolve anymore.
     let response = client
@@ -788,7 +791,7 @@ async fn scheduled_pages_hide_then_publish_at_read_time() {
         .await
         .unwrap();
     assert!(
-        tree.contains("programada"),
+        tree.contains("&#9679; Scheduled"),
         "the admin tree shows the schedule badge"
     );
 
@@ -918,8 +921,8 @@ async fn schedules_normalize_on_save() {
         .await
         .unwrap();
     assert!(
-        tree.contains(">publicada<"),
-        "the badge says publicada, not programada"
+        tree.contains("&#9679; Published"),
+        "the badge says published, not scheduled"
     );
 
     // Draft + a past date: the schedule is spent, dropped.

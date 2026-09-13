@@ -508,14 +508,14 @@ async fn parent_cycles_and_missing_parents_are_rejected() {
     let response = move_page(&server, &admin, a, "raiz", Some(b)).await;
     assert_eq!(response.status(), 200, "the form re-renders, no redirect");
     let body = response.text().await.expect("html body");
-    assert!(body.contains("ciclo"), "the cycle error: {body}");
+    assert!(body.contains("cycle"), "the cycle error: {body}");
 
     // A under A: itself.
     let response = move_page(&server, &admin, a, "raiz", Some(a)).await;
     assert_eq!(response.status(), 200);
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("propia padre"),
+        body.contains("its own parent"),
         "the self-parent error: {body}"
     );
 
@@ -524,7 +524,7 @@ async fn parent_cycles_and_missing_parents_are_rejected() {
     assert_eq!(response.status(), 200);
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("no existe"),
+        body.contains("parent page does not exist"),
         "the missing-parent error: {body}"
     );
 }
@@ -841,9 +841,8 @@ async fn menus_are_managed_over_the_admin_forms() {
     // Edit the item label through its edit form URL (parse the id).
     let item_id: i64 = body
         .split("/items/")
-        .nth(1)
-        .and_then(|rest| rest.split('/').next())
-        .and_then(|id| id.parse().ok())
+        .filter_map(|rest| rest.split('/').next())
+        .find_map(|id| id.parse::<i64>().ok())
         .expect("item id parsed from the detail");
     let response = admin
         .post(server.url(&format!("/admin/menus/{menu}/items/{item_id}")))
@@ -937,7 +936,7 @@ async fn item_forms_reject_missing_or_double_destinations() {
     .await;
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("necesita un destino"),
+        body.contains("needs a destination"),
         "no destination: {body}"
     );
 
@@ -955,7 +954,7 @@ async fn item_forms_reject_missing_or_double_destinations() {
     )
     .await;
     let body = response.text().await.expect("html body");
-    assert!(body.contains("no ambas"), "double destination: {body}");
+    assert!(body.contains("not both"), "double destination: {body}");
 
     // A custom URL without a label.
     let response = add_item(
@@ -972,7 +971,7 @@ async fn item_forms_reject_missing_or_double_destinations() {
     .await;
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("necesitan una etiqueta"),
+        body.contains("Custom links need a label"),
         "label required: {body}"
     );
 
@@ -991,7 +990,7 @@ async fn item_forms_reject_missing_or_double_destinations() {
     .await;
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("debe empezar por"),
+        body.contains("must start with"),
         "url scheme rejected: {body}"
     );
 }
@@ -1201,7 +1200,7 @@ async fn page_forms_validate_the_new_fields() {
         .expect("request");
     assert_eq!(response.status(), 200, "the form re-renders");
     let body = response.text().await.expect("html body");
-    assert!(body.contains("imagen social"), "the og_image error: {body}");
+    assert!(body.contains("social image"), "the og_image error: {body}");
 
     // A non-numeric position.
     let response = admin
@@ -1213,7 +1212,10 @@ async fn page_forms_validate_the_new_fields() {
         .expect("request");
     assert_eq!(response.status(), 200);
     let body = response.text().await.expect("html body");
-    assert!(body.contains("posición"), "the position error: {body}");
+    assert!(
+        body.contains("Position must be a number"),
+        "the position error: {body}"
+    );
 
     // A nonsense parent id.
     let response = admin
@@ -1225,5 +1227,5 @@ async fn page_forms_validate_the_new_fields() {
         .expect("request");
     assert_eq!(response.status(), 200);
     let body = response.text().await.expect("html body");
-    assert!(body.contains("padre"), "the parent error: {body}");
+    assert!(body.contains("parent"), "the parent error: {body}");
 }

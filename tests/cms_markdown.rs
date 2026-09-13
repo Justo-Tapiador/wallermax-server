@@ -375,7 +375,10 @@ async fn the_preview_renders_server_side_without_saving() {
     .await;
     assert_eq!(response.status(), 200, "the preview renders");
     let body = response.text().await.expect("html body");
-    assert!(body.contains("Vista previa"), "the preview section: {body}");
+    assert!(
+        body.contains("<h2 id=\"preview-titulo\">Preview</h2>"),
+        "the preview section: {body}"
+    );
     assert!(
         body.contains("<h1>Título</h1>"),
         "rendered markdown: {body}"
@@ -437,7 +440,7 @@ async fn preview_jhs_mode_runs_the_engine_and_reports_errors() {
     assert_eq!(response.status(), 200, "errors bounce, not 500");
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("aviso-error"),
+        body.contains("notice-error"),
         "the error shows inline: {body}"
     );
 }
@@ -584,7 +587,7 @@ async fn malformed_formats_bounce_back_with_the_draft_kept() {
     assert_eq!(response.status(), 200, "bounces back to the form");
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("El formato del contenido debe ser jhs o markdown."),
+        body.contains("The content format must be jhs or markdown."),
         "the Spanish error: {body}"
     );
     assert!(body.contains("no se guarda"), "the draft is kept: {body}");

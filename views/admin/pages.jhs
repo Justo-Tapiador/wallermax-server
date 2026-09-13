@@ -1,111 +1,134 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Páginas — CMS wallermax</title>
-  <link rel="stylesheet" href="/assets/wallermax.css">
-</head>
-<body>
-<?jhs include("partials/header") ?>
-<main>
-  <div class="wrap">
-    <div class="panel-barra">
-      <h1>Páginas</h1>
-      <a class="btn btn-fantasma" href="/admin">Panel</a>
-      <a class="btn btn-fantasma" href="/admin/pages/import">Importar</a>
-      <a class="btn btn-fantasma" href="/admin/media">Medios</a>
-      <a class="btn btn-primario" href="/admin/pages/new">Nueva página</a>
+<?jhs var titulo = "Pages"; ?>
+<?jhs include("partials/admin/head") ?>
+<?jhs include("partials/admin/sidebar") ?>
+<main class="main">
+<?jhs include("partials/admin/topbar") ?>
+  <section class="page">
+    <div class="breadcrumbs">Content / Pages</div>
+    <div class="page-head">
+      <div>
+        <h1>Pages</h1>
+        <p>Create and manage the pages of your corporate website.</p>
+      </div>
+      <div class="actions">
+        <a class="btn" href="/admin/pages/import">Import</a>
+        <a class="btn primary" href="/admin/pages/new">&#43; New page</a>
+      </div>
     </div>
 
 <?jhs if (query.ok == "eliminada") { ?>
-    <p class="aviso aviso-ok">Página eliminada.</p>
+    <p class="notice notice-ok">Page deleted.</p>
 <?jhs } ?>
 
-    <section class="tarjeta">
-      <form class="buscador" method="get" action="/admin/pages" role="search">
-        <input type="search" name="q" value="<?= filtro ?>" maxlength="200"
-               placeholder="Filtrar páginas por palabras (título y cuerpo)…"
-               aria-label="Filtrar páginas">
-        <button class="btn btn-fantasma" type="submit">Filtrar</button>
+    <section class="card">
+      <div class="toolbar">
+        <form class="filters" method="get" action="/admin/pages" role="search">
+          <input class="input" type="search" name="q" value="<?= filtro ?>" maxlength="200"
+                 placeholder="Filter pages by words&hellip;" aria-label="Filter pages">
+          <button class="btn" type="submit">Filter</button>
 <?jhs if (filtro) { ?>
-        <a class="btn btn-fantasma" href="/admin/pages">Quitar el filtro</a>
+          <a class="btn" href="/admin/pages">Clear</a>
 <?jhs } ?>
-      </form>
-    </section>
+        </form>
+      </div>
 
 <?jhs if (filtro && admin_resultados) { ?>
-    <section class="tarjeta">
 <?jhs if (admin_resultados.length) { ?>
-      <p class="ayuda"><?= admin_resultados.length ?> resultado(s) — el filtro busca en el
-         título y en el cuerpo tal como está guardado (borradores incluidos: sirve para
-         localizar referencias, como una URL de la biblioteca de medios).</p>
-      <ul class="lista resultados">
+      <div class="card-body">
+        <p class="table-sub"><?= admin_resultados.length ?> result<?= admin_resultados.length == 1 ? "" : "s" ?> — the filter matches title and body as stored (drafts included: useful to locate references, like a media library URL).</p>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th>Page</th><th>Status</th><th>Updated</th><th></th></tr>
+          </thead>
+          <tbody>
 <?jhs admin_resultados.forEach(function (pagina) { ?>
-        <li class="resultado">
-          <div class="principal">
-            <a href="/p/<?= pagina.slug ?>"><?= pagina.title ?></a>
-            <p class="fragmento"><?jhs pagina.fragmento.forEach(function (segmento) { ?><?jhs if (segmento.hit) { ?><mark><?= segmento.texto ?></mark><?jhs } else { ?><?= segmento.texto ?><?jhs } ?><?jhs }); ?></p>
-            <div class="secundario">/p/<?= pagina.slug ?> · actualizada <?= pagina.updated_at_h ?></div>
-          </div>
-<?jhs if (pagina.estado == "publicada") { ?>
-          <span class="publicado">publicada</span>
-<?jhs } else if (pagina.estado == "programada") { ?>
-          <span class="borrador">programada<?= pagina.publish_at_h ? " · " + pagina.publish_at_h : "" ?></span>
+            <tr>
+              <td>
+                <span class="table-title"><a href="/p/<?= pagina.slug ?>"><?= pagina.title ?></a></span>
+                <p class="resultado-fragmento"><?jhs pagina.fragmento.forEach(function (segmento) { ?><?jhs if (segmento.hit) { ?><mark><?= segmento.texto ?></mark><?jhs } else { ?><?= segmento.texto ?><?jhs } ?><?jhs }); ?></p>
+                <span class="table-sub">/p/<?= pagina.slug ?></span>
+              </td>
+<?jhs if (pagina.estado == "published") { ?>
+              <td><span class="status published">&#9679; Published</span></td>
+<?jhs } else if (pagina.estado == "scheduled") { ?>
+              <td><span class="status scheduled">&#9679; Scheduled<?= pagina.publish_at_h ? " · " + pagina.publish_at_h : "" ?></span></td>
 <?jhs } else { ?>
-          <span class="borrador">borrador</span>
+              <td><span class="status draft">&#9679; Draft</span></td>
 <?jhs } ?>
-          <div class="acciones">
-            <a class="btn btn-fantasma" href="/admin/pages/<?= pagina.id ?>/edit">Editar</a>
-            <a class="btn btn-fantasma" href="/admin/pages/<?= pagina.id ?>/history">Historial</a>
-            <form method="post" action="/admin/pages/<?= pagina.id ?>/delete">
-              <button class="btn btn-peligro" type="submit">Borrar</button>
-            </form>
-          </div>
-        </li>
+              <td><?= pagina.updated_at_h ?></td>
+              <td>
+                <div class="row-actions">
+                  <a class="btn" href="/admin/pages/<?= pagina.id ?>/edit">Edit</a>
+                  <a class="btn" href="/admin/pages/<?= pagina.id ?>/history">History</a>
+                  <form method="post" action="/admin/pages/<?= pagina.id ?>/delete">
+                    <button class="btn danger" type="submit">Delete</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
 <?jhs }); ?>
-      </ul>
+          </tbody>
+        </table>
+      </div>
 <?jhs } else { ?>
-      <p class="vacio">Ninguna página (ni borrador) coincide con «<?= filtro ?>».</p>
+      <div class="empty">
+        <div class="empty-icon">&#8981;</div>
+        <h2>No matches</h2>
+        <p>No page (or draft) matches «<?= filtro ?>».</p>
+      </div>
 <?jhs } ?>
-    </section>
 <?jhs } else { ?>
-    <section class="tarjeta">
 <?jhs if (admin_pages && admin_pages.length) { ?>
-      <ul class="lista">
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th>Page</th><th>Status</th><th>Updated</th><th></th></tr>
+          </thead>
+          <tbody>
 <?jhs admin_pages.forEach(function (pagina) { ?>
-        <li>
-          <div class="principal" style="padding-left:<?= pagina.depth * 1.25 ?>rem">
-            <a href="/p/<?= pagina.slug ?>"><?= pagina.title ?></a>
-            <div class="secundario">/p/<?= pagina.slug ?> · actualizada <?= pagina.updated_at_h ?></div>
-          </div>
-<?jhs if (pagina.estado == "publicada") { ?>
-          <span class="publicado">publicada</span>
-<?jhs } else if (pagina.estado == "programada") { ?>
-          <span class="borrador">programada<?= pagina.publish_at_h ? " · " + pagina.publish_at_h : "" ?></span>
+            <tr>
+              <td>
+                <div class="depth-<?= pagina.depth > 9 ? "max" : pagina.depth ?>">
+                  <span class="table-title"><?= pagina.depth > 0 ? "↳ " : "" ?><a href="/p/<?= pagina.slug ?>"><?= pagina.title ?></a></span>
+                  <span class="table-sub">/p/<?= pagina.slug ?></span>
+                </div>
+              </td>
+<?jhs if (pagina.estado == "published") { ?>
+              <td><span class="status published">&#9679; Published</span></td>
+<?jhs } else if (pagina.estado == "scheduled") { ?>
+              <td><span class="status scheduled">&#9679; Scheduled<?= pagina.publish_at_h ? " · " + pagina.publish_at_h : "" ?></span></td>
 <?jhs } else { ?>
-          <span class="borrador">borrador</span>
+              <td><span class="status draft">&#9679; Draft</span></td>
 <?jhs } ?>
-          <div class="acciones">
-            <a class="btn btn-fantasma" href="/admin/pages/<?= pagina.id ?>/edit">Editar</a>
-            <a class="btn btn-fantasma" href="/admin/pages/<?= pagina.id ?>/history">Historial</a>
-            <form method="post" action="/admin/pages/<?= pagina.id ?>/delete">
-              <button class="btn btn-peligro" type="submit">Borrar</button>
-            </form>
-          </div>
-        </li>
+              <td><?= pagina.updated_at_h ?></td>
+              <td>
+                <div class="row-actions">
+                  <a class="btn" href="/admin/pages/<?= pagina.id ?>/edit">Edit</a>
+                  <a class="btn" href="/admin/pages/<?= pagina.id ?>/history">History</a>
+                  <form method="post" action="/admin/pages/<?= pagina.id ?>/delete">
+                    <button class="btn danger" type="submit">Delete</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
 <?jhs }); ?>
-      </ul>
+          </tbody>
+        </table>
+      </div>
+      <div class="card-body">
+        <p class="table-sub">The listing shows the full hierarchy: children are indented under their parent, and siblings order by their position.</p>
+      </div>
 <?jhs } else { ?>
-      <p class="vacio">No hay páginas todavía: crea la primera o importa un
-         archivo de <code>public/</code>.</p>
+      <div class="empty">
+        <div class="empty-icon">&#9636;</div>
+        <h2>No pages yet</h2>
+        <p>Create the first one or import a file from <code>public/</code>.</p>
+      </div>
 <?jhs } ?>
-      <p class="ayuda">El listado muestra la jerarquía completa: las hijas van indentadas
-         bajo su padre y el orden entre hermanas lo marca su «posición».</p>
+<?jhs } ?>
     </section>
-<?jhs } ?>
-  </div>
+  </section>
 </main>
-<?jhs include("partials/footer") ?>
-</body>
-</html>
+<?jhs include("partials/admin/foot") ?>

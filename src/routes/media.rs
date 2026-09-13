@@ -176,7 +176,7 @@ async fn upload_media(
             return render_media_list(
                 &state,
                 &parts,
-                Some(&format!("No se pudo leer la subida: {error}")),
+                Some(&format!("Could not read the upload: {error}")),
                 &alt_text,
                 1,
             )
@@ -192,7 +192,7 @@ async fn upload_media(
                         return render_media_list(
                             &state,
                             &parts,
-                            Some(&format!("No se pudo leer el texto alternativo: {error}")),
+                            Some(&format!("Could not read the alt text: {error}")),
                             "",
                             1,
                         )
@@ -203,7 +203,7 @@ async fn upload_media(
                     return render_media_list(
                         &state,
                         &parts,
-                        Some("El texto alternativo es demasiado largo (máximo 500 caracteres)."),
+                        Some("The alt text is too long (500 characters at most)."),
                         "",
                         1,
                     )
@@ -219,7 +219,7 @@ async fn upload_media(
                         return render_media_list(
                             &state,
                             &parts,
-                            Some(&format!("No se pudo leer el archivo: {error}")),
+                            Some(&format!("Could not read the file: {error}")),
                             &alt_text,
                             1,
                         )
@@ -231,7 +231,7 @@ async fn upload_media(
                         &state,
                         &parts,
                         Some(&format!(
-                            "El archivo supera el límite de {} configurado en \
+                            "The file exceeds the {} limit set in \
                              [cms] media_max_bytes.",
                             human_bytes(max_bytes as i64)
                         )),
@@ -253,15 +253,14 @@ async fn upload_media(
         return render_media_list(
             &state,
             &parts,
-            Some("Elige un archivo: la subida no traía el campo «file»."),
+            Some("Pick a file: the upload carried no file field."),
             &alt_text,
             1,
         )
         .await;
     };
     if file_bytes.is_empty() {
-        return render_media_list(&state, &parts, Some("El archivo está vacío."), &alt_text, 1)
-            .await;
+        return render_media_list(&state, &parts, Some("The file is empty."), &alt_text, 1).await;
     }
 
     // Sniff, whitelist and decode under limits — off the async runtime
@@ -282,7 +281,7 @@ async fn upload_media(
             return render_media_list(
                 &state,
                 &parts,
-                Some("No se pudo procesar la imagen (error interno)."),
+                Some("The image could not be processed (internal error)."),
                 &alt_text,
                 1,
             )
@@ -683,14 +682,11 @@ fn human_bytes(bytes: i64) -> String {
         value /= 1024.0;
         unit += 1;
     }
-    let mut text = if unit == 0 {
+    let text = if unit == 0 {
         format!("{value:.0}")
     } else {
         format!("{value:.1}")
     };
-    if text.contains('.') {
-        text = text.replace('.', ",");
-    }
     format!("{text} {}", UNITS[unit])
 }
 
@@ -720,11 +716,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn byte_counts_format_in_spanish() {
+    fn byte_counts_format() {
         assert_eq!(human_bytes(0), "0 B");
         assert_eq!(human_bytes(812), "812 B");
-        assert_eq!(human_bytes(1024), "1,0 KB");
-        assert_eq!(human_bytes(21_944_320), "20,9 MB");
+        assert_eq!(human_bytes(1024), "1.0 KB");
+        assert_eq!(human_bytes(21_944_320), "20.9 MB");
         assert_eq!(human_bytes(-5), "-5 B");
     }
 

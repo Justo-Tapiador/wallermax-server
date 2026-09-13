@@ -281,7 +281,10 @@ async fn editors_manage_content_but_not_accounts() {
         .expect("request");
     assert_eq!(response.status(), 200, "editors reach the panel");
     let body = response.text().await.expect("panel html");
-    assert!(body.contains("Panel del CMS"), "dashboard renders: {body}");
+    assert!(
+        body.contains("<h1>Dashboard</h1>"),
+        "dashboard renders: {body}"
+    );
 
     let response = editor
         .get(server.url("/admin/users"))
@@ -761,7 +764,7 @@ async fn the_page_lifecycle_over_plain_forms() {
     assert_eq!(response.status(), 200);
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("Página creada como borrador"),
+        body.contains("Page created as a draft"),
         "ok banner: {body}"
     );
     assert!(body.contains("value=\"ciclo\""), "slug preserved: {body}");
@@ -799,7 +802,7 @@ async fn the_page_lifecycle_over_plain_forms() {
         .await
         .expect("listing");
     let body = response.text().await.expect("html body");
-    assert!(body.contains("publicada"), "state chip: {body}");
+    assert!(body.contains("&#9679; Published"), "state chip: {body}");
 
     let response = admin
         .post(server.url(&format!("/admin/pages/{page_id}/delete")))
@@ -832,7 +835,7 @@ async fn invalid_forms_re_render_without_losing_the_draft() {
     );
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("El slug debe tener"),
+        body.contains("The slug must be 1-64"),
         "the validation message: {body}"
     );
     assert!(
@@ -859,7 +862,7 @@ async fn duplicate_slugs_are_rejected_without_data_loss() {
     assert_eq!(response.status(), 200, "the form re-renders");
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("Ese slug ya existe"),
+        body.contains("That slug already exists"),
         "the conflict message: {body}"
     );
 }
@@ -881,7 +884,7 @@ async fn the_dashboard_counts_content() {
     assert_eq!(response.status(), 200);
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("2") && body.contains("Borradores"),
+        body.contains("2") && body.contains("Drafts"),
         "counters: {body}"
     );
 }
@@ -1059,7 +1062,7 @@ async fn the_last_admin_is_never_demoted_or_deleted() {
     assert_eq!(response.status(), 200, "the form re-renders");
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("tu propia cuenta"),
+        body.contains("your own account"),
         "self-edit is refused: {body}"
     );
 
@@ -1091,7 +1094,7 @@ async fn the_last_admin_is_never_demoted_or_deleted() {
         .expect("stale-admin demotion");
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("el último administrador"),
+        body.contains("the last administrator"),
         "the lockout guard fires even for stale-admin tokens: {body}"
     );
 

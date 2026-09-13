@@ -1,95 +1,80 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title><?= item.original_name ?> — medios — CMS wallermax</title>
-  <link rel="stylesheet" href="/assets/wallermax.css">
-</head>
-<body>
-<?jhs include("partials/header") ?>
-<main>
-  <div class="wrap">
-    <div class="panel-barra">
-      <h1><?= item.original_name ?></h1>
-      <a class="btn btn-fantasma" href="/admin/media">Biblioteca</a>
-      <a class="btn btn-fantasma" href="/admin">Panel</a>
+<?jhs var titulo = item.original_name + " — media"; ?>
+<?jhs include("partials/admin/head") ?>
+<?jhs include("partials/admin/sidebar") ?>
+<main class="main">
+<?jhs include("partials/admin/topbar") ?>
+  <section class="page">
+    <div class="breadcrumbs">Content / Media / <?= item.original_name ?></div>
+    <div class="page-head">
+      <div>
+        <h1><?= item.original_name ?></h1>
+        <p><?= item.mime_type ?> &middot; <?= item.size_h ?> &middot; <?= item.width ?> &times; <?= item.height ?> pixels &middot; uploaded <?= item.created_at_h ?></p>
+      </div>
+      <div class="actions">
+        <a class="btn" href="/admin/media">Library</a>
+      </div>
     </div>
 
 <?jhs if (query.ok == "alt") { ?>
-    <p class="aviso aviso-ok">Texto alternativo actualizado (los fragmentos de abajo ya
-       usan el nuevo).</p>
+    <p class="notice notice-ok">Alt text updated (the snippets below already use it).</p>
 <?jhs } ?>
 <?jhs if (form_error) { ?>
-    <p class="aviso aviso-error"><?= form_error ?></p>
+    <p class="notice notice-error"><?= form_error ?></p>
 <?jhs } ?>
 
-    <section class="tarjeta" aria-labelledby="imagen-titulo">
-      <h2 id="imagen-titulo">La imagen</h2>
-      <img class="detalle-imagen" src="<?= item.url ?>" alt="<?= item.alt_text ?>"
-           width="<?= item.width ?>" height="<?= item.height ?>">
-      <ul class="lista">
-        <li>
-          <div class="principal">
-            <strong>Tipo y tamaño</strong>
-            <div class="secundario"><?= item.mime_type ?> · <?= item.size_h ?>
-              (<?= item.width ?> × <?= item.height ?> píxeles) · subido <?= item.created_at_h ?></div>
-          </div>
-        </li>
-        <li>
-          <div class="principal">
-            <strong>URL definitiva</strong>
-            <div class="secundario"><code><?= item.url ?></code></div>
-          </div>
-        </li>
-        <li>
-          <div class="principal">
-            <strong>Nombre en disco</strong>
-            <div class="secundario"><code><?= item.stored_name ?></code> (generado por el
-              servidor: plano, único, sin nada tuyo en la ruta)</div>
-          </div>
-        </li>
-      </ul>
-    </section>
-
-    <section class="tarjeta" aria-labelledby="pegar-titulo">
-      <h2 id="pegar-titulo">Listo para pegar</h2>
-      <p class="ayuda">En una página Markdown, el fragmento ya trae el texto alternativo.
-         En una plantilla <code>.jhs</code> pega el HTML tal cual.</p>
-      <div class="campo">
-        <label for="snippet-markdown">Markdown</label>
-        <textarea id="snippet-markdown" readonly rows="2" spellcheck="false"><?= markdown_snippet ?></textarea>
-      </div>
-      <div class="campo">
-        <label for="snippet-html">HTML</label>
-        <textarea id="snippet-html" readonly rows="2" spellcheck="false"><?= html_snippet ?></textarea>
+    <section class="card" aria-labelledby="imagen-titulo">
+      <div class="card-head"><h2 id="imagen-titulo">The image</h2></div>
+      <div class="card-body">
+        <img class="detalle-imagen" src="<?= item.url ?>" alt="<?= item.alt_text ?>"
+             width="<?= item.width ?>" height="<?= item.height ?>">
+        <dl class="detalle">
+          <dt>Final URL</dt><dd><code><?= item.url ?></code></dd>
+          <dt>Stored name</dt><dd><code><?= item.stored_name ?></code> (server-generated: flat, unique, nothing of yours in the path)</dd>
+        </dl>
       </div>
     </section>
 
-    <section class="tarjeta" aria-labelledby="alt-titulo">
-      <h2 id="alt-titulo">Texto alternativo</h2>
-      <form method="post" action="/admin/media/<?= item.id ?>/alt">
-        <div class="campo">
-          <label for="alt">Descripción de la imagen</label>
-          <input id="alt" type="text" name="alt" maxlength="500" value="<?= item.alt_text ?>"
-                 placeholder="Logo de la empresa sobre fondo blanco">
-          <p class="ayuda">Lo leen los lectores de pantalla y los buscadores; también
-             alimenta los fragmentos de arriba.</p>
+    <section class="card" aria-labelledby="pegar-titulo">
+      <div class="card-head"><h2 id="pegar-titulo">Ready to paste</h2></div>
+      <div class="card-body">
+        <p class="table-sub">In a Markdown page the snippet already carries the alt text. In a <code>.jhs</code> template paste the HTML as is.</p>
+        <div class="field">
+          <label for="snippet-markdown">Markdown</label>
+          <textarea class="textarea" id="snippet-markdown" readonly rows="2" spellcheck="false"><?= markdown_snippet ?></textarea>
         </div>
-        <button class="btn btn-primario" type="submit">Guardar texto</button>
-      </form>
+        <div class="field">
+          <label for="snippet-html">HTML</label>
+          <textarea class="textarea" id="snippet-html" readonly rows="2" spellcheck="false"><?= html_snippet ?></textarea>
+        </div>
+      </div>
     </section>
 
-    <section class="tarjeta" aria-labelledby="borrar-titulo">
-      <h2 id="borrar-titulo">Borrar</h2>
-      <p class="ayuda">Borra el archivo y su fila; la URL pública pasa a responder 404.
-         Las páginas que aún la enlacen quedarán con un hueco — revísalas antes.</p>
-      <form method="post" action="/admin/media/<?= item.id ?>/delete">
-        <button class="btn btn-peligro" type="submit">Borrar este archivo</button>
-      </form>
+    <section class="card" aria-labelledby="alt-titulo">
+      <div class="card-head"><h2 id="alt-titulo">Alt text</h2></div>
+      <div class="card-body">
+        <form method="post" action="/admin/media/<?= item.id ?>/alt">
+          <div class="field">
+            <label for="alt">Image description</label>
+            <input class="input" id="alt" type="text" name="alt" maxlength="500" value="<?= item.alt_text ?>"
+                   placeholder="Company logo on a white background">
+            <small>Screen readers and search engines read it; it also feeds the snippets above.</small>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" type="submit">Save text</button>
+          </div>
+        </form>
+      </div>
     </section>
-  </div>
+
+    <section class="card" aria-labelledby="borrar-titulo">
+      <div class="card-head"><h2 id="borrar-titulo">Delete</h2></div>
+      <div class="card-body">
+        <form method="post" action="/admin/media/<?= item.id ?>/delete">
+          <button class="btn danger" type="submit">Delete this file</button>
+          <p class="table-sub">Deletes the file and its row; the public URL will answer 404. Pages still linking to it will show a gap — review them first.</p>
+        </form>
+      </div>
+    </section>
+  </section>
 </main>
-<?jhs include("partials/footer") ?>
-</body>
-</html>
+<?jhs include("partials/admin/foot") ?>

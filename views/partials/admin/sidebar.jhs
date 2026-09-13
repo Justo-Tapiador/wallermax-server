@@ -1,0 +1,39 @@
+<?jhs
+  // Shared admin sidebar (F12). Globals: user, path.
+  // The active link derives from the current path; the Users section
+  // is admin-only, the same gate the routes enforce. "View site" and
+  // the sign-out form live in SYSTEM so they survive the collapsed
+  // icon rail (the user-mini text does not).
+  var esAdmin = user && user.role == "admin";
+  var iniciales = user ? user.username.slice(0, 2).toUpperCase() : "";
+?>
+<aside class="sidebar">
+  <a class="brand" href="/admin">
+    <div class="logo">W</div>
+    <span>wallermax<small>CMS panel</small></span>
+  </a>
+  <nav class="nav" aria-label="Panel sections">
+    <div class="nav-section">OVERVIEW</div>
+    <a href="/admin"<?jhs if (path == "/admin") { ?> class="active"<?jhs } ?>><span class="icon">&#8962;</span><span>Dashboard</span></a>
+    <div class="nav-section">CONTENT</div>
+    <a href="/admin/pages"<?jhs if (path.indexOf("/admin/pages") === 0) { ?> class="active"<?jhs } ?>><span class="icon">&#9636;</span><span>Pages</span></a>
+    <a href="/admin/media"<?jhs if (path.indexOf("/admin/media") === 0) { ?> class="active"<?jhs } ?>><span class="icon">&#9639;</span><span>Media</span></a>
+    <a href="/admin/menus"<?jhs if (path.indexOf("/admin/menus") === 0) { ?> class="active"<?jhs } ?>><span class="icon">&#9776;</span><span>Menus</span></a>
+<?jhs if (esAdmin) { ?>
+    <div class="nav-section">TEAM</div>
+    <a href="/admin/users"<?jhs if (path.indexOf("/admin/users") === 0) { ?> class="active"<?jhs } ?>><span class="icon">&#9678;</span><span>Users</span></a>
+<?jhs } ?>
+    <div class="nav-section">SYSTEM</div>
+    <a href="/"><span class="icon">&#8599;</span><span>View site</span></a>
+    <form method="post" action="/api/auth/logout">
+      <input type="hidden" name="redirect" value="/">
+      <button type="submit"><span class="icon">&#9167;</span><span>Sign out</span></button>
+    </form>
+  </nav>
+  <div class="sidebar-bottom">
+    <div class="user-mini">
+      <div class="avatar"><?= iniciales ?></div>
+      <div><strong><?= user ? user.username : "" ?></strong><span><?= user ? user.role : "" ?></span></div>
+    </div>
+  </div>
+</aside>

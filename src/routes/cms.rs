@@ -90,8 +90,8 @@ use serde_json::{json, Map, Value};
 
 use crate::auth::{hash_password, validate_password, validate_username, verify_password};
 use crate::db::{
-    BodyFormat, NewMenu, NewMenuItem, NewPage, PageSummary, PageUpdate, RepositoryError, User,
-    UserRole,
+    BodyFormat, NewMenu, NewMenuItem, NewPage, PageSummary, PageUpdate, RecentRevision,
+    RepositoryError, User, UserRole,
 };
 use crate::error::AppError;
 use crate::extractors::AuthUser;
@@ -106,6 +106,14 @@ use crate::util::{
 
 /// Maximum listed pages / users in the admin panels.
 const MAX_LISTED: i64 = 200;
+
+/// The dashboard's recent-activity feed size (F12): the newest saves
+/// across every page, one row per revision.
+const DASHBOARD_ACTIVITY_ROWS: i64 = 8;
+
+/// The dashboard's "needs attention" card size (F12): pending
+/// schedules, the soonest first. The counter is exact regardless.
+const DASHBOARD_SCHEDULED_ROWS: i64 = 5;
 
 /// Upper bound on a page body accepted from the admin form (characters).
 /// The request-body limit caps the raw bytes; this keeps the stored
@@ -622,7 +630,9 @@ async fn public_page(
 
 // ─── Admin: dashboard ────────────────────────────────────────────────
 
-/// `GET /admin`: counters and quick links.
+/// `GET /admin`: counters, the recent-activity feed and what needs
+/// attention (F12 enriched the original counters card into a real
+/// dashboard — see the view for the layout).
 async fn dashboard(
     State(state): State<AppState>,
     _editor: CmsEditor,
@@ -664,12 +674,73 @@ async fn dashboard(
             return AppError::internal("storage failure").into_response();
         }
     };
+    let media = match cms.media.count().await {
+        Ok(media) => media,
+        Err(error) => {
+            tracing::error!(%error, "cms dashboard counters failed");
+            return AppError::internal("storage failure").into_response();
+        }
+    };
+    let scheduled = match cms.pages.count_scheduled().await {
+        Ok(scheduled) => scheduled,
+        Err(error) => {
+            tracing::error!(%error, "cms dashboard counters failed");
+            return AppError::internal("storage failure").into_response();
+        }
+    };
+
+    // The "needs attention" card: drafts whose schedule has not
+    // elapsed yet, the soonest first (F11 data, surfaced by F12).
+    let pending = match cms.pages.scheduled_pending(DASHBOARD_SCHEDULED_ROWS).await {
+        Ok(pending) => pending,
+        Err(error) => {
+            tracing::error!(%error, "cms dashboard scheduled pages failed");
+            return AppError::internal("storage failure").into_response();
+        }
+    };
+    let programadas: Vec<Value> = pending
+        .iter()
+        .map(|page| {
+            json!({
+                "id": page.id,
+                "slug": page.slug,
+                "title": page.title,
+                "publish_at_h": page.publish_at.map(format_timestamp),
+            })
+        })
+        .collect();
+
+    // The recent-activity feed: the newest saves across every page,
+    // the cross-page view of the F11 history (one row per revision).
+    let recent = match cms.pages.recent_revisions(DASHBOARD_ACTIVITY_ROWS).await {
+        Ok(recent) => recent,
+        Err(error) => {
+            tracing::error!(%error, "cms dashboard activity failed");
+            return AppError::internal("storage failure").into_response();
+        }
+    };
+    let actividad: Vec<Value> = recent
+        .iter()
+        .map(|row: &RecentRevision| {
+            json!({
+                "page_id": row.page_id,
+                "title": row.title,
+                "slug": row.slug,
+                "revision": row.revision,
+                "note": row.note,
+                "created_at_h": format_timestamp(row.created_at),
+                "editor": row.edited_by_name,
+            })
+        })
+        .collect();
 
     let stats = json!({
         "pages": total,
         "published": published,
         "drafts": total - published,
+        "scheduled": scheduled,
         "menus": menus,
+        "media": media,
         "users": users,
     });
 
@@ -677,10 +748,67 @@ async fn dashboard(
         &state,
         &parts,
         "admin/dashboard.jhs",
-        vec![("stats", stats)],
+        vec![
+            ("stats", stats),
+            ("actividad", Value::Array(actividad)),
+            ("programadas", Value::Array(programadas)),
+        ],
         StatusCode::OK,
     )
     .await
+}
+
+// ─── Admin: theme (F12) ──────────────────────────────────────────────
+
+/// `GET /admin/theme?to=dark|light&back=<path>`: pins the panel theme
+/// cookie and bounces straight back — the no-JavaScript dark-mode
+/// toggle. The cookie is HttpOnly and read only by `base_data`, which
+/// turns it into the `theme` global the document head renders.
+///
+/// `back` is honored only while it is a printable `/admin` path (this
+/// route must never become an open redirect or a header-injection
+/// sink — `url::form_urlencoded` percent-decodes the query, so the
+/// guard runs on the decoded value); anything else lands on `/admin`.
+/// A `to` that is neither dark nor light just redirects, leaving the
+/// cookie untouched.
+async fn admin_theme(_editor: CmsEditor, request: Request) -> Response {
+    let parts = PageParts::of(&request);
+
+    let mut to = String::new();
+    let mut back = String::new();
+    if let Some(pairs) = parts.uri().query() {
+        for (key, value) in url::form_urlencoded::parse(pairs.as_bytes()) {
+            match key.as_ref() {
+                "to" => to = value.as_ref().to_owned(),
+                "back" => back = value.as_ref().to_owned(),
+                _ => {}
+            }
+        }
+    }
+
+    let destination = if back.starts_with("/admin")
+        && !back.contains("..")
+        && back.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        back
+    } else {
+        String::from("/admin")
+    };
+
+    let builder = Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, destination);
+    let builder = if to == "dark" || to == "light" {
+        builder.header(
+            header::SET_COOKIE,
+            format!("wm_theme={to}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax"),
+        )
+    } else {
+        builder
+    };
+    builder
+        .body(axum::body::Body::empty())
+        .expect("valid theme redirect")
 }
 
 // ─── Admin: pages ────────────────────────────────────────────────────
@@ -815,7 +943,7 @@ fn parse_position(raw: Option<&str>) -> Result<Option<i64>, &'static str> {
     };
     match raw.parse::<i64>() {
         Ok(value) if (0..=MAX_POSITION).contains(&value) => Ok(Some(value)),
-        _ => Err("La posición debe ser un número entre 0 y 99 999."),
+        _ => Err("Position must be a number between 0 and 99,999."),
     }
 }
 
@@ -907,17 +1035,18 @@ async fn list_pages(
     .await
 }
 
-/// The admin state badge of a page (F11): `"publicada"` (the flag, or
+/// The admin state badge of a page (F11): `"published"` (the flag, or
 /// a schedule that has elapsed — the same read-time truth every
-/// public read applies), `"programada"` (a pending schedule),
-/// `"borrador"` otherwise.
+/// public read applies), `"scheduled"` (a pending schedule),
+/// `"draft"` otherwise. F12 anglicized the codes to match the
+/// redesigned panel; the views map them onto the status pills.
 fn estado_badge(is_published: bool, publish_at: Option<i64>, now: i64) -> &'static str {
     if is_published || publish_at.is_some_and(|at| at <= now) {
-        "publicada"
+        "published"
     } else if publish_at.is_some() {
-        "programada"
+        "scheduled"
     } else {
-        "borrador"
+        "draft"
     }
 }
 
@@ -1014,7 +1143,7 @@ async fn create_page(
                 &parts,
                 None,
                 form,
-                "La página padre no existe.",
+                "The parent page does not exist.",
             )
             .await;
         }
@@ -1049,7 +1178,7 @@ async fn create_page(
                 &parts,
                 None,
                 form,
-                "Ese slug ya existe: elige otro identificador de URL.",
+                "That slug already exists: pick another URL identifier.",
             )
             .await
         }
@@ -1060,7 +1189,7 @@ async fn create_page(
                 &parts,
                 None,
                 form,
-                "No se pudo guardar (error interno).",
+                "Could not save (internal error).",
             )
             .await
         }
@@ -1157,7 +1286,7 @@ async fn update_page(
                 &parts,
                 Some(id),
                 form,
-                "Una página no puede ser su propia padre.",
+                "A page cannot be its own parent.",
             )
             .await;
         }
@@ -1167,7 +1296,7 @@ async fn update_page(
                 &parts,
                 Some(id),
                 form,
-                "La página padre no existe.",
+                "The parent page does not exist.",
             )
             .await;
         }
@@ -1184,8 +1313,8 @@ async fn update_page(
                 &parts,
                 Some(id),
                 form,
-                "Ese padre crearía un ciclo: la página no puede colgar de su propia \
-                 descendiente.",
+                "That parent would create a cycle: a page cannot hang from its own \
+                 descendant.",
             )
             .await;
         }
@@ -1220,7 +1349,7 @@ async fn update_page(
                 &parts,
                 Some(id),
                 form,
-                "Ese slug ya existe: elige otro identificador de URL.",
+                "That slug already exists: pick another URL identifier.",
             )
             .await
         }
@@ -1231,7 +1360,7 @@ async fn update_page(
                 &parts,
                 Some(id),
                 form,
-                "No se pudo guardar (error interno).",
+                "Could not save (internal error).",
             )
             .await
         }
@@ -1505,8 +1634,8 @@ async fn restore_revision(
                 &page,
                 &snapshot,
                 Some(
-                    "La página padre de la revisión ya no existe: restaura y elige un padre \
-                     actual en el editor.",
+                    "The revision's parent page no longer exists: restore and pick a current \
+                     parent in the editor.",
                 ),
             )
             .await;
@@ -1549,7 +1678,7 @@ async fn restore_revision(
         og_image: snapshot.og_image.clone(),
         publish_at: page.publish_at,
         edited_by: Some(editor.user.user_id),
-        revision_note: Some(format!("Restaurada desde la revisión {revision}.")),
+        revision_note: Some(format!("Restored from revision {revision}.")),
     };
 
     match cms.pages.update(id, &update).await {
@@ -1562,8 +1691,8 @@ async fn restore_revision(
                 &page,
                 &snapshot,
                 Some(
-                    "Ese slug ya existe (otra página lo ha tomado desde): renómbrala o edita a \
-                 mano la revisión que querías recuperar.",
+                    "That slug already exists (another page has taken it since): rename it or \
+                 hand-edit the revision you wanted back.",
                 ),
             )
             .await
@@ -1575,7 +1704,7 @@ async fn restore_revision(
                 &parts,
                 &page,
                 &snapshot,
-                Some("No se pudo restaurar (error interno)."),
+                Some("Could not restore (internal error)."),
             )
             .await
         }
@@ -1651,20 +1780,20 @@ async fn load_revision(
 fn validate_page_form(form: &PageForm) -> Result<(), &'static str> {
     let title = form.title.trim();
     if title.is_empty() {
-        return Err("El título no puede estar vacío.");
+        return Err("The title cannot be empty.");
     }
     if form.title.len() > MAX_TITLE {
-        return Err("El título es demasiado largo (máximo 200 caracteres).");
+        return Err("The title is too long (200 characters at most).");
     }
     validate_slug(&form.slug)?;
     if form.content.len() > MAX_PAGE_CONTENT {
-        return Err("El contenido es demasiado largo (máximo 600 000 caracteres).");
+        return Err("The content is too long (600,000 characters at most).");
     }
 
     // F8: the body format must be one of the two modes the form
     // offers; a malformed (hand-crafted) POST bounces back.
     if trimmed(&form.body_format).is_some_and(|raw| BodyFormat::parse(&raw).is_none()) {
-        return Err("El formato del contenido debe ser jhs o markdown.");
+        return Err("The content format must be jhs or markdown.");
     }
 
     // F7 additions: hierarchy and SEO shapes.
@@ -1674,39 +1803,36 @@ fn validate_page_form(form: &PageForm) -> Result<(), &'static str> {
             // A positive integer: fine — existence is checked by the
             // handler, which can talk to the repository.
         } else {
-            return Err(
-                "El padre debe ser el identificador de una página (o vacío para el nivel \
-                 superior).",
-            );
+            return Err("The parent must be a page id (or empty for top level).");
         }
     }
     if trimmed(&form.meta_title).is_some_and(|meta_title| meta_title.len() > MAX_TITLE) {
-        return Err("El título para buscadores es demasiado largo (máximo 200 caracteres).");
+        return Err("The SEO title is too long (200 characters at most).");
     }
     if trimmed(&form.meta_description)
         .is_some_and(|description| description.len() > MAX_META_DESCRIPTION)
     {
-        return Err("La descripción es demasiado larga (máximo 500 caracteres).");
+        return Err("The meta description is too long (500 characters at most).");
     }
     if let Some(og_image) = trimmed(&form.og_image) {
         if og_image.len() > MAX_URL_FIELD {
-            return Err("La imagen social es demasiado larga (máximo 500 caracteres).");
+            return Err("The social image is too long (500 characters at most).");
         }
         if !(og_image.starts_with('/')
             || og_image.starts_with("http://")
             || og_image.starts_with("https://"))
         {
-            return Err("La imagen social debe ser una ruta («/assets/…») o una URL absoluta.");
+            return Err("The social image must be a site path (/assets/…) or an absolute URL.");
         }
     }
 
     // F11: the schedule must parse (UTC `datetime-local` shape) and
     // the revision note stays a one-liner.
     if trimmed(&form.publish_at).is_some_and(|raw| parse_datetime_local(&raw).is_none()) {
-        return Err("La fecha programada no es válida: usa el formato AAAA-MM-DDTHH:MM (UTC).");
+        return Err("The scheduled date is not valid: use the YYYY-MM-DDTHH:MM format (UTC).");
     }
     if trimmed(&form.revision_note).is_some_and(|note| note.len() > MAX_REVISION_NOTE) {
-        return Err("La nota de revisión es demasiado larga (máximo 200 caracteres).");
+        return Err("The revision note is too long (200 characters at most).");
     }
     Ok(())
 }
@@ -1719,8 +1845,8 @@ fn validate_slug(slug: &str) -> Result<(), &'static str> {
         Ok(())
     } else {
         Err(
-            "El slug debe tener 1-64 caracteres: minúsculas, números y guiones \
-             (sin empezar ni terminar en guion).",
+            "The slug must be 1-64 characters: lowercase, digits and hyphens \
+             (not starting or ending with a hyphen).",
         )
     }
 }
@@ -1848,7 +1974,7 @@ async fn import_page(
         return render_import_error(
             &state,
             &parts,
-            "La importación requiere el servidor estático activo.",
+            "Importing requires the static file server to be enabled.",
         )
         .await;
     }
@@ -1880,7 +2006,7 @@ async fn import_page(
         return render_import_error(
             &state,
             &parts,
-            "El archivo supera el límite de importación (600 KB).",
+            "The file exceeds the import limit (600 KB).",
         )
         .await;
     }
@@ -1919,7 +2045,7 @@ async fn import_page(
             render_import_error(
                 &state,
                 &parts,
-                &format!("El slug `{slug}` ya existe; renombra la página antes de importar."),
+                &format!("The slug `{slug}` already exists; rename the page before importing."),
             )
             .await
         }
@@ -2182,18 +2308,13 @@ async fn create_menu(
 
     let title = form.title.trim();
     if title.is_empty() {
-        return render_menus_view(
-            &state,
-            &parts,
-            Some("El título del menú no puede estar vacío."),
-        )
-        .await;
+        return render_menus_view(&state, &parts, Some("The menu title cannot be empty.")).await;
     }
     if form.title.len() > MAX_TITLE {
         return render_menus_view(
             &state,
             &parts,
-            Some("El título del menú es demasiado largo (máximo 200 caracteres)."),
+            Some("The menu title is too long (200 characters at most)."),
         )
         .await;
     }
@@ -2202,8 +2323,8 @@ async fn create_menu(
             &state,
             &parts,
             Some(
-                "El nombre del menú debe tener 1-64 caracteres: minúsculas, números y guiones \
-                 (es la clave que leen las plantillas: menus.<nombre>).",
+                "The menu name must be 1-64 characters: lowercase, digits and hyphens \
+                 (it is the key templates read: menus.<name>).",
             ),
         )
         .await;
@@ -2229,7 +2350,7 @@ async fn create_menu(
         }
         Err(RepositoryError::Internal(message)) => {
             tracing::error!(%message, "menu creation failed");
-            render_menus_view(&state, &parts, Some("No se pudo guardar (error interno).")).await
+            render_menus_view(&state, &parts, Some("Could not save (internal error).")).await
         }
     }
 }
@@ -2346,20 +2467,15 @@ async fn rename_menu(
 
     let title = form.title.trim();
     if title.is_empty() {
-        return render_menu_detail(
-            &state,
-            &parts,
-            id,
-            Some("El título del menú no puede estar vacío."),
-        )
-        .await;
+        return render_menu_detail(&state, &parts, id, Some("The menu title cannot be empty."))
+            .await;
     }
     if form.title.len() > MAX_TITLE {
         return render_menu_detail(
             &state,
             &parts,
             id,
-            Some("El título del menú es demasiado largo (máximo 200 caracteres)."),
+            Some("The menu title is too long (200 characters at most)."),
         )
         .await;
     }
@@ -2369,22 +2485,10 @@ async fn rename_menu(
         Ok(None) => see_other("/admin/menus"),
         Err(RepositoryError::Internal(message)) => {
             tracing::error!(%message, "menu rename failed");
-            render_menu_detail(
-                &state,
-                &parts,
-                id,
-                Some("No se pudo guardar (error interno)."),
-            )
-            .await
+            render_menu_detail(&state, &parts, id, Some("Could not save (internal error).")).await
         }
         Err(RepositoryError::Duplicate) => {
-            render_menu_detail(
-                &state,
-                &parts,
-                id,
-                Some("No se pudo guardar (error interno)."),
-            )
-            .await
+            render_menu_detail(&state, &parts, id, Some("Could not save (internal error).")).await
         }
     }
 }
@@ -2478,7 +2582,7 @@ async fn create_item(
                 id,
                 &form,
                 None,
-                Some("No se pudo guardar (error interno)."),
+                Some("Could not save (internal error)."),
             )
             .await
         }
@@ -2489,7 +2593,7 @@ async fn create_item(
                 id,
                 &form,
                 None,
-                Some("No se pudo guardar (error interno)."),
+                Some("Could not save (internal error)."),
             )
             .await
         }
@@ -2576,7 +2680,7 @@ async fn update_item(
                 id,
                 &form,
                 Some(item_id),
-                Some("No se pudo guardar (error interno)."),
+                Some("Could not save (internal error)."),
             )
             .await
         }
@@ -2587,7 +2691,7 @@ async fn update_item(
                 id,
                 &form,
                 Some(item_id),
-                Some("No se pudo guardar (error interno)."),
+                Some("Could not save (internal error)."),
             )
             .await
         }
@@ -2702,31 +2806,31 @@ async fn validate_item_form(cms: &CmsContext, form: &ItemForm) -> Result<(), &'s
         .as_ref()
         .is_some_and(|label| label.len() > MAX_MENU_LABEL)
     {
-        return Err("La etiqueta es demasiado larga (máximo 200 caracteres).");
+        return Err("The label is too long (200 characters at most).");
     }
 
     match (page, url) {
-        (Some(_), Some(_)) => Err("Elige una página o escribe una URL — no ambas."),
-        (None, None) => Err("El elemento necesita un destino: una página o una URL."),
+        (Some(_), Some(_)) => Err("Pick a page or write a URL — not both."),
+        (None, None) => Err("The item needs a destination: a page or a URL."),
         (Some(page_id), None) => {
             if load_page(cms, page_id).await.is_none() {
-                return Err("La página elegida no existe.");
+                return Err("The chosen page does not exist.");
             }
             Ok(())
         }
         (None, Some(url)) => {
             if url.len() > MAX_URL_FIELD {
-                return Err("La URL es demasiado larga (máximo 500 caracteres).");
+                return Err("The URL is too long (500 characters at most).");
             }
             if !(url.starts_with('/')
                 || url.starts_with("http://")
                 || url.starts_with("https://")
                 || url.starts_with('#'))
             {
-                return Err("La URL debe empezar por «/», «http://», «https://» o «#».");
+                return Err("The URL must start with /, http://, https:// or #.");
             }
             if label.is_none() {
-                return Err("Los enlaces personalizados necesitan una etiqueta.");
+                return Err("Custom links need a label.");
             }
             Ok(())
         }
@@ -3267,7 +3371,7 @@ async fn create_user(
                 None,
                 &form.username,
                 &form.role,
-                "Ese nombre de usuario ya está en uso.",
+                "That username is already taken.",
             )
             .await
         }
@@ -3362,7 +3466,7 @@ async fn update_user(
             Some(id),
             &user.username,
             &form.role,
-            "No puedes editar tu propia cuenta aquí: usa la página de perfil.",
+            "You cannot edit your own account here: use the profile page.",
         )
         .await;
     }
@@ -3398,7 +3502,7 @@ async fn update_user(
                     Some(id),
                     &user.username,
                     &form.role,
-                    "No se pudo guardar la contraseña (error interno).",
+                    "The password could not be saved (internal error).",
                 )
                 .await;
             }
@@ -3415,7 +3519,7 @@ async fn update_user(
                     Some(id),
                     &user.username,
                     &form.role,
-                    "Es el último administrador: no se puede quitar el rol.",
+                    "This is the last administrator: the role cannot be removed.",
                 )
                 .await
             }
@@ -3435,7 +3539,7 @@ async fn update_user(
             Some(id),
             &user.username,
             &form.role,
-            "No se pudo guardar (error interno).",
+            "Could not save (internal error).",
         )
         .await;
     }
@@ -3450,7 +3554,7 @@ async fn update_user(
                 Some(id),
                 &user.username,
                 &form.role,
-                "No se pudo guardar (error interno).",
+                "Could not save (internal error).",
             )
             .await;
         }
@@ -3650,6 +3754,7 @@ pub fn routes() -> Router<AppState> {
         .route("/atom.xml", get(atom_feed))
         .route("/perfil/password", post(change_password))
         .route("/admin", get(dashboard))
+        .route("/admin/theme", get(admin_theme))
         .route("/admin/pages", get(list_pages).post(create_page))
         .route("/admin/pages/new", get(new_page_form))
         .route("/admin/pages/import", get(import_form).post(import_page))

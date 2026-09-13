@@ -1,77 +1,88 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Menús — CMS wallermax</title>
-  <link rel="stylesheet" href="/assets/wallermax.css">
-</head>
-<body>
-<?jhs include("partials/header") ?>
-<main>
-  <div class="wrap">
-    <div class="panel-barra">
-      <h1>Menús</h1>
-      <a class="btn btn-fantasma" href="/admin">Panel</a>
+<?jhs var titulo = "Menus"; ?>
+<?jhs include("partials/admin/head") ?>
+<?jhs include("partials/admin/sidebar") ?>
+<main class="main">
+<?jhs include("partials/admin/topbar") ?>
+  <section class="page">
+    <div class="breadcrumbs">Content / Menus</div>
+    <div class="page-head">
+      <div>
+        <h1>Menus</h1>
+        <p>The site's navigation: what templates read as <code>menus.&lt;name&gt;</code>.</p>
+      </div>
     </div>
 
 <?jhs if (query.ok == "eliminado") { ?>
-    <p class="aviso aviso-ok">Menú eliminado (con todos sus elementos).</p>
+    <p class="notice notice-ok">Menu deleted (with all its items).</p>
 <?jhs } ?>
 <?jhs if (form_error) { ?>
-    <p class="aviso aviso-error"><?= form_error ?></p>
+    <p class="notice notice-error"><?= form_error ?></p>
 <?jhs } ?>
 
-    <section class="tarjeta">
+    <section class="card">
 <?jhs if (admin_menus && admin_menus.length) { ?>
-      <ul class="lista">
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th>Menu</th><th>Items</th><th>Updated</th><th></th></tr>
+          </thead>
+          <tbody>
 <?jhs admin_menus.forEach(function (menu) { ?>
-        <li>
-          <div class="principal">
-            <a href="/admin/menus/<?= menu.id ?>"><?= menu.title ?></a>
-            <div class="secundario">
-              <code>menus.<?= menu.name ?></code> · <?= menu.items ?> elemento<?= menu.items == 1 ? "" : "s" ?> ·
-              actualizado <?= menu.updated_at_h ?>
+            <tr>
+              <td>
+                <span class="table-title"><a href="/admin/menus/<?= menu.id ?>"><?= menu.title ?></a></span>
+                <span class="table-sub"><code>menus.<?= menu.name ?></code></span>
+              </td>
+              <td><?= menu.items ?> item<?= menu.items == 1 ? "" : "s" ?></td>
+              <td><?= menu.updated_at_h ?></td>
+              <td>
+                <div class="row-actions">
+                  <a class="btn" href="/admin/menus/<?= menu.id ?>">Edit</a>
+                  <form method="post" action="/admin/menus/<?= menu.id ?>/delete">
+                    <button class="btn danger" type="submit">Delete</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+<?jhs }); ?>
+          </tbody>
+        </table>
+      </div>
+<?jhs } else { ?>
+      <div class="empty">
+        <div class="empty-icon">&#9776;</div>
+        <h2>No menus yet</h2>
+        <p>Create the first one (for example <code>main</code> for the header or <code>footer</code> for the footer).</p>
+      </div>
+<?jhs } ?>
+      <div class="card-body">
+        <p class="table-sub">The <em>name</em> is the key templates read (<code>menus.main</code>); the title is only for this panel. The name never changes: if you get it wrong, delete the menu and create it again.</p>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="nuevo-menu-titulo">
+      <div class="card-head"><h2 id="nuevo-menu-titulo">New menu</h2></div>
+      <div class="card-body">
+        <form method="post" action="/admin/menus">
+          <div class="form-layout">
+            <div class="field">
+              <label for="nombre-menu">Name (for templates)</label>
+              <input class="input" id="nombre-menu" type="text" name="name" required maxlength="64"
+                     placeholder="main">
+              <small>Lowercase, digits and hyphens: the <code>menus.&lt;name&gt;</code> key.</small>
+            </div>
+            <div class="field">
+              <label for="titulo-menu">Title (for the panel)</label>
+              <input class="input" id="titulo-menu" type="text" name="title" required maxlength="200"
+                     placeholder="Main navigation">
             </div>
           </div>
-          <div class="acciones">
-            <a class="btn btn-fantasma" href="/admin/menus/<?= menu.id ?>">Editar</a>
-            <form method="post" action="/admin/menus/<?= menu.id ?>/delete">
-              <button class="btn btn-peligro" type="submit">Borrar</button>
-            </form>
+          <div class="form-actions">
+            <button class="btn primary" type="submit">Create menu</button>
           </div>
-        </li>
-<?jhs }); ?>
-      </ul>
-<?jhs } else { ?>
-      <p class="vacio">No hay menús todavía: crea el primero (por ejemplo
-         <code>principal</code> para la cabecera o <code>pie</code> para el pie).</p>
-<?jhs } ?>
-      <p class="ayuda">El <em>nombre</em> es la clave que leen las plantillas
-         (<code>menus.principal</code>); el título es solo para este panel. El nombre no
-         cambia después: si te equivocas, borra el menú y créalo de nuevo.</p>
+        </form>
+      </div>
     </section>
-
-    <section class="tarjeta" aria-labelledby="nuevo-menu-titulo">
-      <h2 id="nuevo-menu-titulo">Nuevo menú</h2>
-      <form method="post" action="/admin/menus">
-        <div class="campo">
-          <label for="nombre-menu">Nombre (para las plantillas)</label>
-          <input id="nombre-menu" type="text" name="name" required maxlength="64"
-                 placeholder="principal">
-          <p class="ayuda">Minúsculas, números y guiones: es la clave de
-             <code>menus.&lt;nombre&gt;</code>.</p>
-        </div>
-        <div class="campo">
-          <label for="titulo-menu">Título (para el panel)</label>
-          <input id="titulo-menu" type="text" name="title" required maxlength="200"
-                 placeholder="Navegación principal">
-        </div>
-        <button class="btn btn-primario" type="submit">Crear menú</button>
-      </form>
-    </section>
-  </div>
+  </section>
 </main>
-<?jhs include("partials/footer") ?>
-</body>
-</html>
+<?jhs include("partials/admin/foot") ?>

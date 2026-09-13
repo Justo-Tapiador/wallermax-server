@@ -1,57 +1,65 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Importar desde public/ — CMS wallermax</title>
-  <link rel="stylesheet" href="/assets/wallermax.css">
-</head>
-<body>
-<?jhs include("partials/header") ?>
-<main>
-  <div class="wrap">
-    <div class="panel-barra">
-      <h1>Importar desde public/</h1>
-      <a class="btn btn-fantasma" href="/admin/pages">Volver al listado</a>
+<?jhs var titulo = "Import from public/"; ?>
+<?jhs include("partials/admin/head") ?>
+<?jhs include("partials/admin/sidebar") ?>
+<main class="main">
+<?jhs include("partials/admin/topbar") ?>
+  <section class="page">
+    <div class="breadcrumbs">Pages / Import</div>
+    <div class="page-head">
+      <div>
+        <h1>Import from public/</h1>
+        <p>Copy a file from the static tree into a new editable draft.</p>
+      </div>
+      <div class="actions">
+        <a class="btn" href="/admin/pages">Back to list</a>
+      </div>
     </div>
 
 <?jhs if (form_error) { ?>
-    <p class="aviso aviso-error"><?= form_error ?></p>
+    <p class="notice notice-error"><?= form_error ?></p>
 <?jhs } ?>
 
-    <section class="tarjeta">
-      <p>Elige un archivo del árbol estático para copiar su contenido a un
-         <strong>borrador</strong> nuevo. La importación <em>lee</em> de
-         <code>public/</code> pero nunca escribe en él: a partir de aquí la
-         página vive en SQLite y se edita desde el panel.</p>
+    <section class="card">
+      <div class="card-body">
+        <p>Pick a file from the static tree to copy its content into a new <strong>draft</strong>. Importing <em>reads</em> from <code>public/</code> but never writes there: from here on the page lives in SQLite and is edited from the panel.</p>
+      </div>
 <?jhs if (files && files.length) { ?>
       <form method="post" action="/admin/pages/import">
-        <ul class="lista">
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr><th>File</th><th>Size</th><th>Kind</th><th></th></tr>
+            </thead>
+            <tbody>
 <?jhs files.forEach(function (archivo) { ?>
-          <li>
-            <div class="campo-check">
-              <input type="radio" id="archivo-<?= archivo.path.replace(/[^a-zA-Z0-9-]/g, "-") ?>"
-                     name="file" value="<?= archivo.path ?>" required>
-              <label for="archivo-<?= archivo.path.replace(/[^a-zA-Z0-9-]/g, "-") ?>">
-                <code><?= archivo.path ?></code>
-                <span class="secundario"><?= Math.round(archivo.bytes / 1024) ?> KB ·
-                  <?= archivo.kind == "jhs" ? "plantilla .jhs (se sigue renderizando)" : "HTML estático" ?>
-                </span>
-              </label>
-            </div>
-          </li>
+<?jhs var id_archivo = "archivo-" + archivo.path.replace(/[^a-zA-Z0-9-]/g, "-"); ?>
+              <tr>
+                <td><span class="table-title"><code><?= archivo.path ?></code></span></td>
+                <td><?= Math.round(archivo.bytes / 1024) ?> KB</td>
+                <td><span class="table-sub"><?= archivo.kind == "jhs" ? ".jhs template (keeps rendering)" : "static HTML" ?></span></td>
+                <td>
+                  <label class="check">
+                    <input type="radio" id="<?= id_archivo ?>" name="file" value="<?= archivo.path ?>" required>
+                    <span>Pick</span>
+                  </label>
+                </td>
+              </tr>
 <?jhs }); ?>
-        </ul>
-        <button class="btn btn-primario" type="submit">Importar como borrador</button>
+            </tbody>
+          </table>
+        </div>
+        <div class="card-body">
+          <button class="btn primary" type="submit">Import as draft</button>
+        </div>
       </form>
 <?jhs } else { ?>
-      <p class="vacio">No hay archivos <code>.html</code> o <code>.jhs</code>
-         importables en <code>public/</code> (se listan hasta 200, de 600 KB o
-         menos, y tres niveles de profundidad).</p>
+      <div class="empty">
+        <div class="empty-icon">&#8611;</div>
+        <h2>Nothing to import</h2>
+        <p>No importable <code>.html</code> or <code>.jhs</code> files in <code>public/</code> (up to 200 are listed, 600 KB or smaller, three levels deep).</p>
+      </div>
 <?jhs } ?>
     </section>
-  </div>
+  </section>
 </main>
-<?jhs include("partials/footer") ?>
-</body>
-</html>
+<?jhs include("partials/admin/foot") ?>

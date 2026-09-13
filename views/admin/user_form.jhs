@@ -1,70 +1,78 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title><?= form.is_new ? "Nueva cuenta" : "Editar cuenta" ?> — CMS wallermax</title>
-  <link rel="stylesheet" href="/assets/wallermax.css">
-</head>
-<body>
-<?jhs include("partials/header") ?>
-<main>
-  <div class="wrap">
-    <div class="panel-barra">
-      <h1><?= form.is_new ? "Nueva cuenta" : "Editar cuenta" ?></h1>
-      <a class="btn btn-fantasma" href="/admin/users">Volver al listado</a>
+<?jhs var titulo = form.is_new ? "New account" : "Edit account"; ?>
+<?jhs include("partials/admin/head") ?>
+<?jhs include("partials/admin/sidebar") ?>
+<main class="main">
+<?jhs include("partials/admin/topbar") ?>
+  <section class="page">
+    <div class="breadcrumbs">Team / Users<?jhs if (!form.is_new) { ?> / <?= form.username ?><?jhs } ?></div>
+    <div class="page-head">
+      <div>
+        <h1><?= titulo ?></h1>
+        <p>Accounts, roles and password resets — administrators only.</p>
+      </div>
+      <div class="actions">
+        <a class="btn" href="/admin/users">Back to list</a>
+      </div>
     </div>
 
 <?jhs if (form_error) { ?>
-    <p class="aviso aviso-error"><?= form_error ?></p>
+    <p class="notice notice-error"><?= form_error ?></p>
 <?jhs } ?>
 
     <form method="post" action="<?= form.is_new ? "/admin/users" : "/admin/users/" + form.id ?>">
-      <section class="tarjeta tarjeta-angosta">
+      <div class="form-layout">
+        <div class="card editor-card">
 <?jhs if (form.is_new) { ?>
-        <div class="campo">
-          <label for="usuario">Usuario</label>
-          <input id="usuario" type="text" name="username" required
-                 minlength="3" maxlength="32" autocomplete="off">
-          <p class="ayuda">3-32 caracteres: letras, números, guion y guion bajo.</p>
-        </div>
-        <div class="campo">
-          <label for="clave">Contraseña inicial</label>
-          <input id="clave" type="password" name="password" required
-                 minlength="8" autocomplete="new-password">
-          <p class="ayuda">Al menos 8 caracteres. La persona la puede cambiar
-             luego desde su perfil.</p>
-        </div>
+          <div class="field">
+            <label for="usuario">Username</label>
+            <input class="input" id="usuario" type="text" name="username" required
+                   minlength="3" maxlength="32" autocomplete="off">
+            <small>3-32 characters: letters, digits, hyphen and underscore.</small>
+          </div>
+          <div class="field">
+            <label for="clave">Initial password</label>
+            <input class="input" id="clave" type="password" name="password" required
+                   minlength="8" autocomplete="new-password">
+            <small>At least 8 characters. The person can change it later from their profile.</small>
+          </div>
 <?jhs } else { ?>
-        <div class="campo">
-          <label>Usuario</label>
-          <input type="text" value="<?= form.username ?>" disabled>
-          <p class="ayuda">El nombre de usuario no cambia.</p>
-        </div>
-        <div class="campo">
-          <label for="clave">Nueva contraseña (opcional)</label>
-          <input id="clave" type="password" name="password"
-                 minlength="8" autocomplete="new-password">
-          <p class="ayuda">Déjalo vacío para mantener la actual.</p>
-        </div>
+          <div class="field">
+            <label>Username</label>
+            <input class="input" type="text" value="<?= form.username ?>" disabled>
+            <small>The username never changes.</small>
+          </div>
+          <div class="field">
+            <label for="clave">New password (optional)</label>
+            <input class="input" id="clave" type="password" name="password"
+                   minlength="8" autocomplete="new-password">
+            <small>Leave empty to keep the current one.</small>
+          </div>
 <?jhs } ?>
-        <div class="campo">
-          <label for="rol">Rol</label>
-          <select id="rol" name="role">
-            <option value="user"<?= form.role == "user" ? " selected" : "" ?>>Usuario — solo ve las páginas</option>
-            <option value="editor"<?= form.role == "editor" ? " selected" : "" ?>>Editor — gestiona el contenido</option>
-            <option value="admin"<?= form.role == "admin" ? " selected" : "" ?>>Administrador — contenido y cuentas</option>
-          </select>
-          <p class="ayuda">El rol viaja dentro del token firmado: la próxima
-             vez que la persona inicie sesión verá su nuevo alcance.</p>
+          <div class="field">
+            <label for="rol">Role</label>
+            <select class="select" id="rol" name="role">
+              <option value="user"<?= form.role == "user" ? " selected" : "" ?>>User — pages are read-only</option>
+              <option value="editor"<?= form.role == "editor" ? " selected" : "" ?>>Editor — manages content</option>
+              <option value="admin"<?= form.role == "admin" ? " selected" : "" ?>>Administrator — content and accounts</option>
+            </select>
+            <small>The role travels inside the signed token: the next time the person signs in they will see their new scope.</small>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" type="submit"><?= form.is_new ? "Create account" : "Save changes" ?></button>
+          </div>
         </div>
-        <button class="btn btn-primario" type="submit">
-          <?= form.is_new ? "Crear cuenta" : "Guardar cambios" ?>
-        </button>
-      </section>
+        <aside class="card sidebar-card">
+          <div class="field">
+            <label>What each role can do</label>
+            <small>
+              <strong>User</strong> — reads published pages, nothing in the panel.<br>
+              <strong>Editor</strong> — everything in this panel except accounts: pages, media, menus, history.<br>
+              <strong>Administrator</strong> — all of the above plus the Users section and account management.
+            </small>
+          </div>
+        </aside>
+      </div>
     </form>
-  </div>
+  </section>
 </main>
-<?jhs include("partials/footer") ?>
-</body>
-</html>
+<?jhs include("partials/admin/foot") ?>

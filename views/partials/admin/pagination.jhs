@@ -1,0 +1,39 @@
+<?jhs
+  // Shared admin pagination (F12). Global: `paginacion` — { pagina,
+  // total_paginas, total_items, anterior, siguiente, base }, with
+  // anterior/siguiente null at the edges. Renders the prev/next pair
+  // plus a number window around the current page (first, last and
+  // ±2), all plain links — no JavaScript. The typeof guard covers
+  // views that can render without a paginated route behind them.
+  var hay = typeof paginacion !== "undefined" && paginacion &&
+             paginacion.total_paginas > 1;
+  var numeros = [];
+  if (hay) {
+    for (var n = 1; n <= paginacion.total_paginas; n++) {
+      if (n == 1 || n == paginacion.total_paginas ||
+          Math.abs(n - paginacion.pagina) <= 2) {
+        numeros.push(n);
+      }
+    }
+  }
+  var sep = paginacion && paginacion.base.indexOf("?") === -1 ? "?" : "&";
+  var previo = 0;
+?>
+<?jhs if (hay) { ?>
+<nav class="pagination" aria-label="Results pagination">
+  <span>Page <?= paginacion.pagina ?> of <?= paginacion.total_paginas ?> &middot; <?= paginacion.total_items ?> items</span>
+  <div class="pages">
+<?jhs if (paginacion.anterior) { ?>
+    <a class="page-btn" href="<?= paginacion.anterior ?>" aria-label="Previous page">&#8249;</a>
+<?jhs } ?>
+<?jhs numeros.forEach(function (n) { ?>
+<?jhs if (n - previo > 1) { ?><span class="pag-hueco">&hellip;</span><?jhs } ?>
+    <a class="page-btn" href="<?= paginacion.base + sep + "page=" + n ?>"<?jhs if (n == paginacion.pagina) { ?> aria-current="page"<?jhs } ?>><?= n ?></a>
+<?jhs previo = n; ?>
+<?jhs }); ?>
+<?jhs if (paginacion.siguiente) { ?>
+    <a class="page-btn" href="<?= paginacion.siguiente ?>" aria-label="Next page">&#8250;</a>
+<?jhs } ?>
+  </div>
+</nav>
+<?jhs } ?>

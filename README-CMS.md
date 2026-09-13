@@ -525,6 +525,59 @@ instead of resurrecting the old date. The field is UTC
 (`datetime-local`), the panel clock every `*_h` field already
 displays.
 
+## The admin panel (F12): app shell, tokens and the no-JS theme
+
+Until v0.15.0 the panel shared the public site's chrome — the same
+header, the same stylesheet, the same Spanish voice. F12 gives it its
+own **app shell**: a fixed sidebar (collapsing to a 72px icon rail on
+small screens), a sticky topbar with a real pages filter, cards,
+tables, status pills, a two-column editor layout and a media grid —
+`public/assets/admin.css`, a design system independent from the
+site's `wallermax.css`. The panel speaks English now; the public site
+stays Spanish (and untouched), including the shared error pages and
+the feeds.
+
+The redesign is **zero new keys, zero JavaScript and one new route**:
+
+- **Partials**: `views/partials/admin/` — `head` (document head +
+  `data-theme`), `sidebar` (navigation, user mini, sign-out), `topbar`
+  (search + theme toggle), `foot`, and `pagination` (numbered page
+  buttons with `aria-current`, a window around the current page).
+  Views define `titulo` before including `head` — the compile-time
+  `include()` runs in one program, so the variable is in scope.
+- **`GET /admin/theme?to=dark|light&back=<path>`**: the no-JS dark
+  mode. The link pins an HttpOnly, one-year, `SameSite=Lax`
+  `wm_theme` cookie and bounces straight back; `base_data` turns the
+  cookie into the `theme` global (only the two literal values survive
+  — anything else reads as "no preference"). While no cookie exists
+  the stylesheet follows the OS via `prefers-color-scheme`; `light`
+  pins the light tokens explicitly. `back` is honored only as a
+  printable `/admin` path without `..` — the toggle can never become
+  an open redirect or a header-injection sink, and anonymous visitors
+  hit the editor gate as always.
+- **The dashboard grew up**: the counters (now including media files
+  and scheduled pages) are stat cards, and two new cards read the
+  database — *Recent activity* (the newest saves across every page:
+  editor, note and time — the cross-page view of the F11 history) and
+  *Needs attention* (drafts with a pending schedule, the soonest
+  first, plus the drafts waiting to be published).
+- **CSP-clean by construction**: the shipped policy is
+  `style-src 'self'` without `'unsafe-inline'`, which silently
+  **dropped** the old tree's `style="padding-left:…"` indentation in
+  browsers. The pages tree now indents through `.depth-N` classes —
+  the whole panel renders with zero inline style attributes (an
+  assertion in the test battery keeps it that way).
+- **Anglicized server messages**: every form-error and flash message
+  the panel renders — page/menu/user validation, uploads, imports,
+  restores — is English now, and `human_bytes` formats sizes with a
+  decimal point. The auto-restore note reads "Restored from revision
+  N." The state codes behind the pills are `published` / `scheduled`
+  / `draft`.
+
+What deliberately did **not** change: the form field names, the
+routes, the `?ok=` flash codes, the role gates and the profile/login
+pages — every POST flow from v0.15.0 keeps working unchanged.
+
 ## Configuration
 
 Two keys from F7, two from F9, two from F10, one from F11 (all
@@ -643,6 +696,10 @@ the same discipline as the phases before it:
   document.
 - **F11 — history** (done): page revisions with restore, scheduled
   publishing — this document.
+- **F12 — the admin panel redesign** (done): the app shell (sidebar,
+  topbar, cards, tables, pills), `admin.css` with light/dark tokens,
+  the no-JS theme toggle, the enriched dashboard, and the panel's
+  English voice — this document.
 
 Each phase ships as one patch with tests and this document updated;
 nothing lands half-featured.

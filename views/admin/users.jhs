@@ -1,70 +1,75 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Cuentas — CMS wallermax</title>
-  <link rel="stylesheet" href="/assets/wallermax.css">
-</head>
-<body>
-<?jhs include("partials/header") ?>
-<main>
-  <div class="wrap">
-    <div class="panel-barra">
-      <h1>Cuentas del CMS</h1>
-      <a class="btn btn-fantasma" href="/admin">Panel</a>
-      <a class="btn btn-primario" href="/admin/users/new">Nueva cuenta</a>
+<?jhs var titulo = "Users"; ?>
+<?jhs include("partials/admin/head") ?>
+<?jhs include("partials/admin/sidebar") ?>
+<main class="main">
+<?jhs include("partials/admin/topbar") ?>
+  <section class="page">
+    <div class="breadcrumbs">Team / Users</div>
+    <div class="page-head">
+      <div>
+        <h1>Users</h1>
+        <p>Manage access to the CMS and editorial workflows.</p>
+      </div>
+      <div class="actions">
+        <a class="btn primary" href="/admin/users/new">&#43; New account</a>
+      </div>
     </div>
 
 <?jhs if (query.ok == "creado") { ?>
-    <p class="aviso aviso-ok">Cuenta creada.</p>
+    <p class="notice notice-ok">Account created.</p>
 <?jhs } ?>
 <?jhs if (query.ok == "guardado") { ?>
-    <p class="aviso aviso-ok">Cambios guardados.</p>
+    <p class="notice notice-ok">Changes saved.</p>
 <?jhs } ?>
 <?jhs if (query.ok == "eliminado") { ?>
-    <p class="aviso aviso-ok">Cuenta eliminada (sus tokens de refresco quedan revocados; los de acceso caducan solos en menos de una hora).</p>
+    <p class="notice notice-ok">Account deleted (its refresh tokens are revoked; access tokens expire on their own within the hour).</p>
 <?jhs } ?>
 <?jhs if (query.error == "propia") { ?>
-    <p class="aviso aviso-error">No puedes eliminar tu propia cuenta: usa otra cuenta de administrador.</p>
+    <p class="notice notice-error">You cannot delete your own account: use another administrator account.</p>
 <?jhs } ?>
 <?jhs if (query.error == "ultimo-admin") { ?>
-    <p class="aviso aviso-error">Es la última cuenta con rol de administrador y no se puede eliminar.</p>
+    <p class="notice notice-error">This is the last administrator account and cannot be deleted.</p>
 <?jhs } ?>
 
-    <section class="tarjeta">
+    <section class="card">
 <?jhs if (admin_users && admin_users.length) { ?>
-      <ul class="lista">
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th>User</th><th>Role</th><th>Last active</th><th></th></tr>
+          </thead>
+          <tbody>
 <?jhs admin_users.forEach(function (cuenta) { ?>
-        <li>
-          <div class="principal">
-            <strong><?= cuenta.username ?></strong>
-<?jhs if (user && cuenta.id == user.id) { ?>
-            <span class="chip">eres tú</span>
-<?jhs } ?>
-            <div class="secundario">
-              alta <?= cuenta.created_at_h ?><?jhs if (cuenta.last_login_at_h) { ?> ·
-              último acceso <?= cuenta.last_login_at_h ?><?jhs } ?>
-            </div>
-          </div>
-          <span class="chip chip-acento"><?= cuenta.role ?></span>
-          <div class="acciones">
-            <a class="btn btn-fantasma" href="/admin/users/<?= cuenta.id ?>/edit">Editar</a>
+            <tr>
+              <td>
+                <span class="table-title"><?= cuenta.username ?><?jhs if (user && cuenta.id == user.id) { ?> <span class="table-sub">(you)</span><?jhs } ?></span>
+                <span class="table-sub">joined <?= cuenta.created_at_h ?></span>
+              </td>
+              <td><span class="status published"><?= cuenta.role ?></span></td>
+              <td><?jhs if (cuenta.last_login_at_h) { ?><?= cuenta.last_login_at_h ?><?jhs } else { ?>&mdash;<?jhs } ?></td>
+              <td>
+                <div class="row-actions">
+                  <a class="btn" href="/admin/users/<?= cuenta.id ?>/edit">Edit</a>
 <?jhs if (!(user && cuenta.id == user.id)) { ?>
-            <form method="post" action="/admin/users/<?= cuenta.id ?>/delete">
-              <button class="btn btn-peligro" type="submit">Eliminar</button>
-            </form>
+                  <form method="post" action="/admin/users/<?= cuenta.id ?>/delete">
+                    <button class="btn danger" type="submit">Delete</button>
+                  </form>
 <?jhs } ?>
-          </div>
-        </li>
+                </div>
+              </td>
+            </tr>
 <?jhs }); ?>
-      </ul>
+          </tbody>
+        </table>
+      </div>
 <?jhs } else { ?>
-      <p class="vacio">No hay cuentas (algo muy raro: tú mismo estás identificado).</p>
+      <div class="empty">
+        <div class="empty-icon">&#9678;</div>
+        <h2>No accounts</h2>
+        <p>Odd — you are signed in yourself.</p>
+      </div>
 <?jhs } ?>
     </section>
-  </div>
+  </section>
 </main>
-<?jhs include("partials/footer") ?>
-</body>
-</html>
+<?jhs include("partials/admin/foot") ?>

@@ -813,6 +813,26 @@ pub struct RevisionSummary {
     pub edited_by_name: Option<String>,
 }
 
+/// One row of the dashboard's recent-activity feed (F12): the newest
+/// saves across all pages, with the snapshot's title and the editor
+/// resolved. It is the cross-page view of [`RevisionSummary`] — the
+/// per-page list stays as it is.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RecentRevision {
+    pub page_id: i64,
+    /// The revision's snapshot of the title, as saved.
+    pub title: String,
+    pub slug: String,
+    /// The per-page sequence number, `1..N` in save order.
+    pub revision: i64,
+    /// The editor's optional note, as typed.
+    pub note: Option<String>,
+    /// Save time, unix seconds.
+    pub created_at: i64,
+    /// The saving editor's username, when the account still exists.
+    pub edited_by_name: Option<String>,
+}
+
 /// A full revision snapshot (F11): every editable field as saved —
 /// what the detail view renders (escaped, never executed) and what
 /// the restore route copies back onto the page as a new revision.
@@ -1053,6 +1073,19 @@ pub trait PageRepository: Send + Sync + 'static {
         page_id: i64,
         revision: i64,
     ) -> Result<Option<PageRevision>, RepositoryError>;
+
+    /// Drafts whose `publish_at` is still in the future (F11): the
+    /// dashboard's "needs attention" card (F12). Ordered by the
+    /// schedule, the soonest first.
+    async fn scheduled_pending(&self, limit: i64) -> Result<Vec<PageSummary>, RepositoryError>;
+
+    /// How many drafts have a pending schedule (F12) — the
+    /// dashboard's counter, independent of the card's cap.
+    async fn count_scheduled(&self) -> Result<i64, RepositoryError>;
+
+    /// The newest revisions across every page (F12): the dashboard's
+    /// recent-activity feed, one row per save, newest first.
+    async fn recent_revisions(&self, limit: i64) -> Result<Vec<RecentRevision>, RepositoryError>;
 }
 
 /// Column list shared by every `SELECT` on the `pages` table.
@@ -1602,6 +1635,50 @@ impl PageRepository for SqlitePageRepository {
         .bind(page_id)
         .bind(revision)
         .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn scheduled_pending(&self, limit: i64) -> Result<Vec<PageSummary>, RepositoryError> {
+        // The mirror image of the shared visibility predicate: a
+        // draft whose schedule has NOT elapsed yet. The clock is
+        // evaluated by SQLite at query time, exactly like
+        // `PUBLIC_VISIBLE`.
+        let sql = format!(
+            "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages \
+             WHERE is_published = 0 AND publish_at IS NOT NULL \
+             AND publish_at > strftime('%s', 'now') \
+             ORDER BY publish_at ASC, id ASC LIMIT ?1"
+        );
+        sqlx::query_as(&sql)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn count_scheduled(&self) -> Result<i64, RepositoryError> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pages WHERE is_published = 0 \
+             AND publish_at IS NOT NULL AND publish_at > strftime('%s', 'now')",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn recent_revisions(&self, limit: i64) -> Result<Vec<RecentRevision>, RepositoryError> {
+        // `r.id DESC` is insertion order: the feed shows the newest
+        // saves regardless of which page they belong to.
+        sqlx::query_as(
+            "SELECT r.page_id AS page_id, r.title AS title, r.slug AS slug, \
+             r.revision AS revision, r.note AS note, r.created_at AS created_at, \
+             u.username AS edited_by_name \
+             FROM page_revisions r LEFT JOIN users u ON u.id = r.edited_by \
+             ORDER BY r.id DESC LIMIT ?1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
         .await
         .map_err(RepositoryError::from_sqlx)
     }

@@ -1,67 +1,74 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Revisión <?= revision.revision ?> — <?= page.title ?> — CMS wallermax</title>
-  <link rel="stylesheet" href="/assets/wallermax.css">
-</head>
-<body>
-<?jhs include("partials/header") ?>
-<main>
-  <div class="wrap">
-    <div class="panel-barra">
-      <h1>Revisión <?= revision.revision ?> de «<?= page.title ?>»</h1>
-      <a class="btn btn-fantasma" href="/admin/pages/<?= page.id ?>/history">Volver al historial</a>
-      <a class="btn btn-fantasma" href="/admin/pages/<?= page.id ?>/edit">Editar la página</a>
+<?jhs var titulo = "Revision " + revision.revision + " — " + page.title; ?>
+<?jhs include("partials/admin/head") ?>
+<?jhs include("partials/admin/sidebar") ?>
+<main class="main">
+<?jhs include("partials/admin/topbar") ?>
+  <section class="page">
+    <div class="breadcrumbs">Pages / <?= page.title ?> / History / Revision <?= revision.revision ?></div>
+    <div class="page-head">
+      <div>
+        <h1>Revision <?= revision.revision ?> of «<?= page.title ?>»</h1>
+        <p>Saved <?= revision.created_at_h ?><?jhs if (revision.edited_by_name) { ?> by <?= revision.edited_by_name ?><?jhs } ?> — the full snapshot as it was stored.</p>
+      </div>
+      <div class="actions">
+        <a class="btn" href="/admin/pages/<?= page.id ?>/history">Back to history</a>
+        <a class="btn" href="/admin/pages/<?= page.id ?>/edit">Edit the page</a>
+      </div>
     </div>
 
 <?jhs if (form_error) { ?>
-    <p class="aviso aviso-error"><?= form_error ?></p>
+    <p class="notice notice-error"><?= form_error ?></p>
 <?jhs } ?>
 
-    <section class="tarjeta">
-      <p class="pagina-meta">
-        Guardada <?= revision.created_at_h ?><?jhs if (revision.edited_by_name) { ?> · por <?= revision.edited_by_name ?><?jhs } ?><?jhs if (revision.estado == "publicada") { ?> · guardada publicada<?jhs } else if (revision.estado == "programada") { ?> · guardada programada<?= revision.publish_at_h ? " para " + revision.publish_at_h : "" ?><?jhs } else { ?> · guardada como borrador<?jhs } ?>
-      </p>
+    <section class="card" aria-labelledby="snapshot-titulo">
+      <div class="card-head"><h2 id="snapshot-titulo">Snapshot</h2></div>
+      <div class="card-body">
+<?jhs if (revision.estado == "published") { ?>
+        <p><span class="status published">&#9679; Saved as published</span></p>
+<?jhs } else if (revision.estado == "scheduled") { ?>
+        <p><span class="status scheduled">&#9679; Saved as scheduled<?= revision.publish_at_h ? " · " + revision.publish_at_h : "" ?></span></p>
+<?jhs } else { ?>
+        <p><span class="status draft">&#9679; Saved as draft</span></p>
+<?jhs } ?>
 <?jhs if (revision.note) { ?>
-      <p class="fragmento">Nota: <?= revision.note ?></p>
+        <p class="resultado-fragmento">Note: <?= revision.note ?></p>
 <?jhs } ?>
-
-      <dl>
-        <dt>Título</dt><dd><?= revision.title ?></dd>
-        <dt>Slug</dt><dd>/p/<?= revision.slug ?></dd>
-        <dt>Formato del contenido</dt><dd><?= revision.body_format == "markdown" ? "Markdown" : "Plantilla .jhs" ?></dd>
-        <dt>Padre</dt><dd><?= revision.parent_id == null ? "Nivel superior" : "Página #" + revision.parent_id ?></dd>
-        <dt>Posición</dt><dd><?= revision.position ?></dd>
+        <dl class="detalle">
+          <dt>Title</dt><dd><?= revision.title ?></dd>
+          <dt>Slug</dt><dd>/p/<?= revision.slug ?></dd>
+          <dt>Content format</dt><dd><?= revision.body_format == "markdown" ? "Markdown" : ".jhs template" ?></dd>
+          <dt>Parent</dt><dd><?= revision.parent_id == null ? "Top level" : "Page #" + revision.parent_id ?></dd>
+          <dt>Position</dt><dd><?= revision.position ?></dd>
 <?jhs if (revision.meta_title) { ?>
-        <dt>SEO · título para buscadores</dt><dd><?= revision.meta_title ?></dd>
+          <dt>SEO &middot; title</dt><dd><?= revision.meta_title ?></dd>
 <?jhs } ?>
 <?jhs if (revision.meta_description) { ?>
-        <dt>SEO · descripción</dt><dd><?= revision.meta_description ?></dd>
+          <dt>SEO &middot; description</dt><dd><?= revision.meta_description ?></dd>
 <?jhs } ?>
 <?jhs if (revision.og_image) { ?>
-        <dt>SEO · imagen social</dt><dd><?= revision.og_image ?></dd>
+          <dt>SEO &middot; social image</dt><dd><?= revision.og_image ?></dd>
 <?jhs } ?>
-      </dl>
-
-      <h2>Contenido tal como se guardó</h2>
-      <p class="ayuda">Es el código fuente tal cual: desde aquí nunca se ejecuta (el
-         auto-escape lo muestra inerte). Restaurar lo copia sobre la página actual y el
-         editor de páginas lo renderiza como siempre — con la previsualización de F8
-         disponible antes de guardar.</p>
-      <pre><code><?= revision.content ?></code></pre>
-
-      <form method="post" action="/admin/pages/<?= page.id ?>/history/<?= revision.revision ?>/restore">
-        <button class="btn btn-primario" type="submit">Restaurar esta revisión</button>
-        <p class="ayuda">La restauración copia el contenido sobre la página y queda anotada
-           como una revisión nueva (reversible, como todo). El estado de publicación
-           actual — publicada, programada o borrador — se mantiene: restaurar nunca
-           publica ni despublica.</p>
-      </form>
+        </dl>
+      </div>
     </section>
-  </div>
+
+    <section class="card" aria-labelledby="fuente-titulo">
+      <div class="card-head"><h2 id="fuente-titulo">Content as saved</h2></div>
+      <div class="card-body">
+        <p class="table-sub">The exact source, inert by construction: it is never executed from here (auto-escaping renders it harmless). Restoring copies it onto the live page, and the editor renders it as always — with the F8 preview available before saving.</p>
+        <pre class="fuente"><?= revision.content ?></pre>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="restaurar-titulo">
+      <div class="card-head"><h2 id="restaurar-titulo">Restore</h2></div>
+      <div class="card-body">
+        <form method="post" action="/admin/pages/<?= page.id ?>/history/<?= revision.revision ?>/restore">
+          <button class="btn primary" type="submit">Restore this revision</button>
+          <p class="table-sub">The restoration copies the content onto the page and is itself recorded as a new revision (reversible, like everything). The current publication state — published, scheduled or draft — is preserved: restoring never publishes or unpublishes anything.</p>
+        </form>
+      </div>
+    </section>
+  </section>
 </main>
-<?jhs include("partials/footer") ?>
-</body>
-</html>
+<?jhs include("partials/admin/foot") ?>

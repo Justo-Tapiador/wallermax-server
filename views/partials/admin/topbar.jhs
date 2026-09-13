@@ -1,0 +1,21 @@
+<?jhs
+  // Shared admin topbar (F12). Globals: user, path, theme.
+  // The search rides the admin pages filter (GET /admin/pages?q=…);
+  // the theme button is a server round-trip to /admin/theme that pins
+  // a cookie and comes straight back — the no-JavaScript toggle.
+?>
+<header class="topbar">
+  <div class="topbar-left">
+    <form class="search" method="get" action="/admin/pages" role="search">
+      <span aria-hidden="true">&#8981;</span>
+      <input type="search" name="q" maxlength="200" placeholder="Search pages&hellip;" aria-label="Search pages">
+    </form>
+  </div>
+  <div class="topbar-right">
+    <a class="circle-btn" href="/admin/theme?to=<?= theme == "dark" ? "light" : "dark" ?>&amp;back=<?= path ?>"
+       title="<?= theme == "dark" ? "Switch to the light theme" : "Switch to the dark theme" ?>"
+       aria-label="<?= theme == "dark" ? "Switch to the light theme" : "Switch to the dark theme" ?>"><?= theme == "dark" ? "☀" : "☾" ?></a>
+    <a class="circle-btn" href="/" title="View the public site" aria-label="View the public site">&#8599;</a>
+    <div class="avatar"><?= user ? user.username.slice(0, 2).toUpperCase() : "" ?></div>
+  </div>
+</header>

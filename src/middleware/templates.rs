@@ -240,7 +240,35 @@ pub(crate) async fn base_data(
     data.insert(String::from("pages"), pages_global(state).await);
     data.insert(String::from("menus"), menus_global(state).await);
     data.insert(String::from("req"), req_global(headers, uri, method));
+    data.insert(String::from("theme"), theme_global(headers));
     data
+}
+
+/// The panel theme preference (F12): the `wm_theme` cookie pinned by
+/// `GET /admin/theme`, as `"dark"`/`"light"`, or `null` while the
+/// visitor never chose — the admin stylesheet's
+/// `prefers-color-scheme` fallback then follows the OS. Only the two
+/// literal values survive: a corrupted or hand-crafted cookie reads
+/// as "no preference".
+///
+/// The cookie is HttpOnly, and `SAFE_REQ_HEADERS` keeps the raw
+/// cookie header out of the `req` global — this Rust-side read is
+/// the only place templates can learn the preference from.
+fn theme_global(headers: &HeaderMap) -> Value {
+    for value in headers.get_all(header::COOKIE) {
+        let Ok(raw) = value.to_str() else {
+            continue;
+        };
+        for pair in raw.split(';') {
+            let pair = pair.trim();
+            if let Some((name, theme)) = pair.split_once('=') {
+                if name == "wm_theme" && (theme == "dark" || theme == "light") {
+                    return Value::String(theme.to_owned());
+                }
+            }
+        }
+    }
+    Value::Null
 }
 
 /// The `req` global (v0.9.0): an Express-shaped request object with a

@@ -1,59 +1,72 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Historial — <?= page.title ?> — CMS wallermax</title>
-  <link rel="stylesheet" href="/assets/wallermax.css">
-</head>
-<body>
-<?jhs include("partials/header") ?>
-<main>
-  <div class="wrap">
-    <div class="panel-barra">
-      <h1>Historial de «<?= page.title ?>»</h1>
-      <a class="btn btn-fantasma" href="/admin/pages">Volver al listado</a>
-      <a class="btn btn-fantasma" href="/admin/pages/<?= page.id ?>/edit">Editar la página</a>
+<?jhs var titulo = "History — " + page.title; ?>
+<?jhs include("partials/admin/head") ?>
+<?jhs include("partials/admin/sidebar") ?>
+<main class="main">
+<?jhs include("partials/admin/topbar") ?>
+  <section class="page">
+    <div class="breadcrumbs">Pages / <?= page.title ?> / History</div>
+    <div class="page-head">
+      <div>
+        <h1>History of «<?= page.title ?>»</h1>
+        <p>Every save — create, edit or restore — leaves a revision with the content as saved, newest first. Restoring is append-only: the history never loses anything.</p>
+      </div>
+      <div class="actions">
+        <a class="btn" href="/admin/pages">Back to list</a>
+        <a class="btn primary" href="/admin/pages/<?= page.id ?>/edit">Edit the page</a>
+      </div>
     </div>
 
-    <section class="tarjeta">
+    <section class="card">
 <?jhs if (revisiones && revisiones.length) { ?>
-      <p class="ayuda">Cada guardado — crear, editar o restaurar — deja aquí una revisión con
-         el contenido tal como se guardó, de la más reciente a la más antigua. Restaurar
-         copia una revisión sobre la página y queda registrada como una revisión nueva:
-         el historial nunca pierde nada por restaurar. Cuántas se conservan lo configura
-         el servidor (<code>cms.max_revisions</code>).</p>
-      <ul class="lista">
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th>Revision</th><th>Saved</th><th>Status</th><th></th></tr>
+          </thead>
+          <tbody>
 <?jhs revisiones.forEach(function (revision) { ?>
-        <li>
-          <div class="principal">
-            <a href="/admin/pages/<?= page.id ?>/history/<?= revision.revision ?>">Revisión <?= revision.revision ?><?= revision.is_current ? " — actual" : "" ?></a>
-            <div class="secundario">
-              <?= revision.created_at_h ?><?jhs if (revision.edited_by_name) { ?> · por <?= revision.edited_by_name ?><?jhs } ?> · /p/<?= revision.slug ?>
-            </div>
+            <tr>
+              <td>
+                <span class="table-title"><a href="/admin/pages/<?= page.id ?>/history/<?= revision.revision ?>">Revision <?= revision.revision ?><?= revision.is_current ? " — current" : "" ?></a></span>
 <?jhs if (revision.note) { ?>
-            <p class="fragmento"><?= revision.note ?></p>
+                <p class="resultado-fragmento"><?= revision.note ?></p>
 <?jhs } ?>
-          </div>
-<?jhs if (revision.estado == "publicada") { ?>
-          <span class="publicado">publicada</span>
-<?jhs } else if (revision.estado == "programada") { ?>
-          <span class="borrador">programada<?= revision.publish_at_h ? " · " + revision.publish_at_h : "" ?></span>
+                <span class="table-sub">/p/<?= revision.slug ?></span>
+              </td>
+              <td>
+                <?= revision.created_at_h ?>
+<?jhs if (revision.edited_by_name) { ?>
+                <span class="table-sub">by <?= revision.edited_by_name ?></span>
+<?jhs } ?>
+              </td>
+<?jhs if (revision.estado == "published") { ?>
+              <td><span class="status published">&#9679; Published</span></td>
+<?jhs } else if (revision.estado == "scheduled") { ?>
+              <td><span class="status scheduled">&#9679; Scheduled<?= revision.publish_at_h ? " · " + revision.publish_at_h : "" ?></span></td>
 <?jhs } else { ?>
-          <span class="borrador">borrador</span>
+              <td><span class="status draft">&#9679; Draft</span></td>
 <?jhs } ?>
-          <div class="acciones">
-            <a class="btn btn-fantasma" href="/admin/pages/<?= page.id ?>/history/<?= revision.revision ?>">Ver la revisión</a>
-          </div>
-        </li>
+              <td>
+                <div class="row-actions">
+                  <a class="btn" href="/admin/pages/<?= page.id ?>/history/<?= revision.revision ?>">View</a>
+                </div>
+              </td>
+            </tr>
 <?jhs }); ?>
-      </ul>
+          </tbody>
+        </table>
+      </div>
+      <div class="card-body">
+        <p class="table-sub">How many are kept is server configuration (<code>[cms] max_revisions</code>): the oldest snapshots are pruned inside the same write.</p>
+      </div>
 <?jhs } else { ?>
-      <p class="vacio">Esta página todavía no tiene revisiones guardadas.</p>
+      <div class="empty">
+        <div class="empty-icon">&#8635;</div>
+        <h2>No revisions</h2>
+        <p>This page has no saved revisions yet.</p>
+      </div>
 <?jhs } ?>
     </section>
-  </div>
+  </section>
 </main>
-<?jhs include("partials/footer") ?>
-</body>
-</html>
+<?jhs include("partials/admin/foot") ?>

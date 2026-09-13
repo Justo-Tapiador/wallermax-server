@@ -1,170 +1,150 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title><?= form.is_new ? "Nueva página" : "Editar página" ?> — CMS wallermax</title>
-  <link rel="stylesheet" href="/assets/wallermax.css">
-</head>
-<body>
-<?jhs include("partials/header") ?>
-<main>
-  <div class="wrap">
-    <div class="panel-barra">
-      <h1><?= form.is_new ? "Nueva página" : "Editar página" ?></h1>
-      <a class="btn btn-fantasma" href="/admin/pages">Volver al listado</a>
+<?jhs
+  // The page editor (F12 shell). Field names are the server's
+  // contract and never change — only the layout and language did.
+  var titulo = form.is_new ? "New page" : "Edit page";
+?>
+<?jhs include("partials/admin/head") ?>
+<?jhs include("partials/admin/sidebar") ?>
+<main class="main">
+<?jhs include("partials/admin/topbar") ?>
+  <section class="page">
+    <div class="breadcrumbs">Pages<?jhs if (!form.is_new) { ?> / <?= form.title ?> / Edit<?jhs } ?></div>
+    <div class="page-head">
+      <div>
+        <h1><?= titulo ?></h1>
+        <p><?jhs if (form.is_new) { ?>A new page is saved as a draft: review it and publish when it is ready.<?jhs } else { ?>Every save lands a new revision in the history — append-only, reversible.<?jhs } ?></p>
+      </div>
+      <div class="actions">
+        <a class="btn" href="/admin/pages">Back to list</a>
 <?jhs if (!form.is_new) { ?>
-      <a class="btn btn-fantasma" href="/p/<?= form.slug ?>">Ver la página</a>
-      <a class="btn btn-fantasma" href="/admin/pages/<?= form.id ?>/history">Historial</a>
+        <a class="btn" href="/p/<?= form.slug ?>">View page</a>
+        <a class="btn" href="/admin/pages/<?= form.id ?>/history">History</a>
 <?jhs } ?>
+      </div>
     </div>
 
-<?jhs if (query.ok == "creada" || query.ok == "guardada" || query.ok == "importada" || query.ok == "restaurada") { ?>
-    <p class="aviso aviso-ok">
-<?jhs if (query.ok == "creada") { ?>Página creada como borrador: revisa el contenido y marca «Publicada» cuando esté lista.
-<?jhs } else if (query.ok == "importada") { ?>Contenido importado como borrador: revísalo y publícalo cuando quieras.
-<?jhs } else if (query.ok == "restaurada") { ?>Revisión restaurada: el contenido ha vuelto y la restauración misma queda registrada como una revisión nueva (reversible, como todo).
-<?jhs } else { ?>Cambios guardados.<?jhs } ?>
-    </p>
+<?jhs if (query.ok == "creada") { ?>
+    <p class="notice notice-ok">Page created as a draft: review the content and check «Published» when it is ready.</p>
+<?jhs } ?>
+<?jhs if (query.ok == "guardada") { ?>
+    <p class="notice notice-ok">Changes saved.</p>
+<?jhs } ?>
+<?jhs if (query.ok == "importada") { ?>
+    <p class="notice notice-ok">Content imported as a draft: review it and publish whenever you want.</p>
+<?jhs } ?>
+<?jhs if (query.ok == "restaurada") { ?>
+    <p class="notice notice-ok">Revision restored: the content is back, and the restoration itself is recorded as a new revision (reversible, like everything).</p>
 <?jhs } ?>
 <?jhs if (form_error) { ?>
-    <p class="aviso aviso-error"><?= form_error ?></p>
+    <p class="notice notice-error"><?= form_error ?></p>
 <?jhs } ?>
 
 <?jhs if (preview_html) { ?>
-    <section class="tarjeta" aria-labelledby="preview-titulo">
-      <h2 id="preview-titulo">Vista previa</h2>
-      <p class="ayuda">Así quedará el cuerpo con el formato elegido. Todavía no se ha
-         guardado nada: sigue editando abajo y pulsa «Guardar» cuando esté listo.</p>
-      <div class="pagina-cuerpo">
+    <section class="card" aria-labelledby="preview-titulo">
+      <div class="card-head"><h2 id="preview-titulo">Preview</h2></div>
+      <div class="card-body">
+        <p class="table-sub">This is how the body renders with the chosen format. Nothing is saved yet: keep editing below and press «Save» when ready.</p>
+        <div class="preview-body">
 <?jhs echo(raw(preview_html)) ?>
+        </div>
       </div>
     </section>
 <?jhs } ?>
 
     <form method="post" action="<?= form.is_new ? "/admin/pages" : "/admin/pages/" + form.id ?>">
       <input type="hidden" name="page_id" value="<?= form.id == null ? "" : form.id ?>">
-      <section class="tarjeta">
-        <div class="campo">
-          <label for="titulo">Título</label>
-          <input id="titulo" type="text" name="title" required maxlength="200"
-                 value="<?= form.title ?>">
-        </div>
-        <div class="campo">
-          <label for="slug">Slug (la URL será /p/slug)</label>
-          <input id="slug" type="text" name="slug" required maxlength="64"
-                 value="<?= form.slug ?>">
-          <p class="ayuda">Minúsculas, números y guiones: <code>sobre-nosotros</code>.
-             Cambiarlo mueve la URL pública de la página.</p>
-        </div>
-        <div class="campo">
-          <label for="padre">Página padre</label>
-          <select id="padre" name="parent_id">
-            <option value=""<?= form.parent_id == null ? " selected" : "" ?>>— Nivel superior —</option>
-<?jhs form.parents.forEach(function (opcion) { ?>
-            <option value="<?= opcion.id ?>"<?= form.parent_id == opcion.id ? " selected" : "" ?>><?= opcion.label ?></option>
-<?jhs }); ?>
-          </select>
-          <p class="ayuda">La jerarquía alimenta los menús, las migas de pan y las subpáginas.
-             Una página nunca puede colgar de su propia rama.</p>
-        </div>
-        <div class="campo">
-          <label for="posicion">Posición (orden entre páginas hermanas)</label>
-          <input id="posicion" type="number" name="position" min="0" max="99999"
-                 value="<?= form.position ?>">
-          <p class="ayuda">Menor número = antes. Con igual posición decide el orden de creación.</p>
-        </div>
-        <div class="campo">
-          <label for="formato">Formato del contenido</label>
-          <select id="formato" name="body_format">
-            <option value="jhs"<?= form.body_format == "markdown" ? "" : " selected" ?>>Plantilla .jhs — HTML con etiquetas &lt;?= ?&gt;</option>
-            <option value="markdown"<?= form.body_format == "markdown" ? " selected" : "" ?>>Markdown — texto llano</option>
-          </select>
-          <p class="ayuda">Markdown es el modo de escritura segura: se renderiza en el
-             servidor y el HTML crudo que escribas se descarta. La plantilla .jhs es el
-             modo potente (etiquetas, globales, include) para editores.</p>
-        </div>
-        <div class="campo">
-          <label for="contenido">Contenido — <?= form.body_format == "markdown" ? "Markdown" : "plantilla .jhs" ?></label>
-          <textarea id="contenido" name="content" spellcheck="false"
-                    placeholder="<?= form.body_format == "markdown" ? "# Título&#10;&#10;Párrafo con **negrita** y [un enlace](https://ejemplo.com)…" : "&lt;h2&gt;Hola&lt;/h2&gt;&#10;&lt;p&gt;HTML con etiquetas &lt;?= user ?&gt; disponibles…&lt;/p&gt;" ?>"><?=
-            form.content
-          ?></textarea>
+      <div class="form-layout">
+        <div class="card editor-card">
+          <input class="title-input" id="titulo" type="text" name="title" required
+                 maxlength="200" value="<?= form.title ?>"
+                 placeholder="Page title" aria-label="Page title">
+          <div class="field">
+            <label for="formato">Content format</label>
+            <select class="select" id="formato" name="body_format">
+              <option value="jhs"<?= form.body_format == "markdown" ? "" : " selected" ?>>.jhs template — HTML with &lt;?= ?&gt; tags</option>
+              <option value="markdown"<?= form.body_format == "markdown" ? " selected" : "" ?>>Markdown — plain text</option>
+            </select>
+            <small>Markdown is the safe writing mode: rendered on the server, raw HTML is discarded. The .jhs template is the powerful mode (tags, globals, include) for editors.</small>
+          </div>
+          <div class="field">
+            <label for="contenido">Content — <?= form.body_format == "markdown" ? "Markdown" : ".jhs template" ?></label>
+            <textarea class="body-editor" id="contenido" name="content" spellcheck="false"
+                      placeholder="<?= form.body_format == "markdown" ? "# Heading&#10;&#10;Paragraph with **bold** and [a link](https://example.com)&#8230;" : "&lt;h2&gt;Hello&lt;/h2&gt;&#10;&lt;p&gt;HTML with &lt;?= user ?&gt; globals available&hellip;&lt;/p&gt;" ?>"><?= form.content ?></textarea>
 <?jhs if (form.body_format == "markdown") { ?>
-          <p class="ayuda">Encabezados #, listas, citas, bloques de código, tablas y
-             enlaces. Las imágenes van con <code>![texto alt](/media/…)</code>: sube el
-             archivo en la <a href="/admin/media">biblioteca de medios</a> y copia el
-             fragmento listo desde su página de detalle. El HTML crudo se descarta y
-             los enlaces a esquemas extraños (javascript:, data:) se degradan: la
-             página nunca puede convertirse en portadora de scripts. Pulsa
-             «Previsualizar» abajo para ver el render exacto antes de guardar.</p>
+            <small>Headings #, lists, quotes, code blocks, tables and links. Images go as <code>![alt text](/media/&hellip;)</code>: upload the file to the <a href="/admin/media">media library</a> and copy the ready snippet from its detail page. Raw HTML is discarded and links to strange schemes (javascript:, data:) are degraded: a page can never become a script carrier. Press «Preview» below to see the exact render before saving.</small>
 <?jhs } else { ?>
-          <p class="ayuda">Es HTML con etiquetas <code>&lt;?= expresión ?&gt;</code> y
-             <code>&lt;?jhs código ?&gt;</code> (el mismo motor de las vistas). Los
-             globales <code>user</code>, <code>path</code>, <code>query</code> y
-             <code>pages</code> están disponibles, y también
-             <code>&lt;?jhs include("partials/header") ?&gt;</code> para reutilizar la
-             cabecera del sitio. El <em>auto-escape</em> está activo: usa
-             <code>raw()</code> solo para HTML de confianza.</p>
+            <small>HTML with <code>&lt;?= expression ?&gt;</code> and <code>&lt;?jhs code ?&gt;</code> tags (the same engine the views use). The globals <code>user</code>, <code>path</code>, <code>query</code> and <code>pages</code> are available, plus <code>&lt;?jhs include("partials/header") ?&gt;</code> to reuse the site chrome. Auto-escaping is on: use <code>raw()</code> only for trusted HTML.</small>
 <?jhs } ?>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" type="submit"><?= form.is_new ? "Create page" : "Save changes" ?></button>
+            <button class="btn" type="submit" formaction="/admin/pages/preview"
+                    formmethod="post">Preview</button>
+          </div>
         </div>
-        <div class="campo campo-check">
-          <input id="publicada" type="checkbox" name="is_published" value="on"<?= form.is_published ? " checked" : "" ?>>
-          <label for="publicada">Publicada (visible en /p y en el listado público)</label>
-          <p class="ayuda">Marcada = pública ahora mismo. Si la página se publicó sola al
-             llegar su fecha programada, verás el cuadro ya marcado: es la visibilidad
-             real, no solo el interruptor guardado.</p>
-        </div>
-        <div class="campo">
-          <label for="programada">Programar publicación (UTC)</label>
-          <input id="programada" type="datetime-local" name="publish_at" value="<?= form.publish_at ?>">
-          <p class="ayuda">Borrador + fecha futura: la página se publica sola al llegar el
-             momento, sin tareas programadas ni reinicios — la visibilidad se decide en
-             cada lectura. Se interpreta en UTC (la hora del servidor). Una fecha pasada
-             se descarta al guardar, y una página marcada como «Publicada» ignora el
-             campo.</p>
-        </div>
-        <div class="campo">
-          <label for="nota">Nota de revisión (opcional)</label>
-          <input id="nota" type="text" name="revision_note" maxlength="200"
-                 placeholder="Qué has cambiado — se guarda con el historial"
-                 value="<?= form.revision_note ?>">
-          <p class="ayuda">Cada guardado — crear, editar, restaurar — deja una revisión del
-             contenido; la nota acompaña a esa entrada en el
-             <a href="<?= form.is_new ? "/admin/pages" : "/admin/pages/" + form.id + "/history" ?>">historial</a>.</p>
-        </div>
-      </section>
 
-      <section class="tarjeta" aria-labelledby="seo-titulo">
-        <h2 id="seo-titulo">SEO (opcional)</h2>
-        <div class="campo">
-          <label for="meta-titulo">Título para buscadores</label>
-          <input id="meta-titulo" type="text" name="meta_title" maxlength="200"
-                 value="<?= form.meta_title ?>">
-          <p class="ayuda">Vacío = usar el título de la página. Los buscadores muestran ~60
-             caracteres.</p>
-        </div>
-        <div class="campo">
-          <label for="meta-descripcion">Descripción (meta description)</label>
-          <input id="meta-descripcion" type="text" name="meta_description" maxlength="500"
-                 value="<?= form.meta_description ?>">
-          <p class="ayuda">Vacío = sin etiqueta. Los buscadores muestran ~160 caracteres.</p>
-        </div>
-        <div class="campo">
-          <label for="og-imagen">Imagen social (og:image)</label>
-          <input id="og-imagen" type="text" name="og_image" maxlength="500"
-                 placeholder="/assets/og-inicio.png" value="<?= form.og_image ?>">
-          <p class="ayuda">Una ruta del sitio (<code>/assets/…</code>) o una URL absoluta.</p>
-        </div>
-        <button class="btn btn-primario" type="submit">
-          <?= form.is_new ? "Crear página" : "Guardar cambios" ?>
-        </button>
-        <button class="btn btn-fantasma" type="submit" formaction="/admin/pages/preview"
-                formmethod="post">Previsualizar</button>
-      </section>
+        <aside class="card sidebar-card">
+          <div class="field">
+            <label for="slug">Slug (the public URL is /p/slug)</label>
+            <input class="input" id="slug" type="text" name="slug" required maxlength="64"
+                   value="<?= form.slug ?>">
+            <small>Lowercase, digits and hyphens: <code>about-us</code>. Changing it moves the page's public URL.</small>
+          </div>
+          <div class="field">
+            <label for="padre">Parent page</label>
+            <select class="select" id="padre" name="parent_id">
+              <option value=""<?= form.parent_id == null ? " selected" : "" ?>>&mdash; Top level &mdash;</option>
+<?jhs form.parents.forEach(function (opcion) { ?>
+              <option value="<?= opcion.id ?>"<?= form.parent_id == opcion.id ? " selected" : "" ?>><?= opcion.label ?></option>
+<?jhs }); ?>
+            </select>
+            <small>The hierarchy feeds menus, breadcrumbs and subpage listings. A page can never hang from its own branch.</small>
+          </div>
+          <div class="field">
+            <label for="posicion">Position (order among siblings)</label>
+            <input class="input" id="posicion" type="number" name="position" min="0" max="99999"
+                   value="<?= form.position ?>">
+            <small>Lower number = first. Ties break by creation order.</small>
+          </div>
+          <div class="divider"></div>
+          <label class="check">
+            <input id="publicada" type="checkbox" name="is_published" value="on"<?= form.is_published ? " checked" : "" ?>>
+            <span>Published (visible on /p and the public listing)</span>
+          </label>
+          <div class="field">
+            <label for="programada">Schedule publication (UTC)</label>
+            <input class="input" id="programada" type="datetime-local" name="publish_at" value="<?= form.publish_at ?>">
+            <small>Draft + future date: the page publishes itself when the moment arrives — no cron, no restarts; visibility is decided on every read. Interpreted as UTC (the server's clock). A past date is dropped on save, and a page checked as «Published» ignores this field.</small>
+          </div>
+          <div class="field">
+            <label for="nota">Revision note (optional)</label>
+            <input class="input" id="nota" type="text" name="revision_note" maxlength="200"
+                   placeholder="What you changed — kept with the history"
+                   value="<?= form.revision_note ?>">
+            <small>Every save — create, edit, restore — records a content revision; this note rides along in the <a href="<?= form.is_new ? "/admin/pages" : "/admin/pages/" + form.id + "/history" ?>">history</a>.</small>
+          </div>
+          <div class="divider"></div>
+          <div class="field">
+            <label for="meta-titulo">SEO title</label>
+            <input class="input" id="meta-titulo" type="text" name="meta_title" maxlength="200"
+                   value="<?= form.meta_title ?>">
+            <small>Empty = use the page title. Search engines show ~60 characters.</small>
+          </div>
+          <div class="field">
+            <label for="meta-descripcion">Meta description</label>
+            <input class="input" id="meta-descripcion" type="text" name="meta_description" maxlength="500"
+                   value="<?= form.meta_description ?>">
+            <small>Empty = no tag. Search engines show ~160 characters.</small>
+          </div>
+          <div class="field">
+            <label for="og-imagen">Social image (og:image)</label>
+            <input class="input" id="og-imagen" type="text" name="og_image" maxlength="500"
+                   placeholder="/assets/og-home.png" value="<?= form.og_image ?>">
+            <small>A site path (<code>/assets/&hellip;</code>) or an absolute URL.</small>
+          </div>
+        </aside>
+      </div>
     </form>
-  </div>
+  </section>
 </main>
-<?jhs include("partials/footer") ?>
-</body>
-</html>
+<?jhs include("partials/admin/foot") ?>

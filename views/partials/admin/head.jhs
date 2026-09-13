@@ -1,0 +1,18 @@
+<?jhs
+  // Shared admin document head (F12). The including view must define
+  // `titulo` before this include — the partial compiles into the same
+  // program, so the variable is already set when it renders.
+  //
+  // `theme` is the pinned cookie value ("dark"/"light") or null: the
+  // attribute is only emitted when the visitor chose a theme, so the
+  // stylesheet's `prefers-color-scheme` fallback decides by default.
+?>
+<!DOCTYPE html>
+<html lang="en"<?jhs if (theme == "dark" || theme == "light") { ?> data-theme="<?= theme ?>"<?jhs } ?>>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title><?= titulo ?> — wallermax CMS</title>
+  <link rel="stylesheet" href="/assets/admin.css">
+</head>
+<body>

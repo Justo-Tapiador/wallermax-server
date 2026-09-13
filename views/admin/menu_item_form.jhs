@@ -1,68 +1,64 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title><?= form.is_new ? "Nuevo elemento" : "Editar elemento" ?> — <?= menu.title ?> — CMS wallermax</title>
-  <link rel="stylesheet" href="/assets/wallermax.css">
-</head>
-<body>
-<?jhs include("partials/header") ?>
-<main>
-  <div class="wrap">
-    <div class="panel-barra">
-      <h1><?= form.is_new ? "Nuevo elemento" : "Editar elemento" ?> <span class="secundario">(menus.<?= menu.name ?>)</span></h1>
-      <a class="btn btn-fantasma" href="/admin/menus/<?= menu.id ?>">Volver al menú</a>
+<?jhs var titulo = (form.is_new ? "New item" : "Edit item") + " — " + menu.title; ?>
+<?jhs include("partials/admin/head") ?>
+<?jhs include("partials/admin/sidebar") ?>
+<main class="main">
+<?jhs include("partials/admin/topbar") ?>
+  <section class="page">
+    <div class="breadcrumbs">Content / Menus / <?= menu.title ?> / <?= form.is_new ? "New item" : "Item" ?></div>
+    <div class="page-head">
+      <div>
+        <h1><?= form.is_new ? "New item" : "Edit item" ?> <span class="table-sub">(menus.<?= menu.name ?>)</span></h1>
+        <p>Link a CMS page or a custom URL, with its label and position.</p>
+      </div>
+      <div class="actions">
+        <a class="btn" href="/admin/menus/<?= menu.id ?>">Back to the menu</a>
+      </div>
     </div>
 
 <?jhs if (form_error) { ?>
-    <p class="aviso aviso-error"><?= form_error ?></p>
+    <p class="notice notice-error"><?= form_error ?></p>
 <?jhs } ?>
 
     <form method="post"
           action="<?= form.is_new ? "/admin/menus/" + form.menu_id + "/items" : "/admin/menus/" + form.menu_id + "/items/" + form.item_id ?>">
-      <section class="tarjeta">
-        <div class="campo">
-          <label for="etiqueta">Etiqueta (opcional para páginas)</label>
-          <input id="etiqueta" type="text" name="label" maxlength="200"
-                 value="<?= form.label ?>">
-          <p class="ayuda">Vacío = el título de la página enlazada. Para URLs
-             personalizadas es obligatoria.</p>
-        </div>
-
-        <div class="campo">
-          <label for="pagina">Página del CMS</label>
-          <select id="pagina" name="page_id">
-            <option value="">— ninguna (usar URL personalizada) —</option>
+      <div class="form-layout">
+        <div class="card editor-card">
+          <div class="field">
+            <label for="pagina">CMS page</label>
+            <select class="select" id="pagina" name="page_id">
+              <option value="">&mdash; none (use a custom URL) &mdash;</option>
 <?jhs page_options.forEach(function (opcion) { ?>
-            <option value="<?= opcion.id ?>"<?= form.page_id == opcion.id ? " selected" : "" ?>><?= opcion.is_published ? "" : "[borrador] " ?><?= opcion.title ?></option>
+              <option value="<?= opcion.id ?>"<?= form.page_id == opcion.id ? " selected" : "" ?>><?= opcion.is_published ? "" : "[draft] " ?><?= opcion.title ?></option>
 <?jhs }); ?>
-          </select>
+            </select>
+          </div>
+          <div class="field">
+            <label for="url">Custom URL</label>
+            <input class="input" id="url" type="text" name="url" maxlength="500"
+                   placeholder="https://example.com or /legal-notice or #section"
+                   value="<?= form.url ?>">
+            <small>Fill this <em>or</em> the page — never both. It must start with <code>/</code>, <code>http://</code>, <code>https://</code> or <code>#</code>.</small>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" type="submit"><?= form.is_new ? "Add item" : "Save item" ?></button>
+          </div>
         </div>
-
-        <div class="campo">
-          <label for="url">URL personalizada</label>
-          <input id="url" type="text" name="url" maxlength="500"
-                 placeholder="https://ejemplo.com o /aviso-legal o #seccion"
-                 value="<?= form.url ?>">
-          <p class="ayuda">Rellena esta <em>o</em> la página — no ambas. Empieza por
-             <code>/</code>, <code>http://</code>, <code>https://</code> o <code>#</code>.</p>
-        </div>
-
-        <div class="campo">
-          <label for="posicion">Posición (orden en el menú)</label>
-          <input id="posicion" type="number" name="position" min="0" max="99999"
-                 value="<?= form.position ?>">
-          <p class="ayuda">Menor número = antes. Con igual posición decide el orden de creación.</p>
-        </div>
-
-        <button class="btn btn-primario" type="submit">
-          <?= form.is_new ? "Añadir elemento" : "Guardar elemento" ?>
-        </button>
-      </section>
+        <aside class="card sidebar-card">
+          <div class="field">
+            <label for="etiqueta">Label (optional for pages)</label>
+            <input class="input" id="etiqueta" type="text" name="label" maxlength="200"
+                   value="<?= form.label ?>">
+            <small>Empty = the linked page's title. Mandatory for custom URLs.</small>
+          </div>
+          <div class="field">
+            <label for="posicion">Position (order in the menu)</label>
+            <input class="input" id="posicion" type="number" name="position" min="0" max="99999"
+                   value="<?= form.position ?>">
+            <small>Lower number = first. Ties break by creation order.</small>
+          </div>
+        </aside>
+      </div>
     </form>
-  </div>
+  </section>
 </main>
-<?jhs include("partials/footer") ?>
-</body>
-</html>
+<?jhs include("partials/admin/foot") ?>

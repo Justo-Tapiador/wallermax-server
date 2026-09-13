@@ -302,9 +302,12 @@ async fn uploads_reject_non_images_and_disallowed_formats() {
     let response = post_upload(&server, &client, None, "falso.txt.png", b"esto es texto").await;
     assert_eq!(response.status(), 200, "errors re-render the form");
     let html = response.text().await.expect("error body");
-    assert!(html.contains("no parece una imagen"), "{html:?}");
     assert!(
-        html.contains("falso.txt.png") || html.contains("vacio") || html.contains("biblioteca"),
+        html.contains("does not look like a valid image"),
+        "{html:?}"
+    );
+    assert!(
+        html.contains("The library is empty"),
         "the listing context is rendered"
     );
 
@@ -313,7 +316,7 @@ async fn uploads_reject_non_images_and_disallowed_formats() {
     let response = post_upload(&server, &client, None, "foto.bmp", &bmp).await;
     assert_eq!(response.status(), 200);
     let html = response.text().await.expect("error body");
-    assert!(html.contains("Formato no admitido"), "{html:?}");
+    assert!(html.contains("Unsupported format"), "{html:?}");
 
     // A truncated PNG: sniffed, whitelisted, undecodable.
     let mut truncated = image_fixture(image::ImageFormat::Png, 50, 50);
@@ -321,7 +324,7 @@ async fn uploads_reject_non_images_and_disallowed_formats() {
     let response = post_upload(&server, &client, None, "roto.png", &truncated).await;
     assert_eq!(response.status(), 200);
     let html = response.text().await.expect("error body");
-    assert!(html.contains("no se pudo decodificar"), "{html:?}");
+    assert!(html.contains("it could not be decoded"), "{html:?}");
 
     // Nothing was stored: the listing is still empty and no media URL
     // resolves.
@@ -331,7 +334,7 @@ async fn uploads_reject_non_images_and_disallowed_formats() {
         .await
         .expect("list page loads");
     let html = list.text().await.expect("list body");
-    assert!(html.contains("La biblioteca está vacía"), "{html:?}");
+    assert!(html.contains("The library is empty"), "{html:?}");
     let served = reqwest::Client::new()
         .get(server.url("/media/thumb/1"))
         .send()
@@ -359,7 +362,7 @@ async fn uploads_respect_the_configured_byte_cap() {
     assert_eq!(response.status(), 200, "capped uploads bounce to the form");
     let html = response.text().await.expect("error body");
     assert!(
-        html.contains("supera el límite") && html.contains("2,0 KB"),
+        html.contains("exceeds the") && html.contains("2.0 KB"),
         "the cap names the configured budget: {html:?}"
     );
     // The typed alt text survived the bounce.
@@ -393,7 +396,7 @@ async fn uploads_without_a_file_field_bounce_back() {
         .expect("upload request succeeds");
     assert_eq!(response.status(), 200);
     let html = response.text().await.expect("error body");
-    assert!(html.contains("campo «file»"), "{html:?}");
+    assert!(html.contains("carried no file field"), "{html:?}");
 }
 
 #[tokio::test]
@@ -444,7 +447,7 @@ async fn alt_text_round_trips_through_the_detail_form() {
         html.contains("![Nuevo texto descriptivo]("),
         "the snippet uses the updated alt: {html:?}"
     );
-    assert!(html.contains("Texto alternativo actualizado"));
+    assert!(html.contains("Alt text updated"));
 
     // An over-long alt text bounces back with the error, page intact.
     let long = "x".repeat(600);

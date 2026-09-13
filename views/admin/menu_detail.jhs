@@ -1,96 +1,98 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title><?= menu.title ?> (<?= menu.name ?>) — Menús — CMS wallermax</title>
-  <link rel="stylesheet" href="/assets/wallermax.css">
-</head>
-<body>
-<?jhs include("partials/header") ?>
-<main>
-  <div class="wrap">
-    <div class="panel-barra">
-      <h1><?= menu.title ?> <span class="secundario">(menus.<?= menu.name ?>)</span></h1>
-      <a class="btn btn-fantasma" href="/admin/menus">Todos los menús</a>
+<?jhs var titulo = menu.title + " (menus." + menu.name + ")"; ?>
+<?jhs include("partials/admin/head") ?>
+<?jhs include("partials/admin/sidebar") ?>
+<main class="main">
+<?jhs include("partials/admin/topbar") ?>
+  <section class="page">
+    <div class="breadcrumbs">Content / Menus / <?= menu.title ?></div>
+    <div class="page-head">
+      <div>
+        <h1><?= menu.title ?> <span class="table-sub">(menus.<?= menu.name ?>)</span></h1>
+        <p>Each item links a CMS page or a custom URL, with its label and position. Links to draft pages are skipped in the public navigation until they publish.</p>
+      </div>
+      <div class="actions">
+        <a class="btn" href="/admin/menus">All menus</a>
+        <a class="btn primary" href="/admin/menus/<?= menu.id ?>/items/new">&#43; Add item</a>
+      </div>
     </div>
 
 <?jhs if (query.ok == "creado") { ?>
-    <p class="aviso aviso-ok">Menú creado: añade el primer elemento abajo.</p>
+    <p class="notice notice-ok">Menu created: add the first item below.</p>
 <?jhs } ?>
 <?jhs if (query.ok == "guardado") { ?>
-    <p class="aviso aviso-ok">Título guardado.</p>
+    <p class="notice notice-ok">Title saved.</p>
 <?jhs } ?>
 <?jhs if (query.ok == "item-creado") { ?>
-    <p class="aviso aviso-ok">Elemento añadido.</p>
+    <p class="notice notice-ok">Item added.</p>
 <?jhs } ?>
 <?jhs if (query.ok == "item-guardado") { ?>
-    <p class="aviso aviso-ok">Elemento guardado.</p>
+    <p class="notice notice-ok">Item saved.</p>
 <?jhs } ?>
 <?jhs if (query.ok == "item-eliminado") { ?>
-    <p class="aviso aviso-ok">Elemento eliminado.</p>
+    <p class="notice notice-ok">Item deleted.</p>
 <?jhs } ?>
 <?jhs if (form_error) { ?>
-    <p class="aviso aviso-error"><?= form_error ?></p>
+    <p class="notice notice-error"><?= form_error ?></p>
 <?jhs } ?>
 
-    <section class="tarjeta" aria-labelledby="elementos-titulo">
-      <h2 id="elementos-titulo">Elementos (<?= items.length ?>)</h2>
+    <section class="card" aria-labelledby="elementos-titulo">
+      <div class="card-head"><h2 id="elementos-titulo">Items (<?= items.length ?>)</h2></div>
 <?jhs if (items && items.length) { ?>
-      <ul class="lista">
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th>Item</th><th>Position</th><th>Points to</th><th></th></tr>
+          </thead>
+          <tbody>
 <?jhs items.forEach(function (elemento) { ?>
-        <li>
-          <div class="principal">
-            <a href="<?= elemento.href ?>"><?= elemento.label ? elemento.label : (elemento.page ? elemento.page.title : "(sin etiqueta)") ?></a>
-            <div class="secundario">
-              #<?= elemento.position ?> ·
+            <tr>
+              <td><span class="table-title"><a href="<?= elemento.href ?>"><?= elemento.label ? elemento.label : (elemento.page ? elemento.page.title : "(no label)") ?></a></span></td>
+              <td>#<?= elemento.position ?></td>
+              <td>
 <?jhs if (elemento.is_page) { ?>
-              página /p/<?= elemento.page.slug ?><?jhs if (!elemento.page.is_published) { ?> · <span class="borrador">borrador: el público no lo verá hasta publicarse</span><?jhs } ?>
+                <span class="table-sub">page /p/<?= elemento.page.slug ?><?jhs if (!elemento.page.is_published) { ?> &middot; <span class="status draft">&#9679; draft</span> (hidden until published)<?jhs } ?></span>
 <?jhs } else { ?>
-              URL <?= elemento.url ?>
+                <span class="table-sub"><?= elemento.url ?></span>
 <?jhs } ?>
-            </div>
-          </div>
-          <div class="acciones">
-            <a class="btn btn-fantasma" href="/admin/menus/<?= menu.id ?>/items/<?= elemento.id ?>/edit">Editar</a>
-            <form method="post" action="/admin/menus/<?= menu.id ?>/items/<?= elemento.id ?>/delete">
-              <button class="btn btn-peligro" type="submit">Borrar</button>
-            </form>
-          </div>
-        </li>
+              </td>
+              <td>
+                <div class="row-actions">
+                  <a class="btn" href="/admin/menus/<?= menu.id ?>/items/<?= elemento.id ?>/edit">Edit</a>
+                  <form method="post" action="/admin/menus/<?= menu.id ?>/items/<?= elemento.id ?>/delete">
+                    <button class="btn danger" type="submit">Delete</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
 <?jhs }); ?>
-      </ul>
+          </tbody>
+        </table>
+      </div>
 <?jhs } else { ?>
-      <p class="vacio">Este menú no tiene elementos todavía.</p>
+      <div class="empty">
+        <div class="empty-icon">&#9776;</div>
+        <h2>No items</h2>
+        <p>This menu has no items yet.</p>
+      </div>
 <?jhs } ?>
-      <p class="ayuda">Los elementos enlazan una página del CMS o una URL personalizada
-         (una externa, una ruta del sitio, un ancla). Las páginas en borrador se saltan
-         en la navegación pública hasta que se publiquen.</p>
     </section>
 
-    <section class="tarjeta" aria-labelledby="nuevo-elemento-titulo">
-      <h2 id="nuevo-elemento-titulo">Añadir elemento</h2>
-      <p class="ayuda">Cada elemento enlaza una página del CMS o una URL personalizada, con
-         su etiqueta y su posición. Los enlaces a páginas en borrador se saltan en la
-         navegación pública hasta que se publiquen.</p>
-      <a class="btn btn-primario" href="/admin/menus/<?= menu.id ?>/items/new">Añadir elemento</a>
+    <section class="card" aria-labelledby="renombrar-titulo">
+      <div class="card-head"><h2 id="renombrar-titulo">Rename (title only)</h2></div>
+      <div class="card-body">
+        <form method="post" action="/admin/menus/<?= menu.id ?>">
+          <div class="field">
+            <label for="titulo-menu">Title</label>
+            <input class="input" id="titulo-menu" type="text" name="title" required maxlength="200"
+                   value="<?= menu.title ?>">
+            <small>The name <code><?= menu.name ?></code> is the key templates read and never changes: create another menu if you need another key.</small>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" type="submit">Save title</button>
+          </div>
+        </form>
+      </div>
     </section>
-
-    <section class="tarjeta" aria-labelledby="renombrar-titulo">
-      <h2 id="renombrar-titulo">Renombrar (solo el título)</h2>
-      <form method="post" action="/admin/menus/<?= menu.id ?>">
-        <div class="campo">
-          <label for="titulo-menu">Título</label>
-          <input id="titulo-menu" type="text" name="title" required maxlength="200"
-                 value="<?= menu.title ?>">
-          <p class="ayuda">El nombre <code><?= menu.name ?></code> es la clave que leen las
-             plantillas y no cambia: crea otro menú si necesitas otra clave.</p>
-        </div>
-        <button class="btn btn-primario" type="submit">Guardar título</button>
-      </form>
-    </section>
-  </div>
+  </section>
 </main>
-<?jhs include("partials/footer") ?>
-</body>
-</html>
+<?jhs include("partials/admin/foot") ?>

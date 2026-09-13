@@ -104,23 +104,23 @@ fn decode_limits() -> image::Limits {
 }
 
 /// Sniffs, whitelists and decodes an upload, producing the metadata and
-/// the thumbnail. Every failure is the Spanish sentence the upload form
-/// renders inline (the browser-facing convention of the whole panel).
+/// the thumbnail. Every failure is the user-facing sentence the upload
+/// form renders inline (the browser-facing convention of the whole panel).
 pub(crate) fn prepare(bytes: &[u8]) -> Result<PreparedImage, &'static str> {
     let sniffed = image::guess_format(bytes).map_err(|_| {
-        "El archivo no parece una imagen válida (la firma de bytes no se reconoce)."
+        "The file does not look like a valid image (the byte signature is not recognized)."
     })?;
     let format = MediaFormat::from_image_format(sniffed)
-        .ok_or("Formato no admitido: la biblioteca acepta PNG, JPEG, GIF y WebP.")?;
+        .ok_or("Unsupported format: the library accepts PNG, JPEG, GIF and WebP.")?;
 
     let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), sniffed);
     reader.limits(decode_limits());
     let decoded = reader.decode().map_err(|error| match error {
         image::ImageError::Limits(_) => {
-            "La imagen es demasiado grande para procesarla con seguridad (máximo \
-                 8192 × 8192 píxeles)."
+            "The image is too large to process safely (8192 × 8192 pixels at \
+                 most)."
         }
-        _ => "La imagen está dañada o incompleta: no se pudo decodificar.",
+        _ => "The image is damaged or incomplete: it could not be decoded.",
     })?;
 
     let width = decoded.width();
@@ -155,7 +155,7 @@ fn thumbnail_png(image: &DynamicImage) -> Result<Vec<u8>, &'static str> {
             &mut std::io::Cursor::new(&mut buffer),
             image::ImageFormat::Png,
         )
-        .map_err(|_| "No se pudo generar la miniatura.")?;
+        .map_err(|_| "The thumbnail could not be generated.")?;
     Ok(buffer)
 }
 
@@ -241,7 +241,10 @@ mod tests {
     #[test]
     fn prepare_rejects_non_images() {
         let error = prepare(b"esto no es una imagen, solo texto").expect_err("text rejected");
-        assert!(error.contains("no parece una imagen"), "{error}");
+        assert!(
+            error.contains("does not look like a valid image"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -249,7 +252,7 @@ mod tests {
         // A well-formed BMP magic header (BM + a bogus DIB size).
         let bmp = b"BM\x36\x00\x00\x00\x00\x00\x00\x00\x28\x00\x00\x00".to_vec();
         let error = prepare(&bmp).expect_err("BMP is outside the whitelist");
-        assert!(error.contains("Formato no admitido"), "{error}");
+        assert!(error.contains("Unsupported format"), "{error}");
     }
 
     #[test]
@@ -257,7 +260,7 @@ mod tests {
         let mut bytes = png_fixture(50, 50);
         bytes.truncate(bytes.len() / 2);
         let error = prepare(&bytes).expect_err("a truncated image never reaches the disk");
-        assert!(error.contains("no se pudo decodificar"), "{error}");
+        assert!(error.contains("it could not be decoded"), "{error}");
     }
 
     #[test]
@@ -267,7 +270,7 @@ mod tests {
         // refuses before allocating anything.
         let bomb = png_header_claiming(20_000, 20_000);
         let error = prepare(&bomb).expect_err("oversized dimensions are refused");
-        assert!(error.contains("demasiado grande"), "{error}");
+        assert!(error.contains("too large"), "{error}");
     }
 
     /// The IEEE CRC-32 the PNG chunk format uses (bitwise, table-less —
