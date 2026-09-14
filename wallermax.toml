@@ -374,6 +374,13 @@ issuer = "wallermax-server"
 
 # Whether new users may register themselves (POST /api/auth/register
 # and the registration modal).
+#
+# Recommended deployment posture: register the FIRST account (it
+# bootstraps the administrator), then set this to false — from then on
+# accounts are created by an administrator in the panel
+# (/admin/users) with exactly the access they need. With the F15
+# organizations that is the intended flow: membership, not open
+# sign-up.
 registration_enabled = true
 
 # Minimum accepted password length.
@@ -415,10 +422,12 @@ refresh_token_ttl_secs = 2592000
 # Public site: GET /p lists the published pages, GET /p/<slug> renders
 # one (the stored body is .jhs template source: it sees the `user`,
 # `path`, `query` and `pages` globals and may include the shared
-# partials). Admin panel at /admin for the `admin` and `editor` roles:
-# pages CRUD, import from public/, user management (admin only),
-# self-service password change at /perfil/password. Everything is
-# plain HTML forms — the CSP keeps scripts blocked.
+# partials). Admin panel at /admin for the CMS organization's members
+# (F15: the admin/editor memberships — which the platform roles carry
+# while the mirror keeps them in step): pages CRUD, import from
+# public/, user management (admin only), self-service password change
+# at /profile/password. Everything is plain HTML forms — the CSP keeps
+# scripts blocked.
 #
 # The panel manages CONTENT and CMS ACCOUNTS only: server configuration
 # stays in wallermax.toml (local repository access).

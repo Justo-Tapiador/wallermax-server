@@ -258,7 +258,7 @@ async fn regular_users_cannot_manage_content() {
         assert_eq!(response.status(), 403, "users cannot manage content");
         let body = response.text().await.expect("html body");
         assert!(
-            body.contains("Editor or administrator role required"),
+            body.contains("CMS membership required"),
             "a human-readable privilege page: {body}"
         );
     }
@@ -1080,8 +1080,12 @@ async fn the_last_admin_is_never_demoted_or_deleted() {
         .expect("demote");
     assert_eq!(response.status(), 303, "the second admin can be demoted");
 
-    // The stale-admin token (role claim signed before the demotion) tries
-    // to demote the only real admin: the lockout must fire.
+    // The stale-admin token (role claim signed before the demotion)
+    // tries to demote the only real admin. F15: the guard reads the
+    // CMS membership, which the demotion removed, so the stale token
+    // is rejected AT THE DOOR — a stronger lockout than the handler's
+    // own last-admin check, which stays underneath as defense in
+    // depth for whatever path might still reach it.
     let response = dani_client
         .post(server.url(&format!("/admin/users/{me}")))
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -1089,10 +1093,15 @@ async fn the_last_admin_is_never_demoted_or_deleted() {
         .send()
         .await
         .expect("stale-admin demotion");
+    assert_eq!(
+        response.status(),
+        403,
+        "the stale-admin token no longer reaches the handler"
+    );
     let body = response.text().await.expect("html body");
     assert!(
-        body.contains("the last administrator"),
-        "the lockout guard fires even for stale-admin tokens: {body}"
+        body.contains("Administrator membership required"),
+        "the membership guard answers: {body}"
     );
 
     let response = dani_client
@@ -1100,15 +1109,10 @@ async fn the_last_admin_is_never_demoted_or_deleted() {
         .send()
         .await
         .expect("stale-admin deletion");
-    assert_eq!(response.status(), 303);
-    let location = response
-        .headers()
-        .get("location")
-        .and_then(|value| value.to_str().ok())
-        .expect("redirect");
     assert_eq!(
-        location, "/admin/users?error=ultimo-admin",
-        "location: {location}"
+        response.status(),
+        403,
+        "the stale-admin token cannot delete the last admin either"
     );
 }
 

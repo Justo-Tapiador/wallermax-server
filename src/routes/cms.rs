@@ -91,7 +91,7 @@ use serde_json::{json, Map, Value};
 use crate::auth::{hash_password, validate_password, validate_username, verify_password};
 use crate::db::{
     BodyFormat, NewMenu, NewMenuItem, NewPage, PageSummary, PageUpdate, RecentRevision,
-    RepositoryError, User, UserRole,
+    RepositoryError, User, UserRole, CMS_ORGANIZATION_KEY,
 };
 use crate::error::AppError;
 use crate::extractors::AuthUser;
@@ -158,8 +158,8 @@ const MAX_REVISION_NOTE: usize = 200;
 
 // ─── Browser-friendly guards ─────────────────────────────────────────
 
-/// Extractor: an authenticated user allowed to manage CMS pages (the
-/// `admin` and `editor` roles).
+/// Extractor: an authenticated member of the CMS organization allowed
+/// to manage its pages (the `admin` and `editor` memberships — F15).
 ///
 /// The rejection is browser-facing, not a JSON envelope: anonymous
 /// visitors get a `303` to `/login?redirect=<this page>` and
@@ -185,19 +185,23 @@ impl axum::extract::FromRequestParts<AppState> for CmsEditor {
                 }
             })?;
 
-        if !user.role.is_editor() {
-            return Err(AppError::forbidden(
-                "Editor or administrator role required — this account cannot manage the CMS content.",
+        if cms_membership(state, &user)
+            .await
+            .map_err(AppError::into_response)?
+            .is_some_and(|role| role.is_editor())
+        {
+            Ok(Self { user })
+        } else {
+            Err(AppError::forbidden(
+                "CMS membership required — this account is not part of the CMS organization.",
             )
-            .into_response());
+            .into_response())
         }
-
-        Ok(Self { user })
     }
 }
 
-/// Extractor: an authenticated `admin` (the user management and the
-/// full panel).
+/// Extractor: an authenticated `admin` **of the CMS organization** (the
+/// user management and the full panel — F15).
 pub(crate) struct CmsAdmin {
     pub(crate) user: AuthUser,
 }
@@ -219,15 +223,40 @@ impl axum::extract::FromRequestParts<AppState> for CmsAdmin {
                 }
             })?;
 
-        if user.role != UserRole::Admin {
-            return Err(AppError::forbidden(
-                "Administrator role required — only administrators can manage the CMS accounts.",
+        if cms_membership(state, &user)
+            .await
+            .map_err(AppError::into_response)?
+            == Some(UserRole::Admin)
+        {
+            Ok(Self { user })
+        } else {
+            Err(AppError::forbidden(
+                "Administrator membership required — only administrators of the CMS organization can manage its accounts.",
             )
-            .into_response());
+            .into_response())
         }
-
-        Ok(Self { user })
     }
+}
+
+/// The user's role inside the CMS organization (F15): what the panel
+/// guards authorize against. The platform role still carried by the
+/// token no longer opens the panel by itself — membership does.
+///
+/// One indexed SQLite read per protected request (the public pages
+/// never run it); keeping the organization out of the token is the
+/// point: a changed or removed membership takes effect immediately,
+/// without waiting for tokens to expire.
+async fn cms_membership(state: &AppState, user: &AuthUser) -> Result<Option<UserRole>, AppError> {
+    let Some(auth) = state.auth_context() else {
+        return Err(AppError::internal("authentication is not initialized"));
+    };
+    auth.repository
+        .membership_role(user.user_id, CMS_ORGANIZATION_KEY)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "membership lookup failed");
+            AppError::internal("membership lookup failed")
+        })
 }
 
 /// Whether the extractor rejection is an authentication failure (401)

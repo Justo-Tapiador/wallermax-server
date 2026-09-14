@@ -46,6 +46,10 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 rcgen = "0.14.7"
 # The media integration battery encodes its own PNG/JPEG/GIF fixtures.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+# The organizations battery (F15) seeds cross-plane rows (memberships
+# without roles, roles without memberships) straight into the temporary
+# SQLite databases, to prove the two planes apart.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 
 [profile.release]
 lto = "thin"

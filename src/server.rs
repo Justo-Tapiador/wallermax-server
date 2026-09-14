@@ -140,10 +140,32 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
             config.database.url
         )
     })?;
+
+    // F15: give the tenants their rows and mirror the platform roles
+    // into the CMS organization's memberships — a no-op on a fresh
+    // database, the upgrade path for one that predates F15.
+    db::seed_organizations(
+        &pool,
+        &config.static_files.root_dir,
+        &config.templates.views_dir,
+    )
+    .await
+    .map_err(|message| {
+        format!(
+            "failed to seed the organizations for `{}`: {message}",
+            config.database.url
+        )
+    })?;
+    db::mirror_cms_memberships(&pool).await.map_err(|message| {
+        format!(
+            "failed to mirror the CMS memberships for `{}`: {message}",
+            config.database.url
+        )
+    })?;
     tracing::info!(
         url = %config.database.url,
         max_connections = config.database.max_connections,
-        "sqlite pool ready (migrations applied)"
+        "sqlite pool ready (migrations applied, organizations seeded)"
     );
 
     let auth = if config.auth.enabled {

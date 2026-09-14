@@ -16,6 +16,13 @@
 //! - **5 second busy timeout**, so concurrent pool connections waiting on
 //!   SQLite's single writer lock degrade gracefully instead of failing
 //!   with `SQLITE_BUSY`.
+//!
+//! F15 adds the multi-tenant authorization tables: `organizations`
+//! (one row per tenant — the static site's and the CMS's) and
+//! `memberships` (user x organization x role). The CMS guards read
+//! memberships, not the global `users.role`; the repository keeps the
+//! CMS organization's memberships mirroring the platform role (see
+//! [`mirror_cms_memberships`]) so the upgrade changes nothing.
 
 use std::str::FromStr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -29,6 +36,15 @@ use sqlx::sqlite::{
 use sqlx::{Error as SqlxError, FromRow, Row};
 
 use crate::config::DatabaseConfig;
+
+/// Stable key of the organization owning the main static site (F15):
+/// the `[static] root_dir` tenant.
+pub const MAIN_ORGANIZATION_KEY: &str = "main";
+
+/// Stable key of the organization owning the CMS surface (F15): the
+/// `views_dir` tenant — public pages, panel, media library. The CMS
+/// guards authorize against this organization's memberships.
+pub const CMS_ORGANIZATION_KEY: &str = "cms";
 
 /// User roles used by the authorization layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -268,6 +284,17 @@ pub trait UserRepository: Send + Sync + 'static {
     /// guard of the CMS user management).
     async fn count_with_role(&self, role: UserRole) -> Result<i64, RepositoryError>;
 
+    /// The user's role inside the organization keyed `organization_key`
+    /// (F15): `None` when they are not a member.
+    ///
+    /// This is the multi-tenant authorization read the CMS guards run;
+    /// an unparseable stored role yields `None` (fail closed).
+    async fn membership_role(
+        &self,
+        user_id: i64,
+        organization_key: &str,
+    ) -> Result<Option<UserRole>, RepositoryError>;
+
     /// Lists users, newest first, up to `limit` rows.
     async fn list(&self, limit: i64) -> Result<Vec<User>, RepositoryError>;
 
@@ -336,6 +363,48 @@ impl SqliteUserRepository {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
+
+    /// Mirrors `role` into the user's membership of the CMS
+    /// organization (the F15 transitional invariant): `admin` and
+    /// `editor` upsert the membership with the same role, any other
+    /// role removes it.
+    ///
+    /// A missing organization row (the seed has not run — a bare
+    /// repository in tests, or an embedding that skipped
+    /// [`seed_organizations`]) matches no row and the write is a
+    /// no-op; the startup mirror backfills once the row exists, and
+    /// heals any drift a failure here leaves behind.
+    async fn sync_membership(&self, user_id: i64, role: UserRole) -> Result<(), RepositoryError> {
+        if role.is_editor() {
+            sqlx::query(
+                "INSERT INTO memberships (user_id, organization_id, role, created_at) \
+                 SELECT ?1, id, ?3, ?4 FROM organizations WHERE key = ?2 \
+                 ON CONFLICT (user_id, organization_id) \
+                 DO UPDATE SET role = excluded.role",
+            )
+            .bind(user_id)
+            .bind(CMS_ORGANIZATION_KEY)
+            .bind(role.as_str())
+            .bind(unix_now())
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(RepositoryError::from_sqlx)
+        } else {
+            sqlx::query(
+                "DELETE FROM memberships \
+                 WHERE user_id = ?1 \
+                 AND organization_id = \
+                 (SELECT id FROM organizations WHERE key = ?2)",
+            )
+            .bind(user_id)
+            .bind(CMS_ORGANIZATION_KEY)
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(RepositoryError::from_sqlx)
+        }
+    }
 }
 
 /// Column list shared by every `SELECT` on the `users` table.
@@ -367,17 +436,22 @@ impl UserRepository for SqliteUserRepository {
         .execute(&self.pool)
         .await;
 
-        match result {
-            Ok(done) => Ok(User {
+        let user = match result {
+            Ok(done) => User {
                 id: done.last_insert_rowid(),
                 username: username.to_owned(),
                 password_hash: password_hash.to_owned(),
                 role,
                 created_at,
                 last_login_at: None,
-            }),
-            Err(error) => Err(RepositoryError::from_sqlx(error)),
-        }
+            },
+            Err(error) => return Err(RepositoryError::from_sqlx(error)),
+        };
+
+        // F15: keep the CMS membership mirroring the role.
+        self.sync_membership(user.id, role).await?;
+
+        Ok(user)
     }
 
     async fn find_by_id(&self, id: i64) -> Result<Option<User>, RepositoryError> {
@@ -413,6 +487,24 @@ impl UserRepository for SqliteUserRepository {
             .map_err(RepositoryError::from_sqlx)
     }
 
+    async fn membership_role(
+        &self,
+        user_id: i64,
+        organization_key: &str,
+    ) -> Result<Option<UserRole>, RepositoryError> {
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT m.role FROM memberships m \
+             JOIN organizations o ON o.id = m.organization_id \
+             WHERE m.user_id = ?1 AND o.key = ?2",
+        )
+        .bind(user_id)
+        .bind(organization_key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)?;
+        Ok(stored.as_deref().and_then(UserRole::parse))
+    }
+
     async fn list(&self, limit: i64) -> Result<Vec<User>, RepositoryError> {
         sqlx::query_as(&format!(
             "SELECT {USER_COLUMNS} FROM users ORDER BY id DESC LIMIT ?1"
@@ -434,16 +526,28 @@ impl UserRepository for SqliteUserRepository {
     }
 
     async fn update_role(&self, id: i64, role: UserRole) -> Result<(), RepositoryError> {
-        sqlx::query("UPDATE users SET role = ?2 WHERE id = ?1")
+        let result = sqlx::query("UPDATE users SET role = ?2 WHERE id = ?1")
             .bind(id)
             .bind(role.as_str())
             .execute(&self.pool)
             .await
-            .map(|_| ())
-            .map_err(RepositoryError::from_sqlx)
+            .map_err(RepositoryError::from_sqlx)?;
+        if result.rows_affected() == 1 {
+            // F15: move the membership mirror with the role; a no-row
+            // update (the account vanished) has nothing to mirror.
+            self.sync_membership(id, role).await?;
+        }
+        Ok(())
     }
 
     async fn delete(&self, id: i64) -> Result<(), RepositoryError> {
+        // F15: the memberships go with the account (refresh tokens
+        // cascade in SQL).
+        sqlx::query("DELETE FROM memberships WHERE user_id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)?;
         sqlx::query("DELETE FROM users WHERE id = ?1")
             .bind(id)
             .execute(&self.pool)
@@ -2411,6 +2515,93 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Seeds the F15 organizations from the configuration (idempotent).
+///
+/// Two rows, addressed by their stable keys: `main` (the static
+/// site's tenant, `[static] root_dir`) and `cms` (the CMS tenant,
+/// `[templates] views_dir`). Re-running updates the display data
+/// (name, document root) when the configuration changes, so the rows
+/// always describe what `wallermax.toml` currently says — the later
+/// data-driven phases promote them from derived data to the source
+/// of truth.
+///
+/// # Errors
+///
+/// Returns the failure as a displayable message (startup-only path,
+/// reported straight to the operator).
+pub async fn seed_organizations(
+    pool: &SqlitePool,
+    main_root: &str,
+    cms_root: &str,
+) -> Result<(), String> {
+    let organizations = [
+        (MAIN_ORGANIZATION_KEY, "Main site", main_root),
+        (CMS_ORGANIZATION_KEY, "CMS", cms_root),
+    ];
+    for (key, name, document_root) in organizations {
+        sqlx::query(
+            "INSERT INTO organizations (key, name, document_root, created_at) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (key) DO UPDATE SET \
+             name = excluded.name, document_root = excluded.document_root",
+        )
+        .bind(key)
+        .bind(name)
+        .bind(document_root)
+        .bind(unix_now())
+        .execute(pool)
+        .await
+        .map_err(|error| format!("failed to seed the `{key}` organization: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Mirrors every account's platform role into the CMS organization's
+/// memberships (F15's upgrade path, re-run on every boot).
+///
+/// `admin`/`editor` accounts gain (or keep) the matching membership;
+/// everyone else's CMS membership — `user`-role accounts and orphans
+/// of deleted users — is removed. The repository maintains the same
+/// mirror on every role write, so this pass only ever heals drift:
+/// databases that predate F15, or a role changed by hand in SQL.
+///
+/// The later phases, where memberships diverge from the platform
+/// role on purpose, will retire it; until then it is what makes the
+/// F15 upgrade invisible.
+///
+/// # Errors
+///
+/// Returns the failure as a displayable message (startup-only path,
+/// reported straight to the operator).
+pub async fn mirror_cms_memberships(pool: &SqlitePool) -> Result<(), String> {
+    // The explicit WHERE keeps SQLite's parser reading the ON
+    // CONFLICT as the upsert clause, not a stray join constraint.
+    sqlx::query(
+        "INSERT INTO memberships (user_id, organization_id, role, created_at) \
+         SELECT users.id, organizations.id, users.role, ?1 \
+         FROM users, organizations \
+         WHERE organizations.key = ?2 AND users.role IN ('admin', 'editor') \
+         ON CONFLICT (user_id, organization_id) DO UPDATE SET role = excluded.role",
+    )
+    .bind(unix_now())
+    .bind(CMS_ORGANIZATION_KEY)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("failed to mirror the CMS memberships: {error}"))?;
+
+    sqlx::query(
+        "DELETE FROM memberships \
+         WHERE organization_id = (SELECT id FROM organizations WHERE key = ?1) \
+         AND user_id NOT IN \
+         (SELECT id FROM users WHERE role IN ('admin', 'editor'))",
+    )
+    .bind(CMS_ORGANIZATION_KEY)
+    .execute(pool)
+    .await
+    .map_err(|error| format!("failed to prune the CMS memberships: {error}"))?;
+    Ok(())
+}
+
 /// Current unix time in seconds (never panics, saturates at zero).
 fn unix_now() -> i64 {
     SystemTime::now()
@@ -2489,6 +2680,226 @@ mod tests {
         repo.create(username, "irrelevant-hash", UserRole::User)
             .await
             .expect("seed user created")
+    }
+
+    // ─── F15: organizations and memberships ─────────────────────────
+
+    /// A repository over a migrated **and seeded** database (the F15
+    /// organizations exist).
+    async fn seeded_repository(db: &TempDb) -> SqliteUserRepository {
+        let repo = repository(db).await;
+        seed_organizations(&repo.pool, "public", "views")
+            .await
+            .expect("organizations seed");
+        repo
+    }
+
+    /// A user row inserted straight through SQL — the shape of a
+    /// database that predates F15 (no repository mirror ran for it).
+    async fn raw_user(repo: &SqliteUserRepository, username: &str, role: UserRole) -> i64 {
+        let created = sqlx::query(
+            "INSERT INTO users (username, password_hash, role, created_at) \
+             VALUES (?1, 'irrelevant-hash', ?2, 0)",
+        )
+        .bind(username)
+        .bind(role.as_str())
+        .execute(&repo.pool)
+        .await
+        .expect("raw user inserted");
+        created.last_insert_rowid()
+    }
+
+    #[tokio::test]
+    async fn seeding_is_idempotent_and_tracks_the_configuration() {
+        let db = TempDb::new();
+        let repo = seeded_repository(&db).await;
+
+        // Re-seeding with new roots updates the display data instead
+        // of duplicating rows: the organizations describe what the
+        // configuration currently says.
+        seed_organizations(&repo.pool, "sites/main", "sites/cms")
+            .await
+            .expect("re-seed");
+
+        let roots: Vec<(String, String)> =
+            sqlx::query_as("SELECT key, document_root FROM organizations ORDER BY key")
+                .fetch_all(&repo.pool)
+                .await
+                .expect("organizations listed");
+        assert_eq!(
+            roots,
+            vec![
+                (String::from("cms"), String::from("sites/cms")),
+                (String::from("main"), String::from("sites/main")),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn create_mirrors_the_cms_membership() {
+        let db = TempDb::new();
+        let repo = seeded_repository(&db).await;
+
+        let admin = repo
+            .create("root", "irrelevant-hash", UserRole::Admin)
+            .await
+            .expect("admin created");
+        let editor = repo
+            .create("quill", "irrelevant-hash", UserRole::Editor)
+            .await
+            .expect("editor created");
+        let plain = repo
+            .create("onlooker", "irrelevant-hash", UserRole::User)
+            .await
+            .expect("plain user created");
+
+        assert_eq!(
+            repo.membership_role(admin.id, CMS_ORGANIZATION_KEY)
+                .await
+                .expect("admin membership read"),
+            Some(UserRole::Admin)
+        );
+        assert_eq!(
+            repo.membership_role(editor.id, CMS_ORGANIZATION_KEY)
+                .await
+                .expect("editor membership read"),
+            Some(UserRole::Editor)
+        );
+        // No membership without a managing role, and no membership of
+        // organizations the user does not belong to.
+        assert_eq!(
+            repo.membership_role(plain.id, CMS_ORGANIZATION_KEY)
+                .await
+                .expect("plain membership read"),
+            None
+        );
+        assert_eq!(
+            repo.membership_role(admin.id, MAIN_ORGANIZATION_KEY)
+                .await
+                .expect("main membership read"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn role_changes_move_the_mirror() {
+        let db = TempDb::new();
+        let repo = seeded_repository(&db).await;
+
+        let user = repo
+            .create("nomad", "irrelevant-hash", UserRole::Editor)
+            .await
+            .expect("editor created");
+        assert_eq!(
+            repo.membership_role(user.id, CMS_ORGANIZATION_KEY)
+                .await
+                .expect("membership read"),
+            Some(UserRole::Editor)
+        );
+
+        repo.update_role(user.id, UserRole::User)
+            .await
+            .expect("demotion");
+        assert_eq!(
+            repo.membership_role(user.id, CMS_ORGANIZATION_KEY)
+                .await
+                .expect("membership read"),
+            None
+        );
+
+        repo.update_role(user.id, UserRole::Admin)
+            .await
+            .expect("promotion");
+        assert_eq!(
+            repo.membership_role(user.id, CMS_ORGANIZATION_KEY)
+                .await
+                .expect("membership read"),
+            Some(UserRole::Admin)
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_user_removes_their_memberships() {
+        let db = TempDb::new();
+        let repo = seeded_repository(&db).await;
+
+        let user = repo
+            .create("gone", "irrelevant-hash", UserRole::Admin)
+            .await
+            .expect("admin created");
+        repo.delete(user.id).await.expect("user deleted");
+
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM memberships")
+            .fetch_one(&repo.pool)
+            .await
+            .expect("memberships counted");
+        assert_eq!(rows, 0, "no orphan membership survives the account");
+        assert_eq!(
+            repo.membership_role(user.id, CMS_ORGANIZATION_KEY)
+                .await
+                .expect("membership read"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn the_boot_mirror_upgrades_pre_f15_databases() {
+        let db = TempDb::new();
+        let repo = seeded_repository(&db).await;
+
+        // Users straight from a pre-F15 database: roles, no
+        // memberships.
+        let admin = raw_user(&repo, "veteran-admin", UserRole::Admin).await;
+        let editor = raw_user(&repo, "veteran-editor", UserRole::Editor).await;
+        let plain = raw_user(&repo, "veteran-user", UserRole::User).await;
+
+        // ... plus drift the mirror must prune: a membership for a
+        // demoted account and one for a deleted user.
+        sqlx::query(
+            "INSERT INTO memberships (user_id, organization_id, role, created_at) \
+             SELECT ?1, id, 'editor', 0 FROM organizations WHERE key = 'cms'",
+        )
+        .bind(plain)
+        .execute(&repo.pool)
+        .await
+        .expect("stale membership inserted");
+        sqlx::query(
+            "INSERT INTO memberships (user_id, organization_id, role, created_at) \
+             SELECT 999, id, 'admin', 0 FROM organizations WHERE key = 'cms'",
+        )
+        .execute(&repo.pool)
+        .await
+        .expect("orphan membership inserted");
+
+        mirror_cms_memberships(&repo.pool)
+            .await
+            .expect("boot mirror");
+
+        assert_eq!(
+            repo.membership_role(admin, CMS_ORGANIZATION_KEY)
+                .await
+                .expect("admin read"),
+            Some(UserRole::Admin)
+        );
+        assert_eq!(
+            repo.membership_role(editor, CMS_ORGANIZATION_KEY)
+                .await
+                .expect("editor read"),
+            Some(UserRole::Editor)
+        );
+        assert_eq!(
+            repo.membership_role(plain, CMS_ORGANIZATION_KEY)
+                .await
+                .expect("plain read"),
+            None,
+            "the demoted account's membership is pruned"
+        );
+        let orphans: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM memberships WHERE user_id = 999")
+                .fetch_one(&repo.pool)
+                .await
+                .expect("orphans counted");
+        assert_eq!(orphans, 0, "the deleted user's membership is pruned");
     }
 
     #[tokio::test]

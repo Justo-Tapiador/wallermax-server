@@ -823,6 +823,115 @@ curl, add an entry to the hosts file. A real deployment needs a DNS
   its styles from the static root. Entries are normalized at load:
   trimmed, lowercased, one trailing DNS dot tolerated.
 
+## Organizations and memberships (F15)
+
+F14 split the server by `Host` header — two sites, one binary — but
+the split had no teeth: the only thing keeping the main host's
+operator out of the CMS panel (and vice versa) was the cookie being
+host-only, an accident of scope, not authorization. A token claiming
+`role: admin` was admin **everywhere**. F15 gives the tenants an
+identity in the database and makes membership, not the global role,
+the thing the CMS guards read:
+
+```text
+organizations          memberships
+───────────────        ─────────────────────────────
+key: main      ◄────►  user ─┐
+  root: public/               ├─ organization ─ role
+key: cms        ◄────►  user ─┘
+  root: views/
+```
+
+Two tables, one migration (`0009`), zero new configuration:
+
+- **`organizations`** — one row per tenant, seeded at every boot
+  from the configuration the server already has: `main` (the static
+  site, `[static] root_dir`) and `cms` (the CMS, `[templates]
+  views_dir`). The `key` is the stable identifier the code addresses
+  tenants by; name and document root are display data the seed keeps
+  in sync, so the rows always describe what `wallermax.toml` says.
+- **`memberships`** — user x organization x role (`admin` or
+  `editor`), the enforcement point. `CmsEditor` and `CmsAdmin` (the
+  guards behind `/admin/*`, the media library and the panel forms)
+  now answer this question: *is the authenticated user a member of
+  the CMS organization, and at what rank?* The platform role in the
+  token no longer opens the panel by itself.
+
+### The F15 invariant: membership mirrors the platform role
+
+On purpose, F15 ships with **zero visible behaviour change**: every
+`admin`/`editor` account keeps exactly the access it had, and every
+panel form keeps working the same way. The repository maintains the
+mirror on every write — `create`, `update_role` and `delete` move
+the membership with the role — and a startup pass
+(`mirror_cms_memberships`) upgrades databases that predate F15 (and
+heals any drift a role changed by hand in SQL leaves behind):
+
+```text
+role admin  ──► membership admin  of cms
+role editor ──► membership editor of cms
+role user   ──► (no membership)
+```
+
+The panel's role dropdown is still the operator-facing control; the
+membership is the enforcement it drives. The later phases (the
+`domains` table, per-organization roles in the panel) will retire the
+mirror and let the two planes diverge on purpose — the table is
+already general.
+
+### What changed where
+
+- **The guards** (`src/routes/cms.rs`): `CmsEditor` and `CmsAdmin`
+  run one indexed SQLite read per protected request —
+  `membership_role(user_id, "cms")`. Anonymous visitors still get
+  the `303` to `/login`; authenticated non-members get the same HTML
+  403 page as before, with a membership-shaped message.
+- **The token stays identity-only** — `sub`, `username`, `role`, no
+  organization. That is the point: because the membership is read
+  per request on protected surfaces, a demotion (or a hand-edited
+  membership) closes the door **immediately**, without waiting for
+  access tokens to expire. The integration battery pins this down:
+  the same unexpired `editor` token gets `/admin/pages` → 403 the
+  moment the membership is gone.
+- **`users.role` stays** as the platform-level role: the bootstrap
+  rule (first registered account becomes admin), the last-admin
+  guard of the user management, and the main host's
+  `GET /api/admin/users` (`AdminUser`) all keep reading it. Platform
+  machinery vs CMS content — two planes, both real.
+- **Draft previews** (`/p/<slug>`, `cms.default_page`) still read the
+  token's role for the viewer-is-editor check: under the mirror the
+  two are equivalent by construction, and the public page path
+  stays free of per-request membership reads. A demoted editor's
+  unexpired token can still *preview* a draft until it expires — it
+  can no longer *manage* anything. The data-driven phases will
+  revisit this together with per-request organization resolution.
+- **Registration posture** (recommended, matches the multi-tenant
+  model): register the first account, then set
+  `auth.registration_enabled = false` — from then on, accounts are
+  created by an administrator in `/admin/users` with exactly the
+  access they need. Membership, not open sign-up.
+
+### The two-tenant picture today
+
+```text
+        localhost                     cms.localhost
+            │                              │
+     organization main            organization cms
+     (root: public/)              (root: views/)
+     public static site           public pages + panel
+     no protected surface         gated by memberships
+     (platform machinery:         (admin/editor members)
+      /api, /health, /metrics)
+```
+
+The `main` organization exists as a row with no gates yet — its
+administrator becomes meaningful the moment a protected surface
+appears on the main host (the later phases). What F15 buys today is
+the enforcement spine: **one user table, one session layer, and a
+membership table deciding who may enter which tenant** — so the
+follow-up phases can add real second administrators, per-organization
+roles and the `domains` table without touching the auth core again.
+
 ## Configuration
 
 Two keys from F7, two from F9, two from F10, one from F11 (all
@@ -960,6 +1069,13 @@ the same discipline as the phases before it:
   static index, `/` and every directory alike, and the `cms_origin`
   global giving templates the cross-host link origin — this
   document.
+- **F15 — organizations and memberships** (done): the multi-tenant
+  authorization model — `organizations` (seeded from the
+  configuration, one row per tenant) and `memberships` (user x
+  organization x role, the enforcement the CMS guards read instead
+  of the global role), with the zero-behavior-change mirror that
+  keeps memberships in step with the platform roles until the
+  data-driven phases let them diverge on purpose — this document.
 
 Each phase ships as one patch with tests and this document updated;
 nothing lands half-featured.

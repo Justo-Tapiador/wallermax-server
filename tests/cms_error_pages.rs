@@ -222,7 +222,7 @@ async fn the_403_privilege_error_is_a_page_for_browsers() {
     let body = response.text().await.expect("html body");
     assert!(body.contains("Access denied"), "title: {body}");
     assert!(
-        body.contains("Editor or administrator role required"),
+        body.contains("CMS membership required"),
         "message: {body}"
     );
 }

@@ -605,6 +605,14 @@ mod tests {
             Ok(0)
         }
 
+        async fn membership_role(
+            &self,
+            _user_id: i64,
+            _organization_key: &str,
+        ) -> Result<Option<crate::db::UserRole>, crate::db::RepositoryError> {
+            Ok(None)
+        }
+
         async fn list(
             &self,
             _limit: i64,
