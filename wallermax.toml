@@ -411,6 +411,30 @@ refresh_token_ttl_secs = 2592000
 # stays in wallermax.toml (local repository access).
 enabled = true
 
+# Hostnames the CMS answers on (F14) — name-based virtual hosting.
+# One IP, one port: the request's Host header decides which site serves
+# it. While set, the listed names get the CMS (public pages, panel,
+# media library, feeds, search, sitemap, the /api/auth family the
+# no-JS login forms post to, and the shared /assets styles), while
+# every other Host — unknown or missing names included — gets the
+# static site in the [static] root plus the operator machinery (/api,
+# /health, /metrics, the external proxy). The main host's homepage is
+# its own public/index.html; the CMS homepage (and cms.default_page)
+# lives on the CMS host.
+#
+# Entries are bare hostnames (no scheme, port or path; matching
+# ignores case and the request's port; IDN names go in punycode):
+#   hosts = ["cms.localhost"]                # the local dev subdomain
+#   hosts = ["cms.example.com"]              # your own domain
+#   hosts = ["cms.example.com", "cms.example.net"]
+# Requires cms.enabled and static.enabled (validated at startup).
+# Local testing: modern browsers resolve *.localhost to 127.0.0.1
+# already; for curl, add an entry to the hosts file. A TLS deployment
+# needs one certificate covering every name (SAN).
+#
+# Empty (the default) = single-host behaviour, exactly as before F14.
+# hosts = ["cms.localhost"]
+
 # ── The corporate content model (F7) ──────────────────────────────
 # Hierarchical pages (parent + sibling position, cycle-proof moves,
 # breadcrumbs), named navigation menus managed at /admin/menus and

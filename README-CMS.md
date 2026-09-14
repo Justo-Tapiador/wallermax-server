@@ -663,6 +663,82 @@ the hood (the `paginacion` block keys, `resultados`, `fragmento`…)
 keep their names — they are template-internal, documented, and
 renaming them would break every view already written against them.
 
+## Virtual hosts (F14): one server, two names
+
+`public/` and `views/` were always two roots pretending to be one
+site. F14 makes the split real: while `[cms] hosts` names hostnames,
+the server becomes a **name-based virtual host** — the pattern Apache
+calls vhosts and Nginx calls server blocks — serving two (or more)
+sites from the same IP and port, routing by the request's `Host`
+header.
+
+```toml
+[cms]
+hosts = ["cms.localhost"]           # or your own domain(s)
+```
+
+The **main host** (every name not in the list, unknown or missing
+included — fail safe) serves what an operator runs: the static site
+under `[static] root_dir`, the `.jhs` files living there rendered on
+the fly, and the machinery — `/api`, `/api/auth/*`,
+`/api/admin/users`, `/health`, `/metrics`, the external proxy. Its
+homepage is its own `public/index.html`.
+
+The **CMS host** serves the visitor surface: the public pages, the
+`views/` auto-routing, the panel, the media library, search, feeds
+and the sitemap. `/api/auth/*` rides along for one reason: the
+no-JS login modal and login page POST to `/api/auth/login`, and an
+HTML form needs its endpoint on the same origin — and the session
+cookie that POST pins is host-only, so the editor session never
+leaks to the main host. The CMS host also borrows exactly three
+things from the static root: `/assets/*` (the shared stylesheets),
+`/favicon.ico` and `/robots.txt` — same-origin under the CSP's
+`style-src 'self'`, and nothing else: `public/`'s content never
+duplicates onto the CMS host, and `.jhs` sources never render or
+serve there (their raw bytes are never served anywhere either).
+
+### The mechanics, deliberately boring
+
+Classification is `src/vhosts.rs`, three pure functions: the host is
+the URI authority (HTTP/2) or the single `Host` header (HTTP/1.1),
+compared case-insensitively after stripping the port. A missing
+header (an HTTP/1.0 relic) or a **duplicated** one (a request shaped
+like header smuggling) classifies as the main host. The same pure
+function answers in the dispatcher (`routes::vhost_routes`, a
+`service_fn` over two route trees) and in the templates middleware,
+so the two layers agree on every request by construction; the
+middleware pipeline wraps the dispatcher from the outside, so the
+security headers, the F13 error pages, rate limiting and friends
+serve both hosts identically.
+
+Everything else stays put: the whole pipeline, the panel's forms,
+the role gates, the theme cookie. Empty `hosts` (the default) keeps
+the single-host server of every phase before F14 — behaviour the
+entire pre-F14 test suite pins down.
+
+### Details that matter
+
+- **Feeds and the sitemap follow the serving host.** They already
+  built absolute URLs from `cms.site_url` or, absent that, the
+  request's `Host` header (F7) — so on the CMS host they emit
+  `http://cms.example.com/…` (or the configured `site_url`) with no
+  changes at all. Behind TLS or a reverse proxy, `site_url` is the
+  right key, as it always was.
+- **TLS needs one certificate for every name** (SAN entries —
+  mkcert covers `localhost` + `cms.localhost` locally). The
+  plain-HTTP redirect listener keeps working; per-name SNI
+certificates are out of scope.
+- **Local testing**: modern browsers resolve `*.localhost` to
+  127.0.0.1 already — `http://cms.localhost:8080` just works; for
+curl, add an entry to the hosts file. A real deployment needs a DNS
+  record pointing the (sub)domain at the same IP — same port, same
+  binary.
+- **Validation**: entries must be bare hostnames (no scheme, port,
+  path or whitespace — IDN names go in punycode); `hosts` requires
+  `cms.enabled` and `static.enabled`, because the CMS host borrows
+  its styles from the static root. Entries are normalized at load:
+  trimmed, lowercased, one trailing DNS dot tolerated.
+
 ## Configuration
 
 Two keys from F7, two from F9, two from F10, one from F11 (all
@@ -791,6 +867,11 @@ the same discipline as the phases before it:
   site, feeds, login/register/profile flows and flash codes, and the
   English public routes (`/search`, `/register`, `/profile`,
   `/contact`) with permanent redirects from the Spanish spellings —
+  this document.
+- **F14 — virtual hosts** (done): `cms.hosts` splits the server into
+  a main host (the static site plus the API machinery) and a CMS
+  host (public pages, panel, media, feeds, search, the auth forms
+  and the shared assets) by the `Host` header — one IP, one port —
   this document.
 
 Each phase ships as one patch with tests and this document updated;

@@ -536,6 +536,34 @@ pub struct CmsConfig {
     /// `[templates]`: the lean server keeps the section off until the
     /// configuration file (the shipped `wallermax.toml`) turns it on.
     pub enabled: bool,
+    /// Hostnames the CMS answers on (F14): name-based virtual hosting.
+    ///
+    /// While empty (the default) every surface — static site, CMS and
+    /// API — shares one host, exactly as before F14. While set, the
+    /// request's `Host` header decides which route tree serves it: the
+    /// listed names get the CMS (public pages, panel, media library,
+    /// feeds, search, and the `/api/auth/*` family the no-JS login
+    /// forms post to, plus the shared `/assets/*` styles from the
+    /// static root), while every other host — unknown or missing names
+    /// included — gets the static site under `[static] root_dir` plus
+    /// the operator machinery (`/api`, `/health`, `/metrics`, the
+    /// external proxy). One IP, one port: the `Host` header routes.
+    ///
+    /// Entries are bare hostnames (`cms.localhost`,
+    /// `cms.example.com`): no scheme, port, path or whitespace —
+    /// the same server serves them all, plain HTTP or TLS alike
+    /// (a TLS deployment then needs a certificate covering every
+    /// name). Matching ignores case and strips the request's port.
+    /// IDN names go in their punycode form.
+    ///
+    /// Requires `cms.enabled` and `static.enabled` (validated at
+    /// startup; the CMS host borrows its stylesheets from the static
+    /// root). `cms.default_page` then takes over `/` on the **CMS**
+    /// host, and the main host's `/` is `public/index.html`.
+    ///
+    /// Entries are normalized (trimmed, lowercased) at load time.
+    /// TOML-only, like every list in this file.
+    pub hosts: Vec<String>,
     /// The slug of the CMS page that takes over `GET /` (v0.11.0).
     ///
     /// While set (and the CMS is enabled), the homepage renders that
@@ -626,6 +654,7 @@ impl Default for CmsConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            hosts: Vec::new(),
             default_page: None,
             sitemap: true,
             site_url: None,
@@ -920,8 +949,29 @@ impl AppConfig {
             .build()?;
 
         let config = config.try_deserialize::<AppConfig>()?;
+        let mut config = config;
+        config.normalize();
         config.validate()?;
         Ok(config)
+    }
+
+    /// Normalizes values that only make sense in one shape.
+    ///
+    /// `cms.hosts` entries are trimmed, lowercased and stripped of
+    /// their DNS trailing dot (F14), so request-time matching compares
+    /// plain lowercase strings and a `CMS.Example.Com.` in the file
+    /// behaves exactly like `cms.example.com`.
+    fn normalize(&mut self) {
+        self.cms.hosts = self
+            .cms
+            .hosts
+            .iter()
+            .map(|host| {
+                let host = host.trim();
+                let host = host.strip_suffix('.').unwrap_or(host);
+                host.to_ascii_lowercase()
+            })
+            .collect();
     }
 
     /// Validates invariants that cannot be expressed in the type system.
@@ -1186,6 +1236,34 @@ impl AppConfig {
     /// silently degraded CMS would be far more confusing than a clear
     /// startup failure.
     fn validate_cms(&self) -> Result<(), ConfigError> {
+        // The virtual-host names are checked while off too (F14), like
+        // every key below: a typo'd host is a configuration mistake
+        // regardless of the switch. Entries are bare hostnames — no
+        // scheme, port, path, userinfo or whitespace survive the
+        // character check, and dot placement rules out empty labels
+        // (`.cms`, `cms.`, `a..b`).
+        for host in &self.cms.hosts {
+            if host.is_empty() {
+                return Err(ConfigError::Message(
+                    "`cms.hosts` entries must be non-empty hostnames".to_owned(),
+                ));
+            }
+            if let Some(bad) = host
+                .chars()
+                .find(|c| matches!(c, ':' | '/' | '\\' | '@' | '#' | '?' | ' ' | '\t'))
+            {
+                return Err(ConfigError::Message(format!(
+                    "invalid `cms.hosts` entry `{host}` (character `{bad}`): expected a bare \
+                     hostname such as `cms.example.com` — no scheme, port, path or whitespace"
+                )));
+            }
+            if host.starts_with('.') || host.ends_with('.') || host.contains("..") {
+                return Err(ConfigError::Message(format!(
+                    "invalid `cms.hosts` entry `{host}`: expected a bare hostname such as \
+                     `cms.example.com` (no leading/trailing dot, no empty labels)"
+                )));
+            }
+        }
         // The slug shape is checked even while the CMS is off: a
         // typo'd `default_page` is a configuration mistake regardless
         // of the switch, and validating it costs nothing.
@@ -1254,6 +1332,13 @@ impl AppConfig {
         }
         if !self.cms.enabled {
             return Ok(());
+        }
+        if !self.cms.hosts.is_empty() && !self.static_files.enabled {
+            return Err(ConfigError::Message(
+                "`cms.hosts` requires `static.enabled`: the CMS host borrows its shared \
+                 stylesheets (`/assets/*`) from the static root"
+                    .to_owned(),
+            ));
         }
         if !self.database.enabled || !self.auth.enabled {
             return Err(ConfigError::Message(

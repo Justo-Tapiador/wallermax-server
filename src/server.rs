@@ -44,14 +44,29 @@ pub type ServerError = Box<dyn Error + Send + Sync + 'static>;
 /// serves, and so future phases (or embedders) can reuse it.
 pub fn build_app(config: &AppConfig, state: AppState) -> Router {
     let refresh_enabled = state.refresh_enabled();
-    let router = routes::routes(
-        state.auth_enabled(),
-        refresh_enabled,
-        &config.static_files,
-        &config.metrics,
-        state.cms_enabled(),
-        state.external_api_enabled(),
-    );
+    let router = if config.cms.hosts.is_empty() {
+        routes::routes(
+            state.auth_enabled(),
+            refresh_enabled,
+            &config.static_files,
+            &config.metrics,
+            state.cms_enabled(),
+            state.external_api_enabled(),
+        )
+    } else {
+        // F14: name-based virtual hosting — one listener, two route
+        // trees, the Host header decides.
+        routes::vhost_routes(
+            state.auth_enabled(),
+            refresh_enabled,
+            &config.static_files,
+            &config.metrics,
+            state.cms_enabled(),
+            state.external_api_enabled(),
+            &config.cms.hosts,
+            &state,
+        )
+    };
     build_app_with_routes(config, state, router)
 }
 
@@ -232,6 +247,14 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
              [cms] feed, listings paginated with [cms] index_page_size; content, media and \
              users — server configuration stays in wallermax.toml)"
         );
+        if !config.cms.hosts.is_empty() {
+            tracing::info!(
+                cms_hosts = ?config.cms.hosts,
+                "virtual hosts active (F14): the CMS answers ONLY on these Host names; every \
+                 other host (unknown or missing included) gets the static site in the \
+                 [static] root plus the API machinery — same IP, same port"
+            );
+        }
         if let Some(slug) = config.cms.default_page.as_deref() {
             tracing::info!(
                 slug,
@@ -356,8 +379,9 @@ fn validate_templates(config: &AppConfig) -> Result<(), String> {
 
 /// Log line describing the mounted route families.
 fn route_map(config: &AppConfig, auth_enabled: bool, tls: bool) -> String {
+    let vhosts = !config.cms.hosts.is_empty();
     let mut routes = String::new();
-    if config.cms.enabled && config.cms.default_page.is_some() {
+    if config.cms.enabled && config.cms.default_page.is_some() && !vhosts {
         routes.push_str("GET / (cms)  |  GET /api  |  ");
     } else if config.static_files.enabled {
         routes.push_str("GET / (static)  |  GET /api  |  ");
@@ -384,6 +408,13 @@ fn route_map(config: &AppConfig, auth_enabled: bool, tls: bool) -> String {
     }
     if config.templates.enabled {
         routes.push_str("  |  + .jhs templates");
+    }
+    if vhosts {
+        routes.push_str(&format!(
+            "  |  + CMS vhost{} on {}",
+            if config.cms.hosts.len() == 1 { "" } else { "s" },
+            config.cms.hosts.join(", ")
+        ));
     }
     if let Some(listen) = config.tls.http_listen.as_deref() {
         if tls {

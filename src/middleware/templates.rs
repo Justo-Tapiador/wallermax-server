@@ -14,6 +14,8 @@
 //!    protections and answers them.
 //! 3. `GET`/`HEAD` for an existing `*.jhs` file under the `[static]`
 //!    root is **rendered** — the template source is never served raw.
+//!    (F14: on the **main host** only — `public/` belongs to it; the
+//!    CMS host never renders or serves `.jhs` sources from there.)
 //! 4. `GET`/`HEAD /` while `[cms] default_page` names an existing page
 //!    renders that CMS page directly (v0.11.0) — through the exact
 //!    `GET /p/{slug}` pipeline (sandboxed body render,
@@ -31,7 +33,9 @@
 //!    `views/contact.jhs`, `GET /blog` renders `views/blog.jhs` or
 //!    `views/blog/index.jhs`, and `GET /` falls back to
 //!    `views/index.jhs` when the static index file is missing (and no
-//!    CMS default page took it over).
+//!    CMS default page took it over). (F14: while `cms.hosts` is set,
+//!    steps 4 and 6 — the CMS-host behaviours — only run for requests
+//!    whose `Host` is one of them; the main host's 404s stay 404s.)
 //!
 //! Rendering happens on the blocking pool (`spawn_blocking`): the JS
 //! engine is CPU-bound and the fresh-sandbox-per-render design keeps it
@@ -129,6 +133,21 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
         return next.run(request).await;
     }
 
+    // F14: while `cms.hosts` names hosts, this middleware classifies
+    // the request with the same pure function the dispatcher uses
+    // (crate::vhosts), so both layers agree on every request. The
+    // CMS-host behaviours (default page, views auto-routing) then run
+    // only there, and `.jhs` files under the static root render only
+    // on the main host. While `hosts` is empty — the default — every
+    // check below runs for everyone, exactly as before F14.
+    let vhosts = !state.config().cms.hosts.is_empty();
+    let on_cms_host = vhosts
+        && crate::vhosts::is_cms_request(
+            request.uri(),
+            request.headers(),
+            &state.config().cms.hosts,
+        );
+
     let request_id = request
         .extensions()
         .get::<RequestId>()
@@ -136,9 +155,11 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
 
     let data = base_data(&state, request.headers(), request.uri(), &method).await;
 
-    // On-the-fly rendering of `.jhs` files under the static root.
+    // On-the-fly rendering of `.jhs` files under the static root —
+    // the main host's dynamic surface (F14: the CMS host never
+    // renders `public/` templates).
     if let Some(static_root) = templates.static_root() {
-        if decoded.ends_with(".jhs") {
+        if decoded.ends_with(".jhs") && !on_cms_host {
             let candidate = static_root.join(trim_leading_slash(&decoded));
             if candidate.is_file() {
                 return render_response(
@@ -160,7 +181,9 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
     // construction. A slug that no longer exists (page deleted,
     // typo) degrades gracefully: a warning, then the normal chain —
     // the homepage never hard-fails because of a content lookup.
-    if decoded == "/" {
+    // (F14: with virtual hosts, `/` belongs to the CMS host — the
+    // main host's homepage is its own `public/index.html`.)
+    if decoded == "/" && (!vhosts || on_cms_host) {
         if let Some(slug) = state.config().cms.default_page.as_deref() {
             if state.cms().is_some() {
                 let parts = PageParts::of(&request);
@@ -179,8 +202,9 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
     // Normal pipeline (API routes, static files, JSON 404 fallback).
     let response = next.run(request).await;
 
-    // Auto-route views for otherwise-unmatched paths.
-    if response.status() == StatusCode::NOT_FOUND {
+    // Auto-route views for otherwise-unmatched paths — the CMS
+    // host's surface (F14).
+    if response.status() == StatusCode::NOT_FOUND && (!vhosts || on_cms_host) {
         if let Some(view) = view_candidate(templates.views_dir(), &decoded) {
             return render_response(
                 templates.engine(),

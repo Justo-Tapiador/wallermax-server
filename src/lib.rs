@@ -66,6 +66,7 @@ pub mod server;
 pub mod session;
 pub mod state;
 pub mod template_engine;
+pub mod vhosts;
 
 mod markdown;
 mod media;
