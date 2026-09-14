@@ -221,10 +221,7 @@ async fn the_403_privilege_error_is_a_page_for_browsers() {
     assert_eq!(response.status(), 403);
     let body = response.text().await.expect("html body");
     assert!(body.contains("Access denied"), "title: {body}");
-    assert!(
-        body.contains("CMS membership required"),
-        "message: {body}"
-    );
+    assert!(body.contains("CMS membership required"), "message: {body}");
 }
 
 // ── The 429 self-heal ────────────────────────────────────────────────
