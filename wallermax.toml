@@ -464,6 +464,23 @@ enabled = true
 #
 # Empty (the default) = single-host behaviour, exactly as before F14.
 # hosts = ["cms.localhost"]
+#
+# F16: the list is a bootstrap, not the whole truth. At every boot the
+# server seeds it into the `domains` table (hostname -> organization)
+# and then serves the CMS tree for exactly the hostnames that table
+# maps to the CMS organization. Rows the seeder created follow the
+# list one-for-one — add a host here and it serves, remove it and it
+# stops. Rows created by hand are DATA: they survive every boot,
+# whatever this list says:
+#
+#   sqlite3 wallermax.db "INSERT INTO domains (hostname, organization_id, created_at) \
+#     SELECT 'cms2.example.com', id, strftime('%s','now') FROM organizations WHERE key = 'cms';"
+#   sqlite3 wallermax.db "DELETE FROM domains WHERE hostname = 'cms2.example.com';"
+#
+# (then restart — the table loads at boot). A hostname listed here is
+# always the seeder's: listing it reclaims a hand-made row. While the
+# list is empty the table stands alone: virtual hosting with zero
+# configuration. Full story: README-CMS.md, "The domains table (F16)".
 
 # ── The corporate content model (F7) ──────────────────────────────
 # Hierarchical pages (parent + sibling position, cycle-proof moves,

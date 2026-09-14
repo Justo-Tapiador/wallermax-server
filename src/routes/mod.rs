@@ -131,14 +131,15 @@ pub fn routes(
 ///
 /// Classification is [`crate::vhosts::is_cms_request`] — the same pure
 /// function the templates middleware consults, so the two layers agree
-/// on every request by construction. The middleware pipeline wraps the
-/// dispatcher from the outside (see [`crate::middleware::apply`]), so
-/// security headers, error pages, rate limiting and friends serve both
-/// hosts identically.
+/// on every request by construction. Both read the host list from the
+/// application state (F16): the `domains` table's CMS rows on a
+/// database boot, the `[cms] hosts` bootstrap otherwise. The
+/// middleware pipeline wraps the dispatcher from the outside (see
+/// [`crate::middleware::apply`]), so security headers, error pages,
+/// rate limiting and friends serve both hosts identically.
 ///
 /// Validation guarantees `hosts` non-empty requires `cms.enabled` and
 /// `static.enabled`, so the fallback shapes below are belt-and-braces.
-#[allow(clippy::too_many_arguments)]
 pub fn vhost_routes(
     auth_enabled: bool,
     refresh_enabled: bool,
@@ -146,7 +147,6 @@ pub fn vhost_routes(
     metrics: &MetricsConfig,
     cms_enabled: bool,
     external_api_enabled: bool,
-    hosts: &[String],
     state: &AppState,
 ) -> Router<AppState> {
     use tower::Service as _;
@@ -218,7 +218,7 @@ pub fn vhost_routes(
     // The dispatcher: one service, two trees, the Host header decides.
     // Router implements `Service<Request, Error = Infallible>`, so the
     // boxed future simply forwards the result.
-    let hosts = hosts.to_vec();
+    let hosts = state.cms_hosts().to_vec();
     let dispatch = tower::service_fn(move |request: Request| {
         let main = main.clone();
         let cms_tree = cms_tree.clone();

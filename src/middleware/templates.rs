@@ -151,20 +151,20 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
         return next.run(request).await;
     }
 
-    // F14: while `cms.hosts` names hosts, this middleware classifies
-    // the request with the same pure function the dispatcher uses
-    // (crate::vhosts), so both layers agree on every request. The
-    // CMS-host behaviours (default page, views auto-routing) then run
-    // only there, and `.jhs` files under the static root render only
-    // on the main host. While `hosts` is empty — the default — every
-    // check below runs for everyone, exactly as before F14.
-    let vhosts = !state.config().cms.hosts.is_empty();
-    let on_cms_host = vhosts
-        && crate::vhosts::is_cms_request(
-            request.uri(),
-            request.headers(),
-            &state.config().cms.hosts,
-        );
+    // F14/F16: while the CMS host list is non-empty, this middleware
+    // classifies the request with the same pure function the
+    // dispatcher uses (crate::vhosts), so both layers agree on every
+    // request. The list lives in the state (F16): the domains
+    // table's CMS rows on a database boot, the `[cms] hosts`
+    // bootstrap otherwise. The CMS-host behaviours (default page,
+    // views auto-routing) then run only there, and `.jhs` files
+    // under the static root render only on the main host. While the
+    // list is empty — the default — every check below runs for
+    // everyone, exactly as before F14.
+    let cms_hosts = state.cms_hosts();
+    let vhosts = !cms_hosts.is_empty();
+    let on_cms_host =
+        vhosts && crate::vhosts::is_cms_request(request.uri(), request.headers(), cms_hosts);
 
     let request_id = request
         .extensions()

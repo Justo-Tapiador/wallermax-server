@@ -272,29 +272,59 @@ struct StateInner {
     metrics: Option<Metrics>,
     templates: Option<TemplateEngine>,
     cms: Option<CmsContext>,
+    /// The virtual-host classification list (F16): the domains
+    /// table's CMS rows on a database boot, the `[cms] hosts`
+    /// bootstrap otherwise. See [`AppState::cms_hosts`].
+    cms_hosts: Vec<String>,
 }
 
 impl AppState {
     /// Creates a fresh application state from a validated configuration,
     /// **without** authentication services (previous-phase behaviour).
     pub fn new(config: AppConfig) -> Self {
-        Self::build(config, None, None)
+        let cms_hosts = config.cms.hosts.clone();
+        Self::build(config, None, None, cms_hosts)
     }
 
     /// Creates a fresh application state with the authentication services
     /// attached (see [`AuthContext`]).
     pub fn with_auth(config: AppConfig, auth: AuthContext) -> Self {
-        Self::build(config, Some(auth), None)
+        let cms_hosts = config.cms.hosts.clone();
+        Self::build(config, Some(auth), None, cms_hosts)
     }
 
     /// Creates a fresh application state with the authentication and CMS
     /// services attached (see [`AuthContext`] and [`CmsContext`]).
     pub fn with_cms(config: AppConfig, auth: AuthContext, cms: CmsContext) -> Self {
-        Self::build(config, Some(auth), Some(cms))
+        let cms_hosts = config.cms.hosts.clone();
+        Self::build(config, Some(auth), Some(cms), cms_hosts)
+    }
+
+    /// Creates a state whose CMS host list came from the `domains`
+    /// table (F16's database boot path) instead of the `[cms] hosts`
+    /// bootstrap — the list [`crate::server::build_state`] loads after
+    /// seeding. The configuration list stays the fallback for
+    /// database-less states and the seeder's input.
+    pub(crate) fn with_cms_hosts(
+        config: AppConfig,
+        auth: Option<AuthContext>,
+        cms: Option<CmsContext>,
+        cms_hosts: Vec<String>,
+    ) -> Self {
+        Self::build(config, auth, cms, cms_hosts)
     }
 
     /// Shared constructor for the public builders.
-    fn build(config: AppConfig, auth: Option<AuthContext>, cms: Option<CmsContext>) -> Self {
+    ///
+    /// `cms_hosts` is the virtual-host classification list (F16): the
+    /// `[cms] hosts` bootstrap for the public builders, the loaded
+    /// `domains` table for the database boot (see [`Self::with_cms_hosts`]).
+    fn build(
+        config: AppConfig,
+        auth: Option<AuthContext>,
+        cms: Option<CmsContext>,
+        cms_hosts: Vec<String>,
+    ) -> Self {
         let security_headers = config.security_headers.header_pairs();
         // The `[external_api]` resolution fails only for states built
         // programmatically past `AppConfig::load` (file-backed startup
@@ -361,6 +391,7 @@ impl AppState {
                 metrics,
                 templates,
                 cms,
+                cms_hosts,
             }),
         }
     }
@@ -402,6 +433,17 @@ impl AppState {
     /// enabled.
     pub fn auth_context(&self) -> Option<&AuthContext> {
         self.inner.auth.as_ref()
+    }
+
+    /// The Host names whose requests the CMS route tree serves (F16):
+    /// the `domains` table's CMS-organization rows on a database boot
+    /// (seeded from `[cms] hosts`), or the `[cms] hosts` list itself
+    /// while no database is attached. The dispatcher and the templates
+    /// middleware both classify requests against this list — never the
+    /// configuration — so the two layers agree on every request by
+    /// construction.
+    pub fn cms_hosts(&self) -> &[String] {
+        &self.inner.cms_hosts
     }
 
     /// Whether the authentication and admin routes are mounted.

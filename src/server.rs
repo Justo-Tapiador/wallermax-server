@@ -44,7 +44,7 @@ pub type ServerError = Box<dyn Error + Send + Sync + 'static>;
 /// serves, and so future phases (or embedders) can reuse it.
 pub fn build_app(config: &AppConfig, state: AppState) -> Router {
     let refresh_enabled = state.refresh_enabled();
-    let router = if config.cms.hosts.is_empty() {
+    let router = if state.cms_hosts().is_empty() {
         routes::routes(
             state.auth_enabled(),
             refresh_enabled,
@@ -55,7 +55,10 @@ pub fn build_app(config: &AppConfig, state: AppState) -> Router {
         )
     } else {
         // F14: name-based virtual hosting — one listener, two route
-        // trees, the Host header decides.
+        // trees, the Host header decides. F16 moves the host list
+        // into the state: the `domains` table's CMS rows on a
+        // database boot (seeded from `[cms] hosts`), the list itself
+        // while no database is attached.
         routes::vhost_routes(
             state.auth_enabled(),
             refresh_enabled,
@@ -63,7 +66,6 @@ pub fn build_app(config: &AppConfig, state: AppState) -> Router {
             &config.metrics,
             state.cms_enabled(),
             state.external_api_enabled(),
-            &config.cms.hosts,
             &state,
         )
     };
@@ -162,11 +164,47 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
             config.database.url
         )
     })?;
+
+    // F16: the domains table decides which Host names serve the CMS
+    // tree. `[cms] hosts` is the bootstrap: the seeder keeps its own
+    // rows in step with the list (added when added, removed when
+    // removed), while rows created by hand — or, later, by the panel
+    // — are data and survive every boot untouched.
+    db::seed_domains(&pool, &config.cms.hosts)
+        .await
+        .map_err(|message| {
+            format!(
+                "failed to seed the domains for `{}`: {message}",
+                config.database.url
+            )
+        })?;
+    let cms_hosts = db::load_cms_domains(&pool).await.map_err(|message| {
+        format!(
+            "failed to load the CMS domains for `{}`: {message}",
+            config.database.url
+        )
+    })?;
     tracing::info!(
         url = %config.database.url,
         max_connections = config.database.max_connections,
-        "sqlite pool ready (migrations applied, organizations seeded)"
+        "sqlite pool ready (migrations applied, organizations and domains seeded)"
     );
+
+    // The F14 rule, extended to the data plane: a CMS host borrows its
+    // shared stylesheets (`/assets/*`) from the static root, so
+    // domains mapping CMS hosts require static serving. `validate_cms`
+    // enforces it for the `[cms] hosts` list at load time; this is
+    // the same check for rows that live only in the table (F16's
+    // manual domains — the configuration list is empty, so load-time
+    // validation sees nothing to reject).
+    if config.cms.enabled && !cms_hosts.is_empty() && !config.static_files.enabled {
+        return Err(
+            "the domains table maps CMS hosts but `static.enabled` is off: the CMS host \
+             borrows its shared stylesheets (`/assets/*`) from the static root — enable \
+             static serving or clear the domains table"
+                .into(),
+        );
+    }
 
     let auth = if config.auth.enabled {
         let registration_enabled = config.auth.registration_enabled;
@@ -269,12 +307,13 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
              [cms] feed, listings paginated with [cms] index_page_size; content, media and \
              users — server configuration stays in wallermax.toml)"
         );
-        if !config.cms.hosts.is_empty() {
+        if !cms_hosts.is_empty() {
             tracing::info!(
-                cms_hosts = ?config.cms.hosts,
-                "virtual hosts active (F14): the CMS answers ONLY on these Host names; every \
-                 other host (unknown or missing included) gets the static site in the \
-                 [static] root plus the API machinery — same IP, same port"
+                cms_hosts = ?cms_hosts,
+                "virtual hosts active (F16): the CMS answers ONLY on these Host names — the \
+                 domains table, seeded from [cms] hosts and editable as data; every other \
+                 host (unknown or missing included) gets the static site in the [static] \
+                 root plus the API machinery — same IP, same port"
             );
         }
         if let Some(slug) = config.cms.default_page.as_deref() {
@@ -292,11 +331,7 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
         );
     }
 
-    let state = match (auth, cms) {
-        (Some(auth), Some(cms)) => AppState::with_cms(config.clone(), auth, cms),
-        (Some(auth), None) => AppState::with_auth(config.clone(), auth),
-        (None, _) => AppState::new(config.clone()),
-    };
+    let state = AppState::with_cms_hosts(config.clone(), auth, cms, cms_hosts);
 
     // The strict sidecar backend fails fast: a server configured for
     // Node-side rendering must not start without the sidecar (the

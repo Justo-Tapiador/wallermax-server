@@ -932,6 +932,84 @@ membership table deciding who may enter which tenant** — so the
 follow-up phases can add real second administrators, per-organization
 roles and the `domains` table without touching the auth core again.
 
+## The domains table (F16)
+
+F14 split the server by `Host` header and F15 gave the tenants a
+database identity, but the split's truth still lived in
+`wallermax.toml`: the `[cms] hosts` list, read at load time, and
+nothing else. F16 moves that truth into the database — one table,
+`domains` (migration `0010`), one row per hostname:
+
+```text
+domains
+───────────────────────────────────────────────────
+hostname  UNIQUE    e.g. 'cms.example.com'
+organization_id      -> organizations.id ('cms', ...)
+source    'config' | 'manual'   (default: 'manual')
+```
+
+At every boot the server seeds the `[cms] hosts` list into the table
+and then **serves the CMS tree for exactly the hostnames the table
+maps to the CMS organization** — dispatcher and templates middleware
+read the same loaded list, so the two layers keep agreeing on every
+request by construction. Every other host (unknown, missing, or
+mapped to a different organization) gets the main tree, exactly as
+before.
+
+### Two sources, one provenance rule
+
+The `source` column is what keeps the transition surprise-free:
+
+- **`config`** — the seeder's own rows. They follow the `[cms] hosts`
+  list one-for-one: a hostname added to the list is upserted (and a
+  hand-made row with that hostname is *reclaimed* as the seeder's), a
+  hostname removed from the list has its row deleted. Config edits
+  behave exactly as they did in F14.
+- **`manual`** — everything else, and the default for a hand-written
+  `INSERT`. Data. The seeder never reads these rows: they survive
+  every boot, whatever the configuration says.
+
+The result is the honest reading of "configuration as bootstrap":
+the list still works exactly as F14 promised, **and** the table is
+real — a row you create by hand serves the CMS with the list empty:
+
+```sql
+-- vhosts with zero configuration (then restart; the table loads at boot):
+INSERT INTO domains (hostname, organization_id, created_at)
+SELECT 'cms2.example.com', id, strftime('%s','now')
+FROM organizations WHERE key = 'cms';
+
+-- and to retire one:
+DELETE FROM domains WHERE hostname = 'cms2.example.com';
+```
+
+### What to know
+
+- **Restarts apply.** The host list loads once at boot, after the
+  seed — like every other startup decision. SQL edits need a restart
+  to take effect; the panel UI for domains (a later phase) will make
+  that a form away.
+- **The F14 static-root rule extends to the data plane.** A CMS host
+  borrows its shared stylesheets (`/assets/*`) from the static root,
+  so CMS domains require `static.enabled` — `validate_cms` enforces
+  it for the `[cms] hosts` list at load time, and the boot refuses to
+  start when the *table* maps CMS hosts with static serving off.
+- **`cms_origin` stays configuration-derived for now** (`cms.site_url`
+  > the first `[cms] hosts` entry > empty). Operators running purely
+  data-driven vhosts should set `cms.site_url` — that is the public
+  truth the feeds already trust — until the per-organization phases
+  give domains a canonical-order concept.
+- **Other organizations' domains are data, not tenants yet.** A row
+  pointing at a third organization survives every boot, but nothing
+  serves it: F16's dispatch is still binary (the CMS tree or the main
+  tree). The per-organization phases build trees from the document
+  roots, which is when `organizations.document_root` (kept in sync
+  with the configuration since F15) becomes the serving truth.
+- **One hostname, one organization** — `hostname` is `UNIQUE`, and
+  listing a hostname in `[cms] hosts` reclaims its row for the CMS
+  organization. Use clean lowercase names (no scheme, port or path);
+  the loader normalizes case and trailing dots anyway.
+
 ## Configuration
 
 Two keys from F7, two from F9, two from F10, one from F11 (all
@@ -1076,6 +1154,16 @@ the same discipline as the phases before it:
   of the global role), with the zero-behavior-change mirror that
   keeps memberships in step with the platform roles until the
   data-driven phases let them diverge on purpose — this document.
+- **F16 — the domains table** (done): Host names as data — the
+  virtual-host split reads the `domains` table (seeded from
+  `[cms] hosts`, which keeps working exactly as in F14), hand-made
+  rows are data that survive every boot, and the F14 static-root
+  rule extends to the data plane — this document.
+- **F17 — per-organization serving** (next): `organizations.
+  document_root` becomes the serving truth (static roots and views
+  directories from data), the dispatch generalizes from binary to
+  per-organization trees, and `cms_origin` derives from the domains.
+  With it: real third tenants without touching `wallermax.toml`.
 
 Each phase ships as one patch with tests and this document updated;
 nothing lands half-featured.

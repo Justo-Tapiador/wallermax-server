@@ -2610,6 +2610,111 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// A hostname in the table's canonical shape: trimmed, lowercased,
+/// without the DNS trailing dot — the same shape the [`CmsConfig`]
+/// normalization produces for `[cms] hosts` (F14), so rows and the
+/// configuration list compare equal no matter who wrote them.
+fn normalize_hostname(raw: &str) -> String {
+    let raw = raw.trim();
+    let raw = raw.strip_suffix('.').unwrap_or(raw);
+    raw.to_ascii_lowercase()
+}
+
+/// Seeds the F16 domains from the `[cms] hosts` bootstrap
+/// (idempotent, provenance-aware).
+///
+/// Each configured hostname is upserted as a row of the CMS
+/// organization with `source = 'config'` — including a hand-made row
+/// whose hostname the configuration now claims (listing a name
+/// reclaims it). Afterwards the seeder prunes the rows **it itself
+/// created** whose hostname is no longer configured, so config edits
+/// behave exactly as they did in F14: adding a host serves it,
+/// removing a host stops serving it, emptying the list empties the
+/// seeder's rows.
+///
+/// Rows with `source = 'manual'` — created by hand, or later by the
+/// panel — are data and are never touched: they survive every boot,
+/// whatever the configuration says. That is what makes the table the
+/// source of truth and the list its bootstrap, not its mirror.
+///
+/// # Errors
+///
+/// Returns the failure as a displayable message (startup-only path,
+/// reported straight to the operator).
+pub async fn seed_domains(pool: &SqlitePool, hosts: &[String]) -> Result<(), String> {
+    for raw in hosts {
+        let hostname = normalize_hostname(raw);
+        if hostname.is_empty() {
+            continue;
+        }
+        // INSERT...SELECT so a missing CMS organization row is a true
+        // no-op (the F15 seed creates it first); the explicit WHERE
+        // keeps SQLite's parser reading the ON CONFLICT as the upsert
+        // clause, not a stray join constraint.
+        sqlx::query(
+            "INSERT INTO domains (hostname, organization_id, source, created_at) \
+             SELECT ?1, organizations.id, 'config', ?2 \
+             FROM organizations \
+             WHERE organizations.key = ?3 \
+             ON CONFLICT (hostname) DO UPDATE SET \
+             organization_id = excluded.organization_id, \
+             source = 'config'",
+        )
+        .bind(&hostname)
+        .bind(unix_now())
+        .bind(CMS_ORGANIZATION_KEY)
+        .execute(pool)
+        .await
+        .map_err(|error| format!("failed to seed the `{hostname}` domain: {error}"))?;
+    }
+
+    // Prune the seeder's own rows that the list no longer names.
+    // Manual rows are not even read.
+    let configured: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, hostname FROM domains WHERE source = 'config'")
+            .fetch_all(pool)
+            .await
+            .map_err(|error| format!("failed to list the seeded domains: {error}"))?;
+    for (id, hostname) in configured {
+        let kept = hosts.iter().any(|raw| normalize_hostname(raw) == hostname);
+        if !kept {
+            sqlx::query("DELETE FROM domains WHERE id = ?1")
+                .bind(id)
+                .execute(pool)
+                .await
+                .map_err(|error| format!("failed to prune the `{hostname}` domain: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Loads the Host names the CMS tree serves (F16): the `domains`
+/// table's rows for the CMS organization, in insertion order, each
+/// normalized to the canonical shape. Rows pointing at any other
+/// organization are data for the later per-organization phases —
+/// nothing serves them yet, and they do not leak into this list.
+///
+/// # Errors
+///
+/// Returns the failure as a displayable message (startup-only path,
+/// reported straight to the operator).
+pub async fn load_cms_domains(pool: &SqlitePool) -> Result<Vec<String>, String> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT domains.hostname FROM domains \
+         JOIN organizations ON organizations.id = domains.organization_id \
+         WHERE organizations.key = ?1 \
+         ORDER BY domains.id",
+    )
+    .bind(CMS_ORGANIZATION_KEY)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| format!("failed to load the CMS domains: {error}"))?;
+    Ok(rows
+        .into_iter()
+        .map(|(hostname,)| normalize_hostname(&hostname))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2900,6 +3005,150 @@ mod tests {
                 .await
                 .expect("orphans counted");
         assert_eq!(orphans, 0, "the deleted user's membership is pruned");
+    }
+
+    // ─── F16: domains ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn domain_seeding_is_idempotent_and_prunes_its_own_rows() {
+        let db = TempDb::new();
+        let repo = seeded_repository(&db).await;
+
+        // The messy form of a hostname still lands in the canonical
+        // shape (the [cms] hosts normalization, applied again here).
+        let hosts = vec![String::from("CMS.Example.COM.")];
+        seed_domains(&repo.pool, &hosts).await.expect("seed");
+        seed_domains(&repo.pool, &hosts).await.expect("re-seed");
+
+        let rows: Vec<(String, String)> = sqlx::query_as("SELECT hostname, source FROM domains")
+            .fetch_all(&repo.pool)
+            .await
+            .expect("domains listed");
+        assert_eq!(
+            rows,
+            vec![(String::from("cms.example.com"), String::from("config"))],
+            "normalized once, no duplicates on re-seed"
+        );
+
+        // A hostname leaving the configuration takes its (seeder's)
+        // row with it.
+        seed_domains(&repo.pool, &[]).await.expect("empty re-seed");
+        let rows: Vec<(String,)> = sqlx::query_as("SELECT hostname FROM domains")
+            .fetch_all(&repo.pool)
+            .await
+            .expect("domains listed");
+        assert!(rows.is_empty(), "the seeder's rows follow the list");
+    }
+
+    #[tokio::test]
+    async fn manual_domains_survive_the_seed_and_can_be_reclaimed() {
+        let db = TempDb::new();
+        let repo = seeded_repository(&db).await;
+
+        // A hand-added row, no `source` named: manual by default.
+        sqlx::query(
+            "INSERT INTO domains (hostname, organization_id, created_at) \
+             SELECT 'panel.other.test', id, 0 FROM organizations WHERE key = 'cms'",
+        )
+        .execute(&repo.pool)
+        .await
+        .expect("manual domain inserted");
+
+        // Seeding with an unrelated list leaves it alone: only the
+        // seeder's own rows follow the list.
+        seed_domains(&repo.pool, &["cms.example.com".to_owned()])
+            .await
+            .expect("unrelated seed");
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT hostname, source FROM domains ORDER BY hostname")
+                .fetch_all(&repo.pool)
+                .await
+                .expect("domains listed");
+        assert_eq!(
+            rows,
+            vec![
+                (String::from("cms.example.com"), String::from("config")),
+                (String::from("panel.other.test"), String::from("manual")),
+            ]
+        );
+
+        // An empty list — the operator abandoning [cms] hosts — prunes
+        // the seeder's row but leaves the hand-made one: data survives.
+        seed_domains(&repo.pool, &[]).await.expect("empty seed");
+        let rows: Vec<(String, String)> = sqlx::query_as("SELECT hostname, source FROM domains")
+            .fetch_all(&repo.pool)
+            .await
+            .expect("domains listed");
+        assert_eq!(
+            rows,
+            vec![(String::from("panel.other.test"), String::from("manual"))]
+        );
+
+        // Listing the hostname reclaims the row as the seeder's...
+        seed_domains(&repo.pool, &["panel.other.test".to_owned()])
+            .await
+            .expect("claiming seed");
+        let rows: Vec<(String, String)> = sqlx::query_as("SELECT hostname, source FROM domains")
+            .fetch_all(&repo.pool)
+            .await
+            .expect("domains listed");
+        assert_eq!(
+            rows,
+            vec![(String::from("panel.other.test"), String::from("config"))]
+        );
+
+        // ...and from then on it follows the list like any other.
+        seed_domains(&repo.pool, &[]).await.expect("empty re-seed");
+        let rows: Vec<(String,)> = sqlx::query_as("SELECT hostname FROM domains")
+            .fetch_all(&repo.pool)
+            .await
+            .expect("domains listed");
+        assert!(rows.is_empty(), "the reclaimed row is config's to prune");
+    }
+
+    #[tokio::test]
+    async fn loading_reads_normalized_cms_rows_in_insertion_order() {
+        let db = TempDb::new();
+        let repo = seeded_repository(&db).await;
+
+        sqlx::query(
+            "INSERT INTO organizations (key, name, document_root, created_at) \
+             VALUES ('third', 'Third site', 'sites/third', 0)",
+        )
+        .execute(&repo.pool)
+        .await
+        .expect("third organization inserted");
+        // Two CMS domains — the second hand-typed with case and a
+        // trailing dot — and one belonging to another organization,
+        // which must not leak into the CMS list.
+        for (hostname, org) in [("cms.example.com", "cms"), ("Panel.Example.ORG.", "cms")] {
+            sqlx::query(
+                "INSERT INTO domains (hostname, organization_id, created_at) \
+                 SELECT ?1, id, 0 FROM organizations WHERE key = ?2",
+            )
+            .bind(hostname)
+            .bind(org)
+            .execute(&repo.pool)
+            .await
+            .expect("domain inserted");
+        }
+        sqlx::query(
+            "INSERT INTO domains (hostname, organization_id, created_at) \
+             SELECT 'x.third.test', id, 0 FROM organizations WHERE key = 'third'",
+        )
+        .execute(&repo.pool)
+        .await
+        .expect("third-organization domain inserted");
+
+        let hosts = load_cms_domains(&repo.pool).await.expect("domains load");
+        assert_eq!(
+            hosts,
+            vec![
+                String::from("cms.example.com"),
+                String::from("panel.example.org"),
+            ],
+            "normalized, in insertion order, CMS rows only"
+        );
     }
 
     #[tokio::test]
