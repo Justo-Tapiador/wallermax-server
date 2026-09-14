@@ -445,6 +445,14 @@ enabled = true
 # already; for curl, add an entry to the hosts file. A TLS deployment
 # needs one certificate covering every name (SAN).
 #
+# The FIRST entry is also the canonical origin templates link across
+# hosts: the cms_origin global (F14 follow-up) renders it — with the
+# scheme from [tls] enabled and a non-default [server] port — so a
+# public/ template writes href="<?= cms_origin ?>/login" instead of
+# hardcoding the CMS host; cms.site_url (below) overrides the
+# derivation. While hosts is empty the global is the empty string and
+# those links degrade to relative ones.
+#
 # Empty (the default) = single-host behaviour, exactly as before F14.
 # hosts = ["cms.localhost"]
 
@@ -466,6 +474,9 @@ sitemap = true
 # back to the request's Host header with http:// — correct for direct
 # HTTP setups, WRONG behind TLS or a reverse proxy: set it there.
 # Validated at startup: absolute http(s) origin, no trailing slash.
+# While [cms] hosts is set, this value ALSO overrides the templates'
+# cms_origin global (the cross-host link origin derived from the first
+# host) — one value fixes the feeds and the links.
 # Override with WALLERMAX_CMS__SITE_URL.
 #
 # site_url = "https://www.example.com"

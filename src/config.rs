@@ -563,6 +563,15 @@ pub struct CmsConfig {
     /// `public/index.jhs` rendered when present, else the static
     /// `public/index_file`.
     ///
+    /// The **first** entry is also the canonical CMS origin templates
+    /// link across hosts (F14 follow-up): the `cms_origin` global
+    /// renders it — `https://cms.example.com`, with `[tls] enabled`
+    /// lending the scheme and a non-default `[server] port` tagging
+    /// along — so a `public/` template can write
+    /// `href="<?= cms_origin ?>/login"`; `cms.site_url` overrides the
+    /// derivation when set. Serving stays equal for every entry —
+    /// only the link origin is first-wins.
+    ///
     /// Entries are normalized (trimmed, lowercased) at load time.
     /// TOML-only, like every list in this file.
     pub hosts: Vec<String>,
@@ -599,6 +608,13 @@ pub struct CmsConfig {
     /// the sitemap falls back to the request's `Host` header with
     /// `http://` — correct for plain-HTTP setups, wrong behind TLS or
     /// a reverse proxy: set it there.
+    ///
+    /// While `cms.hosts` names hosts (F14), this key also overrides
+    /// the templates' `cms_origin` global — the cross-host link origin
+    /// derived from the first host — so one value fixes both the
+    /// feeds and the links. While `hosts` is empty the global stays
+    /// empty regardless: a single-host server needs no absolute links
+    /// of its own.
     ///
     /// `WALLERMAX_CMS__SITE_URL` overrides the file value.
     pub site_url: Option<String>,

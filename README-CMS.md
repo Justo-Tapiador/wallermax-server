@@ -265,7 +265,7 @@ it on every build):
 
 | Capability | `backend = "boa"` | `backend = "sidecar"`/`"auto"` + Node |
 |---|---|---|
-| globals `query`, `user`, `path`, `pages`, `menus` | yes | yes |
+| globals `query`, `user`, `path`, `pages`, `menus`, `cms_origin` | yes | yes |
 | `echo(…)`, `<?= ?>`, `raw()` | yes | yes |
 | `require("./module")` from `modules/` | yes | yes |
 | `require("url")` (Node built-ins) | **no — 500 with an explanatory banner** | yes |
@@ -704,8 +704,9 @@ Both hosts resolve `/` through an explicit chain, and the main
 host's can be dynamic: drop an `index.jhs` beside the static
 `index.html` and it takes the homepage, rendered through the
 sandboxed engine with the usual globals (`user`, `path`, `query`,
-`pages`, `menus`, `req` — the main site can list the CMS's published
-pages too). The order, most specific first:
+`pages`, `menus`, `req`, `cms_origin` — the main site can list the
+CMS's published pages and link the CMS host too). The order, most
+specific first:
 
 - **main host**: `public/index.jhs` (rendered) → `public/index_file`
   (static, `index.html` by default) → JSON 404;
@@ -726,9 +727,63 @@ error page on failure); the source bytes are never served, exactly
 like every other `.jhs` under the static root. No new keys: the
 chain is a convention, like the `.jhs` extension itself.
 
+### Cross-host links: the `cms_origin` global
+
+The split has a consequence a navigation bar meets immediately:
+the CMS surface — `/login`, `/admin`, the `/p` pages — answers on
+the CMS host only, and the main host's 404s stay 404s by design. A
+`public/` template cannot just write `href="/login"`. Hardcoding
+`https://cms.example.com` works until the domain changes; the
+`cms_origin` global keeps templates environment-agnostic:
+
+```jhs
+<nav>
+  <a href="<?= cms_origin ?>/login">Sign in</a>
+  <a href="<?= cms_origin ?>/admin">CMS panel</a>
+</nav>
+```
+
+The contract is one sentence: **the CMS surface's origin, or the
+empty string while every surface shares one host** — so
+`<?= cms_origin ?>/login` is the relative `/login` before the split
+and the absolute `https://cms.example.com/login` after it, from
+the same template, with zero new configuration. While `cms.hosts`
+is set the origin is the **first** entry (the canonical name) with
+the scheme from `[tls] enabled` and a non-default `[server] port`
+tagging along; `cms.site_url` overrides the derivation — the same
+key the sitemap and feeds already trust, so a reverse-proxy
+deployment fixes the links and the feeds with one value.
+
+Two things deliberately do **not** need the origin:
+
+- **`/api/auth/*` rides both hosts**, so forms post same-origin.
+  The logout control is the panel's own pattern — a POST form,
+  because the endpoint is POST-only (a bare link answers 405):
+
+  ```jhs
+  <form method="post" action="/api/auth/logout">
+    <input type="hidden" name="redirect" value="<?= path ?>">
+    <button type="submit">Sign out</button>
+  </form>
+  ```
+
+- **The session cookie is host-only** (`HttpOnly`, `SameSite=Strict`,
+  no `Domain`): signing in on the CMS host does not identify you on
+  the main host. A public site that greets signed-in users needs
+  its own no-JS login form on the main host — the login modal
+  pattern of `views/partials/header.jhs`, posting to the
+  same-origin `/api/auth/login`. Sharing one session across hosts
+  would mean a `Domain` cookie — a deliberate non-feature so far:
+  the editor session never leaks to the static site.
+
+The origin is public information by construction — a name the
+server publishes anyway — so the global reaches every render
+(`base_data`), CMS pages included: both hosts' templates can never
+disagree about it.
+
 ### The mechanics, deliberately boring
 
-Classification is `src/vhosts.rs`, three pure functions: the host is
+Classification is `src/vhosts.rs`, pure functions: the host is
 the URI authority (HTTP/2) or the single `Host` header (HTTP/1.1),
 compared case-insensitively after stripping the port. A missing
 header (an HTTP/1.0 relic) or a **duplicated** one (a request shaped
@@ -902,7 +957,9 @@ the same discipline as the phases before it:
   host (public pages, panel, media, feeds, search, the auth forms
   and the shared assets) by the `Host` header — one IP, one port —
   with the follow-up homepage chain: `index.jhs` renders before the
-  static index, `/` and every directory alike — this document.
+  static index, `/` and every directory alike, and the `cms_origin`
+  global giving templates the cross-host link origin — this
+  document.
 
 Each phase ships as one patch with tests and this document updated;
 nothing lands half-featured.

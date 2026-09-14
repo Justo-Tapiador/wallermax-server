@@ -81,6 +81,13 @@
 //!   author page bodies, so `cookie`/`authorization` values must never
 //!   reach template code (an editor page echoing the viewer's session
 //!   cookie would leak it to the page author).
+//! - `cms_origin` — the CMS surface's origin for cross-host links
+//!   (F14 follow-up): `https://cms.example.com` while `cms.hosts`
+//!   names hosts — `cms.site_url` overrides, the sitemap's key — and
+//!   the empty string otherwise, so `<?= cms_origin ?>/login` is a
+//!   relative link on the single-host server and an absolute
+//!   cross-host link once the split is on (see
+//!   [`crate::vhosts::cms_origin`]);
 //!
 //! Templates can also call `res.redirect('/path')` (the Express-shaped
 //! `res` shim, v0.9.0): the render records a **local-path-only**
@@ -301,6 +308,7 @@ pub(crate) async fn base_data(
     data.insert(String::from("menus"), menus_global(state).await);
     data.insert(String::from("req"), req_global(headers, uri, method));
     data.insert(String::from("theme"), theme_global(headers));
+    data.insert(String::from("cms_origin"), cms_origin_global(state));
     data
 }
 
@@ -336,6 +344,21 @@ pub(crate) fn pinned_theme(headers: &HeaderMap) -> Option<&str> {
         }
     }
     None
+}
+
+/// The `cms_origin` global (F14 follow-up): the CMS surface's origin
+/// for cross-host links, or the empty string while every surface
+/// shares one host. Public information by construction — the first
+/// configured CMS host and the serving scheme — so no gating is
+/// needed; the derivation and precedence live in
+/// [`crate::vhosts::cms_origin`].
+fn cms_origin_global(state: &AppState) -> Value {
+    let config = state.config();
+    Value::String(crate::vhosts::cms_origin(
+        &config.cms,
+        config.tls.enabled,
+        config.server.port,
+    ))
 }
 
 /// The `req` global (v0.9.0): an Express-shaped request object with a
