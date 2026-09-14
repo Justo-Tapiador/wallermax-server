@@ -44,25 +44,37 @@ pub type ServerError = Box<dyn Error + Send + Sync + 'static>;
 /// serves, and so future phases (or embedders) can reuse it.
 pub fn build_app(config: &AppConfig, state: AppState) -> Router {
     let refresh_enabled = state.refresh_enabled();
-    let router = if state.cms_hosts().is_empty() {
+    // F17: the main organization's document root is the static
+    // tree's serving truth. The row equals `[static] root_dir` by
+    // construction (the startup seed keeps them in step), so this
+    // changes nothing for existing setups — it only routes the
+    // serving path through the organizations table, the way F16
+    // routed the host list through `domains`. The rest of the
+    // section (the switch, the index file — a server-wide
+    // convention) stays configuration.
+    let mut static_files = config.static_files.clone();
+    static_files.root_dir = state.main_document_root().to_owned();
+    let router = if state.host_bindings().is_empty() {
         routes::routes(
             state.auth_enabled(),
             refresh_enabled,
-            &config.static_files,
+            &static_files,
             &config.metrics,
             state.cms_enabled(),
             state.external_api_enabled(),
         )
     } else {
-        // F14: name-based virtual hosting — one listener, two route
-        // trees, the Host header decides. F16 moves the host list
-        // into the state: the `domains` table's CMS rows on a
-        // database boot (seeded from `[cms] hosts`), the list itself
-        // while no database is attached.
+        // F14: name-based virtual hosting — one listener, as many
+        // trees as there are organizations. F17 generalizes the
+        // split: the boot-time bindings (the `domains` table on a
+        // database boot, seeded from `[cms] hosts`) decide which
+        // organization's tree each Host name serves — the CMS tree,
+        // the main tree, or a tenant organization's self-contained
+        // static site from its document root.
         routes::vhost_routes(
             state.auth_enabled(),
             refresh_enabled,
-            &config.static_files,
+            &static_files,
             &config.metrics,
             state.cms_enabled(),
             state.external_api_enabled(),
@@ -178,12 +190,27 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
                 config.database.url
             )
         })?;
-    let cms_hosts = db::load_cms_domains(&pool).await.map_err(|message| {
+    // F17: the serving truth loads with the split — the
+    // organizations' document roots and every mapped hostname, each
+    // carrying the organization (and therefore the tree) it routes
+    // to.
+    let document_roots = db::load_document_roots(&pool).await.map_err(|message| {
         format!(
-            "failed to load the CMS domains for `{}`: {message}",
+            "failed to load the document roots for `{}`: {message}",
             config.database.url
         )
     })?;
+    let bindings = db::load_host_bindings(&pool).await.map_err(|message| {
+        format!(
+            "failed to load the host bindings for `{}`: {message}",
+            config.database.url
+        )
+    })?;
+    let cms_hosts: Vec<String> = bindings
+        .iter()
+        .filter(|binding| binding.organization == db::CMS_ORGANIZATION_KEY)
+        .map(|binding| binding.hostname.clone())
+        .collect();
     tracing::info!(
         url = %config.database.url,
         max_connections = config.database.max_connections,
@@ -204,6 +231,32 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
              static serving or clear the domains table"
                 .into(),
         );
+    }
+
+    // A tenant organization's document root that does not exist
+    // (yet) is a warning, not a boot failure: the row is data, and
+    // the tree simply answers 404s until the directory appears — no
+    // restart needed once it does, because serving hits the
+    // filesystem per request. Only the root's absolute shape is
+    // frozen at boot, exactly like every other serving root. The
+    // bootstrap organizations (`main`, `cms`) are excluded: their
+    // roots are the configuration's, and the checks above already
+    // refused a missing static root / views directory.
+    let mut warned: Vec<&str> = Vec::new();
+    for binding in &bindings {
+        if binding.organization != db::MAIN_ORGANIZATION_KEY
+            && binding.organization != db::CMS_ORGANIZATION_KEY
+            && !warned.contains(&binding.organization.as_str())
+            && !state::absolutize(&binding.document_root).is_dir()
+        {
+            tracing::warn!(
+                organization = %binding.organization,
+                document_root = %binding.document_root,
+                "the organization's document root does not exist; its host names answer \
+                 404 until the directory is created"
+            );
+            warned.push(binding.organization.as_str());
+        }
     }
 
     let auth = if config.auth.enabled {
@@ -307,21 +360,31 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
              [cms] feed, listings paginated with [cms] index_page_size; content, media and \
              users — server configuration stays in wallermax.toml)"
         );
-        if !cms_hosts.is_empty() {
-            tracing::info!(
-                cms_hosts = ?cms_hosts,
-                "virtual hosts active (F16): the CMS answers ONLY on these Host names — the \
-                 domains table, seeded from [cms] hosts and editable as data; every other \
-                 host (unknown or missing included) gets the static site in the [static] \
-                 root plus the API machinery — same IP, same port"
-            );
-        }
         if let Some(slug) = config.cms.default_page.as_deref() {
             tracing::info!(
                 slug,
                 "cms default page takes over GET / (a missing slug warns and falls back)"
             );
         }
+    }
+
+    if !bindings.is_empty() {
+        let resolved: Vec<String> = bindings
+            .iter()
+            .map(|binding| {
+                format!(
+                    "{} -> {} ({})",
+                    binding.hostname, binding.organization, binding.document_root
+                )
+            })
+            .collect();
+        tracing::info!(
+            bindings = ?resolved,
+            "virtual hosts active (F17): each mapped Host name serves its organization's \
+             tree — the domains table joined to the organizations' document roots — and \
+             every other host (unknown or missing included) gets the main tree: same IP, \
+             same port"
+        );
     }
 
     if config.metrics.enabled {
@@ -331,7 +394,12 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
         );
     }
 
-    let state = AppState::with_cms_hosts(config.clone(), auth, cms, cms_hosts);
+    let state = AppState::with_vhosts(
+        config.clone(),
+        auth,
+        cms,
+        state::VhostData::from_database(config, &document_roots, bindings),
+    );
 
     // The strict sidecar backend fails fast: a server configured for
     // Node-side rendering must not start without the sidecar (the

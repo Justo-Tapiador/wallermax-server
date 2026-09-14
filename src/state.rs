@@ -12,6 +12,8 @@
 //! - the [`AuthContext`] (user repository + token service) when the `[auth]`
 //!   feature is enabled;
 //! - the [`Metrics`] registry when the `[metrics]` feature is enabled;
+//! - the boot-time virtual-host resolution (F17): the organizations'
+//!   document roots plus the host bindings table — see [`VhostData`];
 //! - runtime metrics (uptime, request and rejection counters).
 //!
 //! Future phases can extend the inner struct with caches and other
@@ -25,7 +27,10 @@ use axum::http::{HeaderName, HeaderValue};
 
 use crate::auth::JwtService;
 use crate::config::AppConfig;
-use crate::db::{MediaRepository, MenuRepository, PageRepository, UserRepository};
+use crate::db::{
+    MediaRepository, MenuRepository, PageRepository, UserRepository, CMS_ORGANIZATION_KEY,
+    MAIN_ORGANIZATION_KEY,
+};
 use crate::external_api::ExternalApi;
 use crate::metrics::Metrics;
 use crate::proxy::{self, Cidr};
@@ -35,6 +40,7 @@ use crate::template_engine::{
     AutoRenderer, JhsEngine, JhsOptions, RequireOptions, SidecarOptions, SidecarRenderer,
     TemplateRenderer,
 };
+use crate::vhosts::HostBinding;
 
 /// Authentication services shared by handlers when `[auth]` is enabled.
 ///
@@ -118,8 +124,12 @@ impl TemplateEngine {
     /// child process, performs the READY handshake and requires the
     /// startup selftest to pass — a synchronous, startup-only wait
     /// (bounded by `[templates.sidecar] startup_timeout_ms`).
-    fn new(templates: &crate::config::TemplatesConfig, static_root: Option<&str>) -> Self {
-        let views_dir = absolutize(&templates.views_dir);
+    fn new(
+        templates: &crate::config::TemplatesConfig,
+        views_dir: &str,
+        static_root: Option<&str>,
+    ) -> Self {
+        let views_dir = absolutize(views_dir);
         let modules_dir = absolutize(&templates.modules_dir);
         let forbidden: Vec<String> = templates
             .forbidden_modules
@@ -251,7 +261,97 @@ pub(crate) fn absolutize(path: &str) -> std::path::PathBuf {
     }
 }
 
-/// Cheap-to-clone shared application state.
+/// The boot-time virtual-host resolution (F17): what the serving
+/// layers read instead of the configuration.
+///
+/// `main_root` and `cms_root` are the two bootstrap organizations'
+/// document roots — the `organizations` rows on a database boot
+/// (where the startup seed keeps them in step with `[static]
+/// root_dir` and `[templates] views_dir`), the configuration values
+/// themselves otherwise. `bindings` is the host resolution table:
+/// the `domains` rows joined to their organizations on a database
+/// boot, the `[cms] hosts` list otherwise.
+///
+/// Every path is resolved to an absolute one at construction — the
+/// documented convention for `root_dir`/`views_dir` — so request
+/// handling never re-resolves a root, and a candidate path is never
+/// re-joined onto a relative one.
+pub(crate) struct VhostData {
+    /// The `main` organization's document root: the static tree's
+    /// serving truth.
+    main_root: String,
+    /// The `cms` organization's document root: the views tree's
+    /// serving truth (the template engine's views directory).
+    cms_root: String,
+    /// Every mapped hostname, in insertion order.
+    bindings: Vec<HostBinding>,
+}
+
+impl VhostData {
+    /// The configuration bootstrap (no database attached): the
+    /// bootstrap organizations' roots from `[static]`/`[templates]`
+    /// and the `[cms] hosts` list as CMS bindings — the pre-F17
+    /// shape, byte for byte.
+    fn from_config(config: &AppConfig) -> Self {
+        let cms_root = absolutize(&config.templates.views_dir)
+            .display()
+            .to_string();
+        Self {
+            main_root: absolutize(&config.static_files.root_dir)
+                .display()
+                .to_string(),
+            bindings: config
+                .cms
+                .hosts
+                .iter()
+                .map(|hostname| HostBinding {
+                    hostname: hostname.clone(),
+                    organization: String::from(CMS_ORGANIZATION_KEY),
+                    document_root: cms_root.clone(),
+                })
+                .collect(),
+            cms_root,
+        }
+    }
+
+    /// The database boot (F17): the organizations' document roots
+    /// and the `domains` table, both loaded after the seeders ran.
+    /// The `main`/`cms` rows win over the configuration — they are
+    /// the serving truth now — with the configured values as
+    /// belt-and-braces fallbacks (the seed creates both rows before
+    /// this runs; the fallback only guards a hand-mangled database).
+    pub(crate) fn from_database(
+        config: &AppConfig,
+        roots: &[(String, String)],
+        mut bindings: Vec<HostBinding>,
+    ) -> Self {
+        let root_of = |key: &str| {
+            roots
+                .iter()
+                .find(|(organization, _)| organization == key)
+                .map(|(_, root)| root.as_str())
+        };
+        let main_root = root_of(MAIN_ORGANIZATION_KEY)
+            .unwrap_or(&config.static_files.root_dir)
+            .to_owned();
+        let cms_root = root_of(CMS_ORGANIZATION_KEY)
+            .unwrap_or(&config.templates.views_dir)
+            .to_owned();
+        // Freeze every root into its absolute shape (relative paths
+        // resolve against the working directory — the documented
+        // convention; the boot never re-resolves them afterwards).
+        for binding in &mut bindings {
+            binding.document_root = absolutize(&binding.document_root).display().to_string();
+        }
+        Self {
+            main_root: absolutize(&main_root).display().to_string(),
+            cms_root: absolutize(&cms_root).display().to_string(),
+            bindings,
+        }
+    }
+}
+
+/// Cheap-to-clone shared application state (internally an `Arc`).
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<StateInner>,
@@ -272,58 +372,72 @@ struct StateInner {
     metrics: Option<Metrics>,
     templates: Option<TemplateEngine>,
     cms: Option<CmsContext>,
-    /// The virtual-host classification list (F16): the domains
-    /// table's CMS rows on a database boot, the `[cms] hosts`
-    /// bootstrap otherwise. See [`AppState::cms_hosts`].
-    cms_hosts: Vec<String>,
+    /// The `main` organization's document root (F17): the static
+    /// tree's serving truth. The organization's row on a database
+    /// boot (kept in step with `[static] root_dir` by the startup
+    /// seed), the configuration value otherwise. See
+    /// [`AppState::main_document_root`].
+    main_root: String,
+    /// The boot-time host resolution table (F17): every mapped
+    /// hostname with its organization and that organization's
+    /// document root. See [`AppState::host_bindings`].
+    bindings: Vec<HostBinding>,
+    /// The `cms_origin` template global, precomputed (F17):
+    /// `cms.site_url` when set, else an origin derived from the
+    /// first mapped CMS host, else empty. See
+    /// [`AppState::cms_origin`].
+    cms_origin: String,
 }
 
 impl AppState {
     /// Creates a fresh application state from a validated configuration,
     /// **without** authentication services (previous-phase behaviour).
     pub fn new(config: AppConfig) -> Self {
-        let cms_hosts = config.cms.hosts.clone();
-        Self::build(config, None, None, cms_hosts)
+        let vhosts = VhostData::from_config(&config);
+        Self::build(config, None, None, vhosts)
     }
 
     /// Creates a fresh application state with the authentication services
     /// attached (see [`AuthContext`]).
     pub fn with_auth(config: AppConfig, auth: AuthContext) -> Self {
-        let cms_hosts = config.cms.hosts.clone();
-        Self::build(config, Some(auth), None, cms_hosts)
+        let vhosts = VhostData::from_config(&config);
+        Self::build(config, Some(auth), None, vhosts)
     }
 
     /// Creates a fresh application state with the authentication and CMS
     /// services attached (see [`AuthContext`] and [`CmsContext`]).
     pub fn with_cms(config: AppConfig, auth: AuthContext, cms: CmsContext) -> Self {
-        let cms_hosts = config.cms.hosts.clone();
-        Self::build(config, Some(auth), Some(cms), cms_hosts)
+        let vhosts = VhostData::from_config(&config);
+        Self::build(config, Some(auth), Some(cms), vhosts)
     }
 
-    /// Creates a state whose CMS host list came from the `domains`
-    /// table (F16's database boot path) instead of the `[cms] hosts`
-    /// bootstrap — the list [`crate::server::build_state`] loads after
-    /// seeding. The configuration list stays the fallback for
-    /// database-less states and the seeder's input.
-    pub(crate) fn with_cms_hosts(
+    /// Creates a state whose virtual-host resolution came from the
+    /// database (F17's database boot path) — the organizations'
+    /// document roots and the `domains` table, loaded by
+    /// [`crate::server::build_state`] after the seeders ran. The
+    /// configuration stays the fallback for database-less states
+    /// and the seeders' input.
+    pub(crate) fn with_vhosts(
         config: AppConfig,
         auth: Option<AuthContext>,
         cms: Option<CmsContext>,
-        cms_hosts: Vec<String>,
+        vhosts: VhostData,
     ) -> Self {
-        Self::build(config, auth, cms, cms_hosts)
+        Self::build(config, auth, cms, vhosts)
     }
 
     /// Shared constructor for the public builders.
     ///
-    /// `cms_hosts` is the virtual-host classification list (F16): the
-    /// `[cms] hosts` bootstrap for the public builders, the loaded
-    /// `domains` table for the database boot (see [`Self::with_cms_hosts`]).
+    /// `vhosts` is the boot-time resolution (F17): the
+    /// organizations' document roots plus the host bindings — the
+    /// configuration bootstrap for the public builders, the loaded
+    /// `organizations`/`domains` rows for the database boot (see
+    /// [`Self::with_vhosts`]).
     fn build(
         config: AppConfig,
         auth: Option<AuthContext>,
         cms: Option<CmsContext>,
-        cms_hosts: Vec<String>,
+        vhosts: VhostData,
     ) -> Self {
         let security_headers = config.security_headers.header_pairs();
         // The `[external_api]` resolution fails only for states built
@@ -368,14 +482,41 @@ impl AppState {
         };
 
         let templates = if config.templates.enabled {
+            // F17: the serving roots come from the boot-time
+            // resolution — the organizations' rows on a database
+            // boot, the configuration otherwise (the seed keeps the
+            // two in step, so this changes nothing for existing
+            // setups while making the rows the truth).
             let static_root = config
                 .static_files
                 .enabled
-                .then_some(config.static_files.root_dir.as_str());
-            Some(TemplateEngine::new(&config.templates, static_root))
+                .then_some(vhosts.main_root.as_str());
+            Some(TemplateEngine::new(
+                &config.templates,
+                &vhosts.cms_root,
+                static_root,
+            ))
         } else {
             None
         };
+
+        // The `cms_origin` global (F17): `cms.site_url` when set, else
+        // an origin derived from the first mapped CMS host — the
+        // domains table's insertion order on a database boot, the
+        // `[cms] hosts` list otherwise. All inputs are startup
+        // decisions, so the value is precomputed here.
+        let cms_hosts: Vec<&str> = vhosts
+            .bindings
+            .iter()
+            .filter(|binding| binding.organization == CMS_ORGANIZATION_KEY)
+            .map(|binding| binding.hostname.as_str())
+            .collect();
+        let cms_origin = crate::vhosts::cms_origin(
+            config.cms.site_url.as_deref(),
+            &cms_hosts,
+            config.tls.enabled,
+            config.server.port,
+        );
 
         Self {
             inner: Arc::new(StateInner {
@@ -391,7 +532,9 @@ impl AppState {
                 metrics,
                 templates,
                 cms,
-                cms_hosts,
+                main_root: vhosts.main_root,
+                bindings: vhosts.bindings,
+                cms_origin,
             }),
         }
     }
@@ -435,15 +578,36 @@ impl AppState {
         self.inner.auth.as_ref()
     }
 
-    /// The Host names whose requests the CMS route tree serves (F16):
-    /// the `domains` table's CMS-organization rows on a database boot
-    /// (seeded from `[cms] hosts`), or the `[cms] hosts` list itself
-    /// while no database is attached. The dispatcher and the templates
-    /// middleware both classify requests against this list — never the
-    /// configuration — so the two layers agree on every request by
-    /// construction.
-    pub fn cms_hosts(&self) -> &[String] {
-        &self.inner.cms_hosts
+    /// The main organization's document root (F17): the static
+    /// tree's serving truth — the `main` organization's row on a
+    /// database boot (kept in step with `[static] root_dir` by the
+    /// startup seed), the configuration value otherwise. Absolute,
+    /// resolved at boot.
+    pub fn main_document_root(&self) -> &str {
+        &self.inner.main_root
+    }
+
+    /// The boot-time host resolution table (F17): every mapped
+    /// hostname with its organization and that organization's
+    /// document root — the `domains` table joined to the
+    /// `organizations` rows on a database boot (seeded from
+    /// `[cms] hosts`), the `[cms] hosts` list itself while no
+    /// database is attached. The dispatcher and the templates
+    /// middleware both classify requests against this table — never
+    /// the configuration — so the two layers agree on every request
+    /// by construction.
+    pub fn host_bindings(&self) -> &[HostBinding] {
+        &self.inner.bindings
+    }
+
+    /// The `cms_origin` template global (F14 follow-up, data-driven
+    /// since F17): `cms.site_url` when set, else an origin derived
+    /// from the first mapped CMS host (the domains table's insertion
+    /// order on a database boot), else the empty string — the
+    /// single-host server needs no cross-host links. Precomputed at
+    /// boot because every input is a startup decision.
+    pub fn cms_origin(&self) -> &str {
+        &self.inner.cms_origin
     }
 
     /// Whether the authentication and admin routes are mounted.

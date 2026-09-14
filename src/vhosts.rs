@@ -1,19 +1,28 @@
-//! Name-based virtual hosts (F14): one server, one IP, one port —
-//! two names.
+//! Name-based virtual hosts (F14), generalized per organization
+//! (F17): one server, one IP, one port — as many names as the
+//! `domains` table maps.
 //!
-//! While [`crate::config::CmsConfig::hosts`] is empty every surface
-//! (static site, CMS, API) shares one host, exactly as before. While
-//! it lists hostnames, the request's `Host` header decides which route
-//! tree serves it: the listed names get the CMS — public pages, panel,
-//! media, feeds, search and the `/api/auth/*` family the no-JS forms
-//! post to — and every other host gets the static site under the
-//! `[static]` root plus the operator machinery (`/api`, `/health`,
-//! `/metrics`, the external proxy).
+//! F14 split the server in two by `Host` header (the static tree on
+//! the main host, the CMS on its own names); F16 moved the split's
+//! truth into the `domains` table. F17 completes the arc: every
+//! mapped hostname resolves to its **organization**, and each
+//! organization serves from its own `document_root`:
+//!
+//! - the **CMS organization** (`cms`) gets the visitor surface —
+//!   public pages, `views/` auto-routing, the panel, the media
+//!   library, search, feeds and the `/api/auth/*` family the no-JS
+//!   forms post to;
+//! - the **main organization** (`main`, and every host the table
+//!   does not map — unknown or missing included, fail-safe) gets the
+//!   static site under its document root plus the operator machinery
+//!   (`/api`, `/health`, `/metrics`, the external proxy);
+//! - **any other organization** gets a self-contained static site
+//!   from its document root: the file tree, the directory indexes,
+//!   the on-the-fly `.jhs` rendering — and nothing else.
 //!
 //! The classification lives here as pure functions of the request so
 //! the two places that need to agree — the templates middleware
-//! (which decides whether `.jhs` files under the static root render,
-//! whether the CMS default page takes over `/` and whether 404s
+//! (which decides where `.jhs` files render from and whether 404s
 //! auto-route to `views/`) and the dispatcher in
 //! [`crate::routes::vhost_routes`] (which picks the tree) — classify
 //! every request identically by construction.
@@ -24,11 +33,11 @@
 //!   `Host` header; the authority wins when present.
 //! - The port is stripped (`cms.example.com:8080` is
 //!   `cms.example.com`), and so is any whitespace around the value.
-//! - Comparison ignores case, the way DNS does; configured entries
-//!   are lowercased at load time.
+//! - Comparison ignores case, the way DNS does; the table's rows are
+//!   normalized to the canonical shape at load time.
 //! - A missing `Host` (an HTTP/1.0 relic) or a **duplicated** one
 //!   (a request shaped like header smuggling) classifies as the main
-//!   host — fail safe, never the CMS.
+//!   host — fail safe, never a tenant.
 //! - An unknown host is not an error: it gets the main host, the way
 //!   a friendly shared server answers any name that reaches it.
 //!
@@ -37,14 +46,91 @@
 //! verbatim, and the one redirect the panel owns (`GET /admin/theme`)
 //! already validates its own `back` parameter.
 
-use crate::config::CmsConfig;
+use crate::db::{CMS_ORGANIZATION_KEY, MAIN_ORGANIZATION_KEY};
 use axum::http::{header, HeaderMap, Uri};
+
+/// One row of the boot-time host resolution table (F17): a mapped
+/// hostname, the organization it routes to, and that organization's
+/// document root — the serving truth for whatever tree the host gets.
+///
+/// The rows load once at startup (the `domains` table joined to the
+/// `organizations` rows on a database boot, the `[cms] hosts`
+/// bootstrap otherwise) and are frozen afterwards, with the document
+/// roots resolved to absolute paths — exactly the convention
+/// `views_dir` and the static root already follow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostBinding {
+    /// The mapped hostname in the table's canonical shape:
+    /// lowercased, trimmed, without the DNS trailing dot — the same
+    /// shape [`host_name`] extracts from a request, so the two
+    /// compare equal no matter who wrote the row.
+    pub hostname: String,
+    /// The organization's stable key: `main`, `cms`, or any key a
+    /// row in the `organizations` table carries.
+    pub organization: String,
+    /// The organization's document root, absolute (resolved once at
+    /// boot).
+    pub document_root: String,
+}
+
+impl HostBinding {
+    /// The binding's document root as a path.
+    pub fn root(&self) -> &std::path::Path {
+        std::path::Path::new(&self.document_root)
+    }
+}
+
+/// What a request's `Host` header resolves to (F17): the CMS tree,
+/// the main tree, or a tenant organization's tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostClass<'a> {
+    /// A hostname mapped to the CMS organization: the visitor
+    /// surface (public pages, panel, media, search, the auth forms
+    /// and the shared stylesheets).
+    Cms,
+    /// The main tree: every host the table does not map — unknown or
+    /// missing `Host` included, fail-safe — plus hostnames mapped to
+    /// the `main` organization on purpose.
+    Main,
+    /// A hostname mapped to any other organization: that tenant's
+    /// self-contained static tree, served from the organization's
+    /// document root.
+    Tenant(&'a HostBinding),
+}
+
+/// Resolves a request against the boot-time host bindings (F17).
+///
+/// This is the single pure function the dispatcher and the templates
+/// middleware both classify with, so the two layers agree on every
+/// request by construction — the F14 invariant, generalized from two
+/// classes to one per organization.
+pub(crate) fn classify<'a>(
+    uri: &Uri,
+    headers: &HeaderMap,
+    bindings: &'a [HostBinding],
+) -> HostClass<'a> {
+    let Some(host) = request_host(uri, headers) else {
+        return HostClass::Main;
+    };
+    let name = host_name(host);
+    let Some(binding) = bindings
+        .iter()
+        .find(|binding| binding.hostname.eq_ignore_ascii_case(name))
+    else {
+        return HostClass::Main;
+    };
+    match binding.organization.as_str() {
+        CMS_ORGANIZATION_KEY => HostClass::Cms,
+        MAIN_ORGANIZATION_KEY => HostClass::Main,
+        _ => HostClass::Tenant(binding),
+    }
+}
 
 /// The bare host name inside a raw `Host`-header value (or URI
 /// authority): lowercase-equivalent, port stripped.
 ///
 /// IPv6 literals arrive bracketed (`[::1]:8080`) — the name keeps the
-/// brackets, which simply never matches a configured CMS host.
+/// brackets, which simply never matches a configured host.
 pub(crate) fn host_name(raw: &str) -> &str {
     let raw = raw.trim();
     if let Some(end) = raw.find(']') {
@@ -75,24 +161,14 @@ pub(crate) fn request_host<'a>(uri: &'a Uri, headers: &'a HeaderMap) -> Option<&
     }
 }
 
-/// Whether the request belongs to a configured CMS host.
-pub(crate) fn is_cms_request(uri: &Uri, headers: &HeaderMap, cms_hosts: &[String]) -> bool {
-    let Some(host) = request_host(uri, headers) else {
-        return false;
-    };
-    let name = host_name(host);
-    cms_hosts
-        .iter()
-        .any(|configured| configured.eq_ignore_ascii_case(name))
-}
-
-/// The CMS surface's origin for template links (F14 follow-up): the
-/// value of the templates' `cms_origin` global.
+/// The CMS surface's origin for template links (F14 follow-up,
+/// data-driven since F17): the value of the templates' `cms_origin`
+/// global.
 ///
-/// Empty while `cms.hosts` is empty — the single-host server needs no
-/// cross-host links, and `<?= cms_origin ?>/login` degrades to the
+/// Empty while no CMS host is mapped — the single-host server needs
+/// no cross-host links, and `<?= cms_origin ?>/login` degrades to the
 /// relative `/login` on the host the browser is already on. While
-/// virtual hosts are on, the operator's `cms.site_url` wins when set
+/// hosts are mapped, the operator's `cms.site_url` wins when set
 /// (the same key the sitemap and feeds trust for absolute URLs:
 /// behind a reverse proxy the derived origin would be wrong, and
 /// `site_url` is where the public truth is already declared), else
@@ -100,16 +176,27 @@ pub(crate) fn is_cms_request(uri: &Uri, headers: &HeaderMap, cms_hosts: &[String
 ///
 /// - the scheme comes from `[tls] enabled` (`https` while TLS serves
 ///   the socket, `http` otherwise);
-/// - the host is the **first** `cms.hosts` entry — the canonical CMS
-///   name, the one the operator lists first;
+/// - the host is the **first** mapped CMS host — the canonical CMS
+///   name. On a database boot that is the domains table's insertion
+///   order (the name the operator listed or inserted first); on the
+///   configuration bootstrap, the first `[cms] hosts` entry;
 /// - the port is `[server] port`, and only when it is neither the
 ///   scheme's default (80/443) nor `0` (the OS-picked ephemeral port
 ///   of test boots — nobody publishes a link to it).
-pub(crate) fn cms_origin(cms: &CmsConfig, tls_enabled: bool, port: u16) -> String {
-    let Some(host) = cms.hosts.first() else {
+///
+/// `cms_hosts` is the mapped CMS host list in canonical order —
+/// derived from the boot-time bindings, never read from the
+/// configuration here.
+pub(crate) fn cms_origin(
+    site_url: Option<&str>,
+    cms_hosts: &[&str],
+    tls_enabled: bool,
+    port: u16,
+) -> String {
+    let Some(&host) = cms_hosts.first() else {
         return String::new();
     };
-    if let Some(site_url) = cms.site_url.as_deref() {
+    if let Some(site_url) = site_url {
         return site_url.to_owned();
     }
     let scheme = if tls_enabled { "https" } else { "http" };
@@ -124,15 +211,15 @@ pub(crate) fn cms_origin(cms: &CmsConfig, tls_enabled: bool, port: u16) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::CmsConfig;
     use axum::http::HeaderValue;
 
-    /// A `CmsConfig` with the given `site_url` and `hosts`.
-    fn cms(site_url: Option<&str>, hosts: &[&str]) -> CmsConfig {
-        CmsConfig {
-            hosts: hosts.iter().map(|host| String::from(*host)).collect(),
-            site_url: site_url.map(String::from),
-            ..CmsConfig::default()
+    /// A binding for `hostname` routed at `organization`, with a
+    /// predictable document root.
+    fn binding(hostname: &str, organization: &str) -> HostBinding {
+        HostBinding {
+            hostname: String::from(hostname),
+            organization: String::from(organization),
+            document_root: format!("sites/{organization}"),
         }
     }
 
@@ -147,8 +234,19 @@ mod tests {
         (uri.parse().expect("test uri"), headers)
     }
 
-    fn hosts() -> Vec<String> {
-        vec![String::from("cms.test"), String::from("cms.example.com")]
+    /// The boot table these tests classify against: two CMS hosts
+    /// and one tenant organization's host.
+    fn bindings() -> Vec<HostBinding> {
+        vec![
+            binding("cms.test", "cms"),
+            binding("cms.example.com", "cms"),
+            binding("shop.example.com", "shop"),
+        ]
+    }
+
+    fn class_of<'a>(uri: &str, host: Option<&str>, bindings: &'a [HostBinding]) -> HostClass<'a> {
+        let (uri, headers) = request(uri, host);
+        classify(&uri, &headers, bindings)
     }
 
     #[test]
@@ -167,28 +265,39 @@ mod tests {
 
     #[test]
     fn matching_ignores_case_and_port() {
-        let (uri, headers) = request("/p", Some("CMS.TEST"));
-        assert!(is_cms_request(&uri, &headers, &hosts()));
-        let (uri, headers) = request("/p", Some("cms.test:9999"));
-        assert!(is_cms_request(&uri, &headers, &hosts()));
-        let (uri, headers) = request("/p", Some("Cms.Example.Com"));
-        assert!(is_cms_request(&uri, &headers, &hosts()));
+        let bindings = bindings();
+        assert_eq!(class_of("/p", Some("CMS.TEST"), &bindings), HostClass::Cms);
+        assert_eq!(
+            class_of("/p", Some("cms.test:9999"), &bindings),
+            HostClass::Cms
+        );
+        assert_eq!(
+            class_of("/p", Some("Cms.Example.Com"), &bindings),
+            HostClass::Cms
+        );
     }
 
     #[test]
     fn other_hosts_do_not_match() {
-        let (uri, headers) = request("/p", Some("localhost"));
-        assert!(!is_cms_request(&uri, &headers, &hosts()));
-        let (uri, headers) = request("/p", Some("cms.test.evil.com"));
-        assert!(!is_cms_request(&uri, &headers, &hosts()));
-        let (uri, headers) = request("/p", Some("cms.test.."));
-        assert!(!is_cms_request(&uri, &headers, &hosts()));
+        let bindings = bindings();
+        assert_eq!(
+            class_of("/p", Some("localhost"), &bindings),
+            HostClass::Main
+        );
+        assert_eq!(
+            class_of("/p", Some("cms.test.evil.com"), &bindings),
+            HostClass::Main
+        );
+        assert_eq!(
+            class_of("/p", Some("cms.test.."), &bindings),
+            HostClass::Main
+        );
     }
 
     #[test]
     fn missing_host_is_the_main_host() {
-        let (uri, headers) = request("/p", None);
-        assert!(!is_cms_request(&uri, &headers, &hosts()));
+        let bindings = bindings();
+        assert_eq!(class_of("/p", None, &bindings), HostClass::Main);
     }
 
     #[test]
@@ -203,47 +312,79 @@ mod tests {
             HeaderValue::from_str("evil.test").expect("second host"),
         );
         let uri: Uri = "/p".parse().expect("test uri");
-        assert!(!is_cms_request(&uri, &headers, &hosts()));
+        assert_eq!(classify(&uri, &headers, &bindings()), HostClass::Main);
+    }
+
+    #[test]
+    fn a_host_mapped_to_the_main_organization_is_the_main_tree() {
+        let bindings = vec![binding("explicit.test", "main")];
+        assert_eq!(
+            class_of("/", Some("explicit.test"), &bindings),
+            HostClass::Main
+        );
+    }
+
+    #[test]
+    fn tenant_hosts_carry_their_binding() {
+        let bindings = bindings();
+        let shop = binding("shop.example.com", "shop");
+        assert_eq!(
+            class_of("/", Some("SHOP.example.com:8080"), &bindings),
+            HostClass::Tenant(&shop),
+            "the class carries the row that matched, root included"
+        );
     }
 
     #[test]
     fn the_single_host_has_no_origin() {
-        assert_eq!(cms_origin(&cms(None, &[]), false, 8080), "");
+        assert_eq!(cms_origin(None, &[], false, 8080), "");
         // `site_url` is the feeds' key, not a link target, while every
         // surface shares one host — relative links are always right.
         assert_eq!(
-            cms_origin(&cms(Some("https://www.example.com"), &[]), false, 8080),
+            cms_origin(Some("https://www.example.com"), &[], false, 8080),
             ""
         );
     }
 
     #[test]
     fn the_first_host_is_the_canonical_origin() {
-        let config = cms(None, &["cms.example.com", "cms.example.net"]);
-        assert_eq!(cms_origin(&config, false, 80), "http://cms.example.com");
-        assert_eq!(cms_origin(&config, true, 443), "https://cms.example.com");
+        let hosts = ["cms.example.com", "cms.example.net"];
+        assert_eq!(
+            cms_origin(None, &hosts, false, 80),
+            "http://cms.example.com"
+        );
+        assert_eq!(
+            cms_origin(None, &hosts, true, 443),
+            "https://cms.example.com"
+        );
     }
 
     #[test]
     fn non_default_ports_tag_along() {
-        let config = cms(None, &["cms.test"]);
-        assert_eq!(cms_origin(&config, false, 8080), "http://cms.test:8080");
-        assert_eq!(cms_origin(&config, true, 8443), "https://cms.test:8443");
+        let hosts = ["cms.test"];
+        assert_eq!(
+            cms_origin(None, &hosts, false, 8080),
+            "http://cms.test:8080"
+        );
+        assert_eq!(
+            cms_origin(None, &hosts, true, 8443),
+            "https://cms.test:8443"
+        );
     }
 
     #[test]
     fn the_ephemeral_port_is_omitted() {
-        let config = cms(None, &["cms.test"]);
-        assert_eq!(cms_origin(&config, false, 0), "http://cms.test");
-        assert_eq!(cms_origin(&config, true, 0), "https://cms.test");
+        let hosts = ["cms.test"];
+        assert_eq!(cms_origin(None, &hosts, false, 0), "http://cms.test");
+        assert_eq!(cms_origin(None, &hosts, true, 0), "https://cms.test");
     }
 
     #[test]
     fn site_url_overrides_the_derived_origin() {
-        let config = cms(
-            Some("https://cms.example.com"),
-            &["cms.example.com", "cms.example.net"],
+        let hosts = ["cms.example.com", "cms.example.net"];
+        assert_eq!(
+            cms_origin(Some("https://cms.example.com"), &hosts, false, 8080),
+            "https://cms.example.com"
         );
-        assert_eq!(cms_origin(&config, false, 8080), "https://cms.example.com");
     }
 }

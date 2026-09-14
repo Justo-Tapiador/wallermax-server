@@ -1010,6 +1010,104 @@ DELETE FROM domains WHERE hostname = 'cms2.example.com';
   organization. Use clean lowercase names (no scheme, port or path);
   the loader normalizes case and trailing dots anyway.
 
+## Per-organization serving (F17)
+
+F16 made the host names data; F17 makes the trees data too. The
+boot loads the `domains` table joined to the `organizations` rows
+and serves each mapped Host name from **its organization's
+`document_root`** — the dispatch generalizes from F14's two-way
+split to one tree per organization:
+
+- the `cms` organization keeps the visitor surface: public pages,
+  `views/` auto-routing, the panel, the media library, search,
+  feeds, the auth forms and the shared stylesheets;
+- the `main` organization — and every unmapped host, unknown or
+  missing included, fail-safe — keeps the static site plus the
+  operator machinery (`/api`, `/health`, `/metrics`, the proxy);
+- **any other organization** gets a self-contained static site from
+  its own `document_root`: the file tree, the directory indexes,
+  the on-the-fly `.jhs` rendering (its own `index.jhs`, its own
+  `*.jhs` files), the standard JSON 404s — and nothing else.
+
+The dispatcher and the templates middleware classify every request
+with the same pure function against the same boot-time table, so
+the two layers keep agreeing by construction — the F14 invariant,
+generalized from two classes to one per organization.
+
+### A third tenant, in SQL
+
+The phase's promise: a real third tenant without touching
+`wallermax.toml`:
+
+```sql
+-- 1. the organization, with its content root (relative paths
+--    resolve against the working directory, like [static] root_dir):
+INSERT INTO organizations (key, name, document_root, created_at)
+VALUES ('acme', 'Acme site', 'sites/acme', strftime('%s','now'));
+
+-- 2. its host names (restart; the bindings load at boot):
+INSERT INTO domains (hostname, organization_id, created_at)
+SELECT 'acme.example.com', id, strftime('%s','now')
+FROM organizations WHERE key = 'acme';
+```
+
+`GET /` on `acme.example.com` answers `sites/acme/index.html` (the
+`[static] index_file` — a server-wide convention; the row carries
+only the root), `sites/acme/docs/` follows the same
+`index.jhs`-then-`index.html` chain as the main host, and
+`sites/acme/anything.jhs` renders on the fly. To retire the tenant,
+delete its rows and restart.
+
+### The provenance rule, one level up
+
+F16 gave the `domains` rows a `source` column; F17 applies the same
+rule at the organization level, without a schema change:
+
+- **`main` and `cms` are the seeder's organizations.** The startup
+  seed keeps their `document_root` in step with `[static] root_dir`
+  and `[templates] views_dir` — config edits keep working exactly
+  as they always did, and the serving path (which now reads the
+  rows) changes nothing for existing setups.
+- **Every other organization is data.** Created by hand (or, later,
+  by the panel), its `document_root` is its truth; the seeders
+  never read or touch it.
+
+`organizations.document_root` is therefore the serving truth:
+static roots and views directories alike resolve through it on
+every database boot.
+
+### What to know
+
+- **Tenant trees are self-contained.** No `/api`, no `/health`, no
+  `/metrics`, no panel, and no borrowed `/assets/*` from the main
+  root — a tenant's host serves exactly its own files (the way F14
+  kept the two names' surfaces disjoint). A tenant that wants the
+  wallermax look copies the stylesheets in; one that wants styled
+  HTML error pages puts its own `assets/error.css` beside its
+  content (the shared error page links `/assets/error.css`, and on
+  a tenant host that URL is the tenant's own).
+- **Tenant trees do not need `[static] enabled`.** That switch
+  governs the main organization's static surface; the rows are
+  data, and tying them to the switch would re-couple tenants to
+  `wallermax.toml`. (CMS domains still require it — F14's borrowed
+  stylesheets rule, unchanged.)
+- **A missing tenant root is a warning, not a boot failure.** The
+  organization's host names answer 404s until the directory
+  appears; no restart needed once it does, because serving hits
+  the filesystem per request.
+- **`cms_origin` derives from the domains now** (`cms.site_url` >
+  the first mapped CMS host — the table's insertion order >
+  empty), closing F16's documented gap: data-driven vhosts no
+  longer need `cms.site_url` to publish sane cross-host links. The
+  first row you insert is the canonical name.
+- **Several host names may serve one organization** — they share
+  its tree. One hostname still maps to exactly one organization
+  (`UNIQUE`), and listing a hostname in `[cms] hosts` reclaims its
+  row for the CMS organization.
+- **Restarts apply.** The bindings and the document roots load once
+  at boot, after the seeders — SQL edits need a restart, exactly
+  like F16's host names.
+
 ## Configuration
 
 Two keys from F7, two from F9, two from F10, one from F11 (all
@@ -1159,11 +1257,16 @@ the same discipline as the phases before it:
   `[cms] hosts`, which keeps working exactly as in F14), hand-made
   rows are data that survive every boot, and the F14 static-root
   rule extends to the data plane — this document.
-- **F17 — per-organization serving** (next): `organizations.
-  document_root` becomes the serving truth (static roots and views
-  directories from data), the dispatch generalizes from binary to
-  per-organization trees, and `cms_origin` derives from the domains.
-  With it: real third tenants without touching `wallermax.toml`.
+- **F17 — per-organization serving** (done):
+  `organizations.document_root` becomes the serving truth — static
+  roots and views directories from data, one tree per mapped
+  organization (a third tenant is two INSERTs and a restart), and
+  `cms_origin` derived from the domains — this document.
+- **F18 — the tenant pages in the panel** (next): the management
+  surface for the model F15–F17 built — organizations, domains and
+  memberships as forms instead of SQL (the first sanctioned
+  divergence of the membership mirror, and the end of
+  "restarting to move a host").
 
 Each phase ships as one patch with tests and this document updated;
 nothing lands half-featured.

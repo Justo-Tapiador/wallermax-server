@@ -15,7 +15,9 @@
 //! 3. `GET`/`HEAD` for an existing `*.jhs` file under the `[static]`
 //!    root is **rendered** — the template source is never served raw.
 //!    (F14: on the **main host** only — `public/` belongs to it; the
-//!    CMS host never renders or serves `.jhs` sources from there.)
+//!    CMS host never renders or serves `.jhs` sources from there.
+//!    F17: a **tenant host** gets the same treatment for the `.jhs`
+//!    files under its own organization's document root.)
 //! 4. `GET`/`HEAD /` while `[cms] default_page` names an existing page
 //!    renders that CMS page directly (v0.11.0) — through the exact
 //!    `GET /p/{slug}` pipeline (sandboxed body render,
@@ -34,7 +36,8 @@
 //!    the `default_page` check (the explicit configuration still
 //!    wins). The chain per directory: `index.jhs` rendered, then
 //!    `index_file`/`index.html` served statically, then the normal
-//!    404 handling below.
+//!    404 handling below. (F17: a tenant host's directories follow
+//!    the same chain inside its own document root.)
 //! 6. Everything else runs the normal pipeline (API routes first, then
 //!    static files).
 //! 7. A pipeline `404` auto-routes to the views directory before the
@@ -42,11 +45,11 @@
 //!    `views/contact.jhs`, `GET /blog` renders `views/blog.jhs` or
 //!    `views/blog/index.jhs`, and `GET /` falls back to
 //!    `views/index.jhs` when the static index file is missing (and no
-//!    CMS default page took it over). (F14: while `cms.hosts` is set,
-//!    steps 4 and 7 — the CMS-host behaviours — only run for requests
-//!    whose `Host` is one of them, and step 5 — the main host's
-//!    directory indexes — only for every other host; the main host's
-//!    404s stay 404s.)
+//!    CMS default page took it over). (F14: while hostnames are
+//!    mapped, steps 4 and 7 — the CMS-host behaviours — only run for
+//!    requests whose `Host` maps to the CMS organization, and step 5
+//!    — the main-like hosts' directory indexes — for every other
+//!    host; the main host's 404s stay 404s.)
 //!
 //! Rendering happens on the blocking pool (`spawn_blocking`): the JS
 //! engine is CPU-bound and the fresh-sandbox-per-render design keeps it
@@ -82,12 +85,13 @@
 //!   reach template code (an editor page echoing the viewer's session
 //!   cookie would leak it to the page author).
 //! - `cms_origin` — the CMS surface's origin for cross-host links
-//!   (F14 follow-up): `https://cms.example.com` while `cms.hosts`
-//!   names hosts — `cms.site_url` overrides, the sitemap's key — and
-//!   the empty string otherwise, so `<?= cms_origin ?>/login` is a
+//!   (F14 follow-up): `https://cms.example.com` while a CMS host is
+//!   mapped — `cms.site_url` overrides, the sitemap's key — and the
+//!   empty string otherwise, so `<?= cms_origin ?>/login` is a
 //!   relative link on the single-host server and an absolute
 //!   cross-host link once the split is on (see
-//!   [`crate::vhosts::cms_origin`]);
+//!   [`crate::vhosts::cms_origin`]; since F17 the first mapped CMS
+//!   host is the domains table's first CMS row on a database boot);
 //!
 //! Templates can also call `res.redirect('/path')` (the Express-shaped
 //! `res` shim, v0.9.0): the render records a **local-path-only**
@@ -151,20 +155,31 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
         return next.run(request).await;
     }
 
-    // F14/F16: while the CMS host list is non-empty, this middleware
+    // F14/F17: while any hostname is mapped, this middleware
     // classifies the request with the same pure function the
-    // dispatcher uses (crate::vhosts), so both layers agree on every
-    // request. The list lives in the state (F16): the domains
-    // table's CMS rows on a database boot, the `[cms] hosts`
-    // bootstrap otherwise. The CMS-host behaviours (default page,
-    // views auto-routing) then run only there, and `.jhs` files
-    // under the static root render only on the main host. While the
-    // list is empty — the default — every check below runs for
-    // everyone, exactly as before F14.
-    let cms_hosts = state.cms_hosts();
-    let vhosts = !cms_hosts.is_empty();
-    let on_cms_host =
-        vhosts && crate::vhosts::is_cms_request(request.uri(), request.headers(), cms_hosts);
+    // dispatcher uses (crate::vhosts::classify), so both layers
+    // agree on every request. The bindings live in the state (F17):
+    // the `domains` table joined to the `organizations` rows on a
+    // database boot, the `[cms] hosts` bootstrap otherwise. The
+    // CMS-host behaviours (default page, views auto-routing) then
+    // run only there, and `.jhs` files render from the static root
+    // on the main host and from the organization's document root on
+    // a tenant host. While nothing is mapped — the default — every
+    // check below runs for everyone, exactly as before F14.
+    let bindings = state.host_bindings();
+    let vhosts = !bindings.is_empty();
+    let class = crate::vhosts::classify(request.uri(), request.headers(), bindings);
+    let on_cms_host = matches!(class, crate::vhosts::HostClass::Cms);
+
+    // The `.jhs` rendering root for this request (F17): the tenant's
+    // document root on a tenant host, the static root on the main
+    // host (the single-host server included). The CMS host has no
+    // root to render from — its surface is the views tree, and the
+    // `!on_cms_host` guards below keep it that way.
+    let render_root: Option<&std::path::Path> = match &class {
+        crate::vhosts::HostClass::Tenant(binding) => Some(binding.root()),
+        _ => templates.static_root(),
+    };
 
     let request_id = request
         .extensions()
@@ -173,12 +188,13 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
 
     let data = base_data(&state, request.headers(), request.uri(), &method).await;
 
-    // On-the-fly rendering of `.jhs` files under the static root —
-    // the main host's dynamic surface (F14: the CMS host never
-    // renders `public/` templates).
-    if let Some(static_root) = templates.static_root() {
+    // On-the-fly rendering of `.jhs` files — the main-like hosts'
+    // dynamic surface (F14: the CMS host never renders `public/`
+    // templates; F17: a tenant's document root is its own dynamic
+    // surface, rendered the same way).
+    if let Some(render_root) = render_root {
         if decoded.ends_with(".jhs") && !on_cms_host {
-            let candidate = static_root.join(trim_leading_slash(&decoded));
+            let candidate = render_root.join(trim_leading_slash(&decoded));
             if candidate.is_file() {
                 return render_response(
                     templates.engine(),
@@ -217,7 +233,7 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
         }
     }
 
-    // The main host's directory indexes: `index.jhs` before the
+    // The main-like hosts' directory indexes: `index.jhs` before the
     // static index (the single host included). A directory request —
     // `/` or any path ending in `/` — whose directory holds an
     // `index.jhs` renders it through the same pipeline an explicit
@@ -225,9 +241,10 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
     // raw source); directories without one flow on to the static
     // answer unchanged. The CMS host is excluded: its directories
     // are the views tree's business, and `public/` never leaks there.
+    // A tenant host's directories resolve inside its own root (F17).
     if (decoded == "/" || decoded.ends_with('/')) && (!vhosts || !on_cms_host) {
-        if let Some(static_root) = templates.static_root() {
-            let candidate = directory_index_jhs(static_root, &decoded);
+        if let Some(render_root) = render_root {
+            let candidate = directory_index_jhs(render_root, &decoded);
             if candidate.is_file() {
                 return render_response(
                     templates.engine(),
@@ -349,16 +366,11 @@ pub(crate) fn pinned_theme(headers: &HeaderMap) -> Option<&str> {
 /// The `cms_origin` global (F14 follow-up): the CMS surface's origin
 /// for cross-host links, or the empty string while every surface
 /// shares one host. Public information by construction — the first
-/// configured CMS host and the serving scheme — so no gating is
-/// needed; the derivation and precedence live in
-/// [`crate::vhosts::cms_origin`].
+/// mapped CMS host and the serving scheme — so no gating is needed;
+/// the value is precomputed at boot (F17) and the derivation and
+/// precedence live in [`crate::vhosts::cms_origin`].
 fn cms_origin_global(state: &AppState) -> Value {
-    let config = state.config();
-    Value::String(crate::vhosts::cms_origin(
-        &config.cms,
-        config.tls.enabled,
-        config.server.port,
-    ))
+    Value::String(state.cms_origin().to_owned())
 }
 
 /// The `req` global (v0.9.0): an Express-shaped request object with a

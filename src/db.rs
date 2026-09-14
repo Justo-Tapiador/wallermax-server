@@ -36,6 +36,7 @@ use sqlx::sqlite::{
 use sqlx::{Error as SqlxError, FromRow, Row};
 
 use crate::config::DatabaseConfig;
+use crate::vhosts::HostBinding;
 
 /// Stable key of the organization owning the main static site (F15):
 /// the `[static] root_dir` tenant.
@@ -2688,31 +2689,72 @@ pub async fn seed_domains(pool: &SqlitePool, hosts: &[String]) -> Result<(), Str
     Ok(())
 }
 
-/// Loads the Host names the CMS tree serves (F16): the `domains`
-/// table's rows for the CMS organization, in insertion order, each
-/// normalized to the canonical shape. Rows pointing at any other
-/// organization are data for the later per-organization phases —
-/// nothing serves them yet, and they do not leak into this list.
+/// Loads the boot-time host resolution table (F17): every mapped
+/// hostname with the organization it routes to and that
+/// organization's document root, in insertion order — the order the
+/// `cms_origin` derivation treats as canonical (the first CMS row
+/// wins).
+///
+/// Hostnames are normalized to the canonical shape on the way out,
+/// so rows compare equal to what a request's `Host` header carries
+/// no matter who wrote them. Orphan rows (an organization_id with no
+/// matching row — impossible through the seeders, possible through
+/// hand-written SQL) simply do not load: a hostname that routes
+/// nowhere classifies as the main host, exactly like an unmapped
+/// one.
+///
+/// The document roots are returned as stored — relative paths
+/// resolve against the working directory, the documented convention
+/// for `[static] root_dir` and `[templates] views_dir`; the boot
+/// freezes them into absolute paths once loaded.
 ///
 /// # Errors
 ///
 /// Returns the failure as a displayable message (startup-only path,
 /// reported straight to the operator).
-pub async fn load_cms_domains(pool: &SqlitePool) -> Result<Vec<String>, String> {
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT domains.hostname FROM domains \
+pub async fn load_host_bindings(pool: &SqlitePool) -> Result<Vec<HostBinding>, String> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT domains.hostname, organizations.key, organizations.document_root \
+         FROM domains \
          JOIN organizations ON organizations.id = domains.organization_id \
-         WHERE organizations.key = ?1 \
          ORDER BY domains.id",
     )
-    .bind(CMS_ORGANIZATION_KEY)
     .fetch_all(pool)
     .await
-    .map_err(|error| format!("failed to load the CMS domains: {error}"))?;
+    .map_err(|error| format!("failed to load the host bindings: {error}"))?;
     Ok(rows
         .into_iter()
-        .map(|(hostname,)| normalize_hostname(&hostname))
+        .map(|(hostname, organization, document_root)| HostBinding {
+            hostname: normalize_hostname(&hostname),
+            organization,
+            document_root,
+        })
         .collect())
+}
+
+/// Loads the organizations' document roots (F17), keyed by their
+/// stable keys and ordered by key for a deterministic boot.
+///
+/// The serving layers read these rows — not the configuration — so
+/// `organizations.document_root` is the serving truth: the `main`
+/// row's root is the static tree's root, the `cms` row's root is the
+/// views tree's root, and any other organization's root is that
+/// tenant's site. The startup seed keeps the `main` and `cms` rows
+/// in step with `wallermax.toml` (they are the seeder's own
+/// organizations, the configuration's bootstrap), while rows created
+/// by hand are data the seeder never touches.
+///
+/// # Errors
+///
+/// Returns the failure as a displayable message (startup-only path,
+/// reported straight to the operator).
+pub async fn load_document_roots(pool: &SqlitePool) -> Result<Vec<(String, String)>, String> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT key, document_root FROM organizations ORDER BY key")
+            .fetch_all(pool)
+            .await
+            .map_err(|error| format!("failed to load the document roots: {error}"))?;
+    Ok(rows)
 }
 
 #[cfg(test)]
@@ -3107,7 +3149,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loading_reads_normalized_cms_rows_in_insertion_order() {
+    async fn bindings_load_normalized_rows_in_insertion_order() {
         let db = TempDb::new();
         let repo = seeded_repository(&db).await;
 
@@ -3120,7 +3162,7 @@ mod tests {
         .expect("third organization inserted");
         // Two CMS domains — the second hand-typed with case and a
         // trailing dot — and one belonging to another organization,
-        // which must not leak into the CMS list.
+        // which must load as that organization's tenant binding.
         for (hostname, org) in [("cms.example.com", "cms"), ("Panel.Example.ORG.", "cms")] {
             sqlx::query(
                 "INSERT INTO domains (hostname, organization_id, created_at) \
@@ -3140,14 +3182,54 @@ mod tests {
         .await
         .expect("third-organization domain inserted");
 
-        let hosts = load_cms_domains(&repo.pool).await.expect("domains load");
+        let bindings = load_host_bindings(&repo.pool).await.expect("bindings load");
         assert_eq!(
-            hosts,
+            bindings,
             vec![
-                String::from("cms.example.com"),
-                String::from("panel.example.org"),
+                HostBinding {
+                    hostname: String::from("cms.example.com"),
+                    organization: String::from("cms"),
+                    document_root: String::from("views"),
+                },
+                HostBinding {
+                    hostname: String::from("panel.example.org"),
+                    organization: String::from("cms"),
+                    document_root: String::from("views"),
+                },
+                HostBinding {
+                    hostname: String::from("x.third.test"),
+                    organization: String::from("third"),
+                    document_root: String::from("sites/third"),
+                },
             ],
-            "normalized, in insertion order, CMS rows only"
+            "normalized, in insertion order, with each row's organization and root"
+        );
+    }
+
+    #[tokio::test]
+    async fn document_roots_load_by_organization_key() {
+        let db = TempDb::new();
+        let repo = repository(&db).await;
+        seed_organizations(&repo.pool, "sites/main", "sites/cms")
+            .await
+            .expect("organizations seed");
+        sqlx::query(
+            "INSERT INTO organizations (key, name, document_root, created_at) \
+             VALUES ('third', 'Third site', 'sites/third', 0)",
+        )
+        .execute(&repo.pool)
+        .await
+        .expect("third organization inserted");
+
+        let roots = load_document_roots(&repo.pool).await.expect("roots load");
+        assert_eq!(
+            roots,
+            vec![
+                (String::from("cms"), String::from("sites/cms")),
+                (String::from("main"), String::from("sites/main")),
+                (String::from("third"), String::from("sites/third")),
+            ],
+            "every organization's root, ordered by key"
         );
     }
 

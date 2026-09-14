@@ -1973,7 +1973,10 @@ async fn import_page(
         )
         .await;
     }
-    let root = state.config().static_files.root_dir.clone();
+    // F17: resolve strictly inside the main organization's document
+    // root — the serving truth, which the seed keeps equal to
+    // `[static] root_dir`.
+    let root = state.main_document_root().to_owned();
 
     let root_path = std::path::Path::new(&root)
         .canonicalize()
@@ -2073,15 +2076,17 @@ async fn render_import_error(state: &AppState, parts: &PageParts, error: &str) -
     .await
 }
 
-/// Walks the static root collecting importable `.html`/`.jhs` files
-/// (bounded in count, size and depth; dot entries skipped).
+/// Walks the main organization's document root collecting importable
+/// `.html`/`.jhs` files (bounded in count, size and depth; dot
+/// entries skipped).
 fn list_importable_files(state: &AppState) -> Vec<Value> {
-    let static_config = &state.config().static_files;
-    if !static_config.enabled {
+    if !state.config().static_files.enabled {
         return Vec::new();
     }
 
-    let root = std::path::Path::new(&static_config.root_dir).to_path_buf();
+    // F17: the main organization's document root is the serving
+    // truth — the same tree the main host serves.
+    let root = std::path::Path::new(state.main_document_root()).to_path_buf();
     let mut files = Vec::new();
     collect_importable(&root, &root, 0, &mut files);
     files

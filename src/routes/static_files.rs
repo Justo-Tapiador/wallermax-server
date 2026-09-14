@@ -112,6 +112,53 @@ pub fn mount_shared_fallback(router: Router<AppState>, config: &StaticConfig) ->
     }))
 }
 
+/// A tenant organization's tree (F17): a self-contained static site
+/// from the organization's document root.
+///
+/// `GET /` answers `root/index_file` (the server-wide directory
+/// index convention from `[static]` — the organization's row carries
+/// only the root), and every other otherwise-unmatched path resolves
+/// against `root` exactly like the main tree's fallback. The
+/// templates middleware renders the root's own `index.jhs` (for `/`
+/// and every directory) and its `*.jhs` files on the fly, the same
+/// main-host treatment; misses fall back to the standard JSON 404
+/// envelope, and non-`GET`/`HEAD` requests to file paths answer 405
+/// through it. [`ServeDir`] rejects `..` segments and encoded
+/// traversals, keeping requests inside the organization's root.
+///
+/// Deliberately NOT on the tenant's host: the operator machinery
+/// (`/api`, `/health`, `/metrics`, the proxy), the panel, and the
+/// main root's borrowed `/assets/*` — a tenant tree is its own
+/// content, self-contained, the way F14 kept the two names' surfaces
+/// disjoint. A tenant that wants the wallermax look copies the
+/// stylesheets in; one that wants styled HTML error pages puts its
+/// own `assets/error.css` beside its content.
+///
+/// The tree mounts whatever the row says, with or without
+/// `[static] enabled` — that switch governs the **main**
+/// organization's static surface, and tying data-created tenants to
+/// it would re-couple them to `wallermax.toml`, the opposite of the
+/// phase's point.
+pub fn tenant_routes(root: &str, index_file: &str) -> Router<AppState> {
+    // Nested router turning ServeDir misses into the standard JSON
+    // 404 envelope (with the request's correlation id) — the same
+    // shape `mount_fallback` uses.
+    let json_not_found = Router::new()
+        .fallback(super::not_found)
+        .into_service::<Body>();
+
+    Router::new()
+        .route(
+            "/",
+            get_service(ServeFile::new(std::path::Path::new(root).join(index_file))),
+        )
+        .fallback_service(
+            ServeDir::new(root)
+                .call_fallback_on_method_not_allowed(true)
+                .fallback(json_not_found),
+        )
+}
+
 /// Paths the CMS host borrows from the static root: the stylesheet
 /// subtree and the two root files browsers request by default. `.jhs`
 /// paths never pass — public templates render on the main host only,

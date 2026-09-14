@@ -186,6 +186,11 @@ enabled = true
 # Directory holding the static assets, relative to the working directory
 # (absolute paths are allowed too). It must exist at startup when
 # static serving is enabled. `..` segments are rejected at validation.
+#
+# F17: this value seeds the `main` organization's document_root — the
+# row the server actually serves from (the startup seed keeps the two
+# in step, so config edits keep working exactly as before). Third
+# tenants are rows, not config: see the [cms] hosts note below.
 root_dir = "public"
 
 # File served for GET / when no index.jhs exists beside it (looked up
@@ -460,7 +465,9 @@ enabled = true
 # public/ template writes href="<?= cms_origin ?>/login" instead of
 # hardcoding the CMS host; cms.site_url (below) overrides the
 # derivation. While hosts is empty the global is the empty string and
-# those links degrade to relative ones.
+# those links degrade to relative ones. (F17: on a database boot the
+# canonical name is the first CMS row of the domains table — the
+# insertion order — and this list is only its bootstrap.)
 #
 # Empty (the default) = single-host behaviour, exactly as before F14.
 # hosts = ["cms.localhost"]
@@ -481,6 +488,22 @@ enabled = true
 # always the seeder's: listing it reclaims a hand-made row. While the
 # list is empty the table stands alone: virtual hosting with zero
 # configuration. Full story: README-CMS.md, "The domains table (F16)".
+#
+# F17 — per-organization serving: every mapped hostname now serves
+# its ORGANIZATION's tree from that organization's document_root
+# (`main` and `cms` are seeded from [static] root_dir / [templates]
+# views_dir; any other organization is data). A third tenant is two
+# INSERTs and a restart — no configuration involved:
+#
+#   sqlite3 wallermax.db "INSERT INTO organizations (key, name, document_root, created_at) \
+#     VALUES ('acme', 'Acme site', 'sites/acme', strftime('%s','now'));"
+#   sqlite3 wallermax.db "INSERT INTO domains (hostname, organization_id, created_at) \
+#     SELECT 'acme.example.com', id, strftime('%s','now') FROM organizations WHERE key = 'acme';"
+#
+# Its host then serves a self-contained static site from sites/acme
+# (own files, own index.jhs, JSON 404s — no API, no panel, no assets
+# borrowed from this root). Full story: README-CMS.md,
+# "Per-organization serving (F17)".
 
 # ── The corporate content model (F7) ──────────────────────────────
 # Hierarchical pages (parent + sibling position, cycle-proof moves,

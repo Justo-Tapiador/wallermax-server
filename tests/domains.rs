@@ -10,8 +10,9 @@
 //! - rows created by hand are **data**: they survive every boot and
 //!   serve the CMS tree with the list empty — virtual hosting with
 //!   zero configuration;
-//! - rows pointing at other organizations are data too, but no tree
-//!   serves them yet (the per-organization phases build those);
+//! - rows pointing at other organizations route to those
+//!   organizations' own trees (F17: per-organization serving — the
+//!   `tenant_sites` suite covers them in depth);
 //! - the F14 static-root rule extends to the data plane: CMS domains
 //!   without `static.enabled` refuse to boot.
 //!
@@ -227,17 +228,27 @@ async fn manual_domains_survive_configuration_changes() {
 }
 
 #[tokio::test]
-async fn other_organizations_domains_get_the_main_tree_for_now() {
+async fn other_organizations_domains_serve_their_own_trees() {
     let (_, db) = auth_config();
     {
         let config = domains_config(db.url(), &[]);
         TestServer::start_full(config).await;
     }
+    // A third organization with a real document root, in a temporary
+    // directory — the F16 scope cut ("third-org domains get the main
+    // tree for now") closed by F17: the row's root is the serving
+    // truth now. The tenant_sites suite covers the tree in depth;
+    // this pins the dispatch from the domains battery's side.
+    let root = std::env::temp_dir().join(format!("wallermax-domains-third-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("tenant root created");
+    std::fs::write(root.join("index.html"), "<h1>Third site</h1>").expect("index written");
+
     let pool = side_db(db.url()).await;
     sqlx::query(
         "INSERT INTO organizations (key, name, document_root, created_at) \
-         VALUES ('third', 'Third site', 'sites/third', 0)",
+         VALUES ('third', 'Third site', ?1, 0)",
     )
+    .bind(root.display().to_string().replace('\\', "/"))
     .execute(&pool)
     .await
     .expect("third organization inserted");
@@ -247,12 +258,15 @@ async fn other_organizations_domains_get_the_main_tree_for_now() {
     let config = domains_config(db.url(), &[]);
     let server = TestServer::start_full(config).await;
 
-    // F16 dispatches binary: the CMS tree or the main tree. The third
-    // organization's domain is data (it survives boots), but nothing
-    // serves it yet — the per-organization phases build trees from the
-    // document roots. Until then it classifies as any other unknown
-    // host: the main tree.
-    assert_static_home(&server, Some("x.third.test")).await;
+    // The mapped host serves the third organization's own tree, not
+    // the main tree — and the main host is untouched.
+    let response = get(&server, "/", Some("x.third.test")).await;
+    assert_eq!(response.status(), 200, "the third organization answers");
+    let body = response.text().await.expect("body");
+    assert!(body.contains("Third site"), "the tenant's own tree: {body}");
+    assert_static_home(&server, None).await;
+
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[tokio::test]
