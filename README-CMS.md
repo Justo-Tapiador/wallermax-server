@@ -1106,7 +1106,103 @@ every database boot.
   row for the CMS organization.
 - **Restarts apply.** The bindings and the document roots load once
   at boot, after the seeders — SQL edits need a restart, exactly
-  like F16's host names.
+  like F16's host names. (F18 changes this for the panel: its
+  writes refresh the snapshot live, so the restart is only the SQL
+  path's requirement now.)
+
+## The tenant pages (F18)
+
+F15 built the model, F16 moved the host names into the database,
+F17 made every organization's `document_root` its serving truth —
+and every step of the way the operator drove it with SQL and a
+restart. F18 closes the arc with the management surface: **the
+Tenants pages in the panel**, at `/admin/tenants`, answering only
+to an administrator of the CMS organization (the F15 guard — the
+same gate as the Users section).
+
+The surface is deliberately boring: plain forms, `303` redirects,
+flash codes in the query string, re-rendered forms that keep what
+you typed. No JavaScript, like everything else in the panel.
+
+- **The listing** shows every organization with its badges — key,
+  document root, how many host names map to it, how many members it
+  has — and marks the two bootstrap organizations (`main`, `cms`)
+  as living in `wallermax.toml`.
+- **A new tenant** is a key (2–32 lowercase slug characters; `main`,
+  `cms` and `new` are reserved), a name, and a document root — the
+  same freedom `[static] root_dir` has (relative paths resolve
+  against the working directory; a missing directory answers 404s
+  until it appears).
+- **Its page** manages the three things a tenant is: the settings
+  (name and document root), the host names, and the team.
+- **Deleting a tenant** removes its rows explicitly — host names and
+  memberships go first, matching the schema's no-foreign-key style —
+  and its host names fall back to the main tree.
+
+### The end of "restarting to move a host"
+
+The serving table — the bindings, the derived origins, one ready
+tree per tenant organization — lives in the application state as a
+single **live snapshot**. The boot installs it; every panel write
+that can move a host or change a root re-derives a whole snapshot
+from the database and swaps it in **atomically** (one write lock —
+a reader never sees new bindings with old trees). The dispatcher
+and the templates middleware read the snapshot per request, so:
+
+- mapping a host name makes it serve the tenant's tree **on the
+  next request**;
+- unmapping it falls back to the main tree just as fast;
+- a changed document root re-resolves the tenant's tree
+  immediately;
+- a failed refresh is flagged on the page and the previous snapshot
+  keeps serving — the change waits for a restart, the server never
+  breaks.
+
+Memberships were already live (the guards read them per request,
+F15). The bootstrap organizations' roots stay boot-frozen on
+purpose: they are the configuration's, the seed keeps them in step,
+and the panel shows them read-only instead of pretending otherwise.
+
+### The provenance rules, made visible
+
+The seeders' rules from F16/F17 are what the pages enforce, not
+re-invent:
+
+- A **`config`-sourced domain row** (one the `[cms] hosts` list
+  seeded) cannot be unmapped from the panel — it would come back on
+  the next boot. The page refuses with the pointer to
+  `wallermax.toml`. A `manual` row goes, whoever it points at:
+  managing the CMS organization's extra host names here is exactly
+  the F16 promise ("a new host without touching the configuration"),
+  minus the SQL.
+- A hostname listed in `[cms] hosts` cannot be claimed for another
+  organization — the seeder would reclaim it at the next boot. The
+  form explains where the name lives.
+- The **CMS organization's memberships are the mirror's territory**
+  (F15: they follow the platform roles, healed on every boot and
+  every role write). The page refuses to fight it and points at the
+  Users section. Memberships of every **other** organization are
+  data — the first sanctioned divergence of the mirror — granted,
+  moved and removed as forms, and opening nothing by themselves
+  until the per-tenant panels arrive.
+
+### What to know
+
+- **The guards are unchanged**: `CmsEditor`/`CmsAdmin` read the CMS
+  organization's membership, per request. A tenant administrator is
+  not a panel user — their membership is their tenant's team list,
+  nothing more (yet).
+- **Everything applies immediately** except what belongs to the
+  configuration: the bootstrap organizations' name and root (the
+  seed keeps them equal to `[static] root_dir` /
+  `[templates] views_dir`), and the `[cms] hosts` list itself.
+- **The add-member form is an upsert**: re-adding an existing member
+  with another role moves them.
+- **Keys are immutable and addressing**: routes are
+  `/admin/tenants/{key}`; the key never changes after creation,
+  exactly like a username or a menu name.
+- **No new configuration.** F18 adds zero keys to `wallermax.toml`;
+  the panel is the surface, the database is the truth.
 
 ## Configuration
 
@@ -1262,11 +1358,17 @@ the same discipline as the phases before it:
   roots and views directories from data, one tree per mapped
   organization (a third tenant is two INSERTs and a restart), and
   `cms_origin` derived from the domains — this document.
-- **F18 — the tenant pages in the panel** (next): the management
+- **F18 — the tenant pages in the panel** (done): the management
   surface for the model F15–F17 built — organizations, domains and
-  memberships as forms instead of SQL (the first sanctioned
-  divergence of the membership mirror, and the end of
-  "restarting to move a host").
+  memberships as forms instead of SQL, with the live vhost snapshot
+  that makes every host move (and every root change) apply on the
+  next request — the first sanctioned divergence of the membership
+  mirror, and the end of "restarting to move a host" — this
+  document.
+- **F19 — the shared session** (next): `[auth] cookie_domain` and
+  the sign-on that carries across the organizations' host names —
+  the natural follow-up to tenants with teams: a member of several
+  organizations signs in once.
 
 Each phase ships as one patch with tests and this document updated;
 nothing lands half-featured.

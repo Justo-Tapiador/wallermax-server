@@ -23,15 +23,18 @@ pub mod metrics;
 pub mod search;
 pub mod static_files;
 pub mod stats;
+pub mod tenants;
 
 use axum::extract::Request;
 use axum::response::Response;
 use axum::Router;
 
 use crate::config::{MetricsConfig, StaticConfig};
+use crate::db::OrganizationRepository;
 use crate::error::AppError;
 use crate::middleware::request_id::RequestId;
-use crate::state::AppState;
+use crate::state::{AppState, VhostData, VhostSnapshot};
+use crate::vhosts::HostBinding;
 
 /// Assembles the complete route tree, including the JSON fallbacks.
 ///
@@ -90,7 +93,8 @@ pub fn routes(
         router = router
             .merge(cms::routes())
             .merge(media::routes())
-            .merge(search::routes());
+            .merge(search::routes())
+            .merge(tenants::routes());
     }
 
     if external_api_enabled {
@@ -110,6 +114,85 @@ pub fn routes(
     }
 
     router.method_not_allowed_fallback(method_not_allowed)
+}
+
+/// Builds one self-contained serving tree per tenant organization
+/// the bindings map (F17): several host names may route to the same
+/// organization — they share its tree — so the trees are built once
+/// per organization, in first-seen order. A missing document root is
+/// fine: the boot already warned, and `ServeDir` simply answers 404s
+/// until the directory appears.
+///
+/// Split out of [`vhost_routes`] when F18 made the snapshot
+/// reloadable: the boot's initial install and every panel refresh
+/// build the exact same trees through here, so a tenant's site is
+/// served identically whether it existed at boot or was created a
+/// minute ago.
+fn tenant_trees(
+    state: &AppState,
+    bindings: &[HostBinding],
+    index_file: &str,
+) -> Vec<(String, Router)> {
+    let mut tenants: Vec<(String, Router)> = Vec::new();
+    for binding in bindings {
+        if binding.organization != crate::db::MAIN_ORGANIZATION_KEY
+            && binding.organization != crate::db::CMS_ORGANIZATION_KEY
+            && !tenants.iter().any(|(key, _)| key == &binding.organization)
+        {
+            tenants.push((
+                binding.organization.clone(),
+                static_files::tenant_routes(&binding.document_root, index_file)
+                    .method_not_allowed_fallback(method_not_allowed)
+                    .with_state(state.clone()),
+            ));
+        }
+    }
+    tenants
+}
+
+/// Re-derives the whole live vhost snapshot from the database and
+/// swaps it in (F18): the host resolution table, the derived
+/// origins, and one fresh serving tree per tenant organization.
+/// What the Tenants pages call after every write that can move a
+/// host or change a root — the end of "restarting to move a host".
+///
+/// The bootstrap organizations' trees (main and CMS) are mounted
+/// once at boot and never rebuilt here: their roots are the
+/// configuration's, and the panel does not edit them.
+///
+/// # Errors
+///
+/// Returns the storage failure as a displayable message; the
+/// caller logs it and answers with a storage error — the previous
+/// snapshot keeps serving, so a failed refresh degrades to "the
+/// change needs a restart", never to a broken server.
+pub(crate) async fn refresh_vhost_state(
+    state: &AppState,
+    organizations: &dyn OrganizationRepository,
+) -> Result<(), String> {
+    let (roots, bindings) = organizations
+        .vhost_inputs()
+        .await
+        .map_err(|error| format!("failed to load the host resolution: {error}"))?;
+    let data = VhostData::from_database(state.config(), &roots, bindings);
+    let cms_origin = data.cms_origin(state.config());
+    let tenants = tenant_trees(
+        state,
+        data.bindings(),
+        &state.config().static_files.index_file,
+    );
+    let VhostData {
+        main_root,
+        bindings,
+        ..
+    } = data;
+    state.replace_vhosts(VhostSnapshot {
+        main_root,
+        cms_origin,
+        bindings,
+        tenants,
+    });
+    Ok(())
 }
 
 /// Assembles the **per-organization** route trees for name-based
@@ -145,13 +228,13 @@ pub fn routes(
 ///
 /// Classification is [`crate::vhosts::classify`] — the same pure
 /// function the templates middleware consults, so the two layers
-/// agree on every request by construction. Both read the boot-time
-/// bindings from the application state (F17): the `domains` table
-/// joined to the `organizations` rows on a database boot, the
-/// `[cms] hosts` bootstrap otherwise. The middleware pipeline wraps
-/// the dispatcher from the outside (see [`crate::middleware::apply`]),
-/// so security headers, error pages, rate limiting and friends serve
-/// every tree identically.
+/// agree on every request by construction. Both read the **live**
+/// vhost snapshot from the application state (F17 loaded it at
+/// boot; F18 made it reloadable — the Tenants pages swap it after
+/// their writes, which is how a host moves without a restart). The
+/// middleware pipeline wraps the dispatcher from the outside (see
+/// [`crate::middleware::apply`]), so security headers, error pages,
+/// rate limiting and friends serve every tree identically.
 ///
 /// Validation guarantees `hosts` non-empty requires `cms.enabled`
 /// and `static.enabled`, so the fallback shapes below are
@@ -211,7 +294,8 @@ pub fn vhost_routes(
         cms_tree = cms_tree
             .merge(cms::routes())
             .merge(media::routes())
-            .merge(search::routes());
+            .merge(search::routes())
+            .merge(tenants::routes());
     }
 
     if auth_enabled {
@@ -231,44 +315,38 @@ pub fn vhost_routes(
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state.clone());
 
-    // Tenant trees (F17): one self-contained static site per
-    // organization the bindings map besides the bootstrap two.
-    // Several host names may route to the same organization — they
-    // share its tree — so the trees are built once per organization,
-    // in first-seen order. A missing document root is fine here: the
-    // boot already warned, and `ServeDir` simply answers 404s until
-    // the directory appears.
-    let mut tenants: Vec<(String, Router)> = Vec::new();
-    for binding in state.host_bindings() {
-        if binding.organization != crate::db::MAIN_ORGANIZATION_KEY
-            && binding.organization != crate::db::CMS_ORGANIZATION_KEY
-            && !tenants.iter().any(|(key, _)| key == &binding.organization)
-        {
-            tenants.push((
-                binding.organization.clone(),
-                static_files::tenant_routes(&binding.document_root, &static_files.index_file)
-                    .method_not_allowed_fallback(method_not_allowed)
-                    .with_state(state.clone()),
-            ));
-        }
-    }
+    // The boot's initial install (F18): the tenant trees belong to
+    // the live snapshot, not to this closure's captures, so every
+    // request — boot-time or post-refresh — picks its tree from the
+    // same place. The main and CMS trees above are mounted once:
+    // their roots are the bootstrap organizations', which the panel
+    // never edits.
+    let boot = state.vhost_snapshot();
+    state.replace_vhosts(VhostSnapshot {
+        tenants: tenant_trees(state, &boot.bindings, &static_files.index_file),
+        ..boot
+    });
 
     // The dispatcher: one service, one tree per organization, the
     // Host header decides. Router implements
     // `Service<Request, Error = Infallible>`, so the boxed future
-    // simply forwards the result.
-    let bindings = state.host_bindings().to_vec();
+    // simply forwards the result. The snapshot is re-read on every
+    // request — a cheap clone — so a panel swap is live for the very
+    // next request, no restart involved.
+    let state = state.clone();
     let dispatch = tower::service_fn(move |request: Request| {
         let main = main.clone();
         let cms_tree = cms_tree.clone();
-        let tenants = tenants.clone();
-        let bindings = bindings.clone();
+        let state = state.clone();
         async move {
+            let snapshot = state.vhost_snapshot();
             let mut router =
-                match crate::vhosts::classify(request.uri(), request.headers(), &bindings) {
+                match crate::vhosts::classify(request.uri(), request.headers(), &snapshot.bindings)
+                {
                     crate::vhosts::HostClass::Cms => cms_tree,
                     crate::vhosts::HostClass::Main => main,
-                    crate::vhosts::HostClass::Tenant(binding) => tenants
+                    crate::vhosts::HostClass::Tenant(binding) => snapshot
+                        .tenants
                         .iter()
                         .find(|(key, _)| *key == binding.organization)
                         .expect("every mapped organization has its tree")

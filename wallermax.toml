@@ -504,6 +504,17 @@ enabled = true
 # (own files, own index.jhs, JSON 404s — no API, no panel, no assets
 # borrowed from this root). Full story: README-CMS.md,
 # "Per-organization serving (F17)".
+#
+# F18 — the panel's Tenants pages manage all of this as forms: sign
+# in as an administrator and open /admin/tenants. Creating a tenant,
+# mapping or unmapping a host name, changing a document root — every
+# write applies to the serving table immediately (the next request is
+# classified with it; no restart involved). The SQL above remains the
+# offline path: a SQL edit needs the restart the panel writes do not.
+# The bootstrap organizations (main, cms) stay read-only here — their
+# name and root follow this file — while their extra host names and
+# every other organization's rows are data the pages manage. Full
+# story: README-CMS.md, "The tenant pages (F18)".
 
 # ── The corporate content model (F7) ──────────────────────────────
 # Hierarchical pages (parent + sibling position, cycle-proof moves,

@@ -25,7 +25,8 @@ use tokio::sync::watch;
 use crate::auth::JwtService;
 use crate::config::AppConfig;
 use crate::db::{
-    self, SqliteMediaRepository, SqliteMenuRepository, SqlitePageRepository, SqliteUserRepository,
+    self, SqliteMediaRepository, SqliteMenuRepository, SqliteOrganizationRepository,
+    SqlitePageRepository, SqliteUserRepository,
 };
 use crate::routes;
 use crate::state::{self, AppState, AuthContext, CmsContext};
@@ -53,7 +54,7 @@ pub fn build_app(config: &AppConfig, state: AppState) -> Router {
     // section (the switch, the index file — a server-wide
     // convention) stays configuration.
     let mut static_files = config.static_files.clone();
-    static_files.root_dir = state.main_document_root().to_owned();
+    static_files.root_dir = state.main_document_root();
     let router = if state.host_bindings().is_empty() {
         routes::routes(
             state.auth_enabled(),
@@ -304,7 +305,8 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
                     config.cms.max_revisions,
                 )),
                 menus: Arc::new(SqliteMenuRepository::new(pool.clone())),
-                media: Arc::new(SqliteMediaRepository::new(pool)),
+                media: Arc::new(SqliteMediaRepository::new(pool.clone())),
+                organizations: Arc::new(SqliteOrganizationRepository::new(pool.clone())),
                 media_root,
             })
         }

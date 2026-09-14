@@ -1,0 +1,79 @@
+<?jhs var titulo = "Tenants"; ?>
+<?jhs include("partials/admin/head") ?>
+<?jhs include("partials/admin/sidebar") ?>
+<main class="main">
+<?jhs include("partials/admin/topbar") ?>
+  <section class="page">
+    <div class="breadcrumbs">Tenants</div>
+    <div class="page-head">
+      <div>
+        <h1>Tenants</h1>
+        <p>One organization per site this server hosts: its document root, its host names, its team.</p>
+      </div>
+      <div class="actions">
+        <a class="btn primary" href="/admin/tenants/new">&#43; New tenant</a>
+      </div>
+    </div>
+
+<?jhs if (query.ok == "deleted") { ?>
+    <p class="notice notice-ok">Tenant deleted — its host names and memberships went with it.</p>
+<?jhs } ?>
+<?jhs if (query.error == "refresh") { ?>
+    <p class="notice notice-error">Saved, but the serving change could not be applied live — restart the server to serve it.</p>
+<?jhs } ?>
+
+<?jhs if (tenants && tenants.length) { ?>
+    <section class="card">
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th>Tenant</th><th>Document root</th><th>Host names</th><th>Members</th><th></th></tr>
+          </thead>
+          <tbody>
+<?jhs tenants.forEach(function (organizacion) { ?>
+            <tr>
+              <td>
+                <span class="table-title"><a href="/admin/tenants/<?= organizacion.key ?>"><?= organizacion.name ?></a></span>
+                <span class="table-sub"><?= organizacion.key ?> · since <?= organizacion.created_at_h ?></span>
+              </td>
+              <td><span class="table-sub"><?= organizacion.document_root ?></span></td>
+              <td><?= organizacion.domain_count ?></td>
+              <td><?= organizacion.member_count ?></td>
+              <td>
+<?jhs if (organizacion.is_seeded) { ?>
+                <span class="status draft">from wallermax.toml</span>
+<?jhs } else { ?>
+                <span class="status published">data</span>
+<?jhs } ?>
+              </td>
+            </tr>
+<?jhs }); ?>
+          </tbody>
+        </table>
+      </div>
+    </section>
+<?jhs } else { ?>
+    <section class="card">
+      <div class="empty">
+        <div class="empty-icon">&#9672;</div>
+        <h2>No tenants</h2>
+        <p>Odd — the two bootstrap organizations live here even on a fresh install.</p>
+      </div>
+    </section>
+<?jhs } ?>
+
+    <section class="card">
+      <div class="card-head"><h2>How serving follows this page</h2></div>
+      <div class="card-body">
+        <p class="table-sub">
+          Every change here — a new tenant, a moved host name, a changed document root — is applied to the serving table
+          immediately: the next request is classified with it, no restart involved. The two bootstrap organizations
+          (<code>main</code>, <code>cms</code>) are the seeders' own: their name and root follow wallermax.toml and are
+          read-only here, while their host names are managed like any tenant's. A tenant's tree is self-contained:
+          its files, its directory indexes, its on-the-fly <code>.jhs</code> rendering — and nothing else.
+        </p>
+      </div>
+    </section>
+  </section>
+</main>
+<?jhs include("partials/admin/foot") ?>

@@ -1,0 +1,63 @@
+<?jhs var titulo = "New tenant"; ?>
+<?jhs include("partials/admin/head") ?>
+<?jhs include("partials/admin/sidebar") ?>
+<main class="main">
+<?jhs include("partials/admin/topbar") ?>
+  <section class="page">
+    <div class="breadcrumbs">Tenants / New tenant</div>
+    <div class="page-head">
+      <div>
+        <h1>New tenant</h1>
+        <p>An organization with its own document root, host names and team.</p>
+      </div>
+      <div class="actions">
+        <a class="btn" href="/admin/tenants">Back to list</a>
+      </div>
+    </div>
+
+<?jhs if (form_error) { ?>
+    <p class="notice notice-error"><?= form_error ?></p>
+<?jhs } ?>
+
+    <form method="post" action="/admin/tenants">
+      <div class="form-layout">
+        <div class="card editor-card">
+          <div class="field">
+            <label for="clave">Key</label>
+            <input class="input" id="clave" type="text" name="key" required
+                   minlength="2" maxlength="32" autocomplete="off"
+                   value="<?= form.key ?>" pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?"
+                   title="Lowercase letters, digits and hyphens; starts and ends with a letter or digit">
+            <small>2-32 characters: lowercase letters, digits and hyphens. The key is the stable identifier — it never changes. <code>main</code>, <code>cms</code> and <code>new</code> are reserved.</small>
+          </div>
+          <div class="field">
+            <label for="nombre">Name</label>
+            <input class="input" id="nombre" type="text" name="name" required
+                   maxlength="200" value="<?= form.name ?>">
+            <small>Human-readable, for this panel only.</small>
+          </div>
+          <div class="field">
+            <label for="raiz">Document root</label>
+            <input class="input" id="raiz" type="text" name="document_root" required
+                   maxlength="500" value="<?= form.document_root ?>">
+            <small>The tenant's content tree. Relative paths resolve against the working directory, like every other root; create the directory before pointing host names at it, or the host answers 404s until it appears.</small>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" type="submit">Create tenant</button>
+          </div>
+        </div>
+        <aside class="card sidebar-card">
+          <div class="field">
+            <label>What a tenant is</label>
+            <small>
+              A self-contained site this server hosts for an organization: its files and its on-the-fly <code>.jhs</code> rendering from the document root, nothing else — no API, no panel, no borrowed assets.<br><br>
+              Create the tenant here, then open it and map host names to it: the host names are served by its tree from the next request on, no restart involved.<br><br>
+              Memberships granted on a tenant's page are its team list — ready for the per-tenant panels; today they open nothing by themselves.
+            </small>
+          </div>
+        </aside>
+      </div>
+    </form>
+  </section>
+</main>
+<?jhs include("partials/admin/foot") ?>

@@ -1,0 +1,241 @@
+<?jhs var titulo = tenant.name + " (tenants/" + tenant.key + ")"; ?>
+<?jhs include("partials/admin/head") ?>
+<?jhs include("partials/admin/sidebar") ?>
+<main class="main">
+<?jhs include("partials/admin/topbar") ?>
+  <section class="page">
+    <div class="breadcrumbs">Tenants / <?= tenant.name ?></div>
+    <div class="page-head">
+      <div>
+        <h1><?= tenant.name ?> <span class="table-sub">(<?= tenant.key ?>)</span></h1>
+<?jhs if (tenant.is_cms) { ?>
+        <p>The CMS organization: the public pages, the panel and the views tree live in its root.</p>
+<?jhs } else if (tenant.is_seeded) { ?>
+        <p>The main organization: the static site and the operator machinery live in its root.</p>
+<?jhs } else { ?>
+        <p>A tenant organization: a self-contained site served from its document root.</p>
+<?jhs } ?>
+      </div>
+      <div class="actions">
+        <a class="btn" href="/admin/tenants">All tenants</a>
+<?jhs if (!tenant.is_seeded) { ?>
+        <form method="post" action="/admin/tenants/<?= tenant.key ?>/delete">
+          <button class="btn danger" type="submit">Delete tenant</button>
+        </form>
+<?jhs } ?>
+      </div>
+    </div>
+
+<?jhs if (query.ok == "created") { ?>
+    <p class="notice notice-ok">Tenant created: map its first host name below.</p>
+<?jhs } ?>
+<?jhs if (query.ok == "saved") { ?>
+    <p class="notice notice-ok">Settings saved — the new document root is served from the next request on.</p>
+<?jhs } ?>
+<?jhs if (query.ok == "domain-added") { ?>
+    <p class="notice notice-ok">Host name mapped — it serves this tenant's tree from the next request on.</p>
+<?jhs } ?>
+<?jhs if (query.ok == "domain-removed") { ?>
+    <p class="notice notice-ok">Host name unmapped — it falls back to the main tree from the next request on.</p>
+<?jhs } ?>
+<?jhs if (query.ok == "member-added") { ?>
+    <p class="notice notice-ok">Membership saved.</p>
+<?jhs } ?>
+<?jhs if (query.ok == "member-removed") { ?>
+    <p class="notice notice-ok">Membership removed.</p>
+<?jhs } ?>
+<?jhs if (query.error == "seeded") { ?>
+    <p class="notice notice-error">This is a bootstrap organization: its name and document root follow wallermax.toml (the seed would restore them on the next boot). Edit them there.</p>
+<?jhs } ?>
+<?jhs if (query.error == "mirror") { ?>
+    <p class="notice notice-error">The CMS organization's memberships mirror the platform roles — manage them as accounts in the Users section, not here.</p>
+<?jhs } ?>
+<?jhs if (query.error == "domain-config") { ?>
+    <p class="notice notice-error">That host name follows the [cms] hosts list in wallermax.toml — remove it there; deleting it here would only hide it until the next boot.</p>
+<?jhs } ?>
+<?jhs if (query.error == "domain-missing") { ?>
+    <p class="notice notice-error">No such host name for this tenant.</p>
+<?jhs } ?>
+<?jhs if (query.error == "refresh") { ?>
+    <p class="notice notice-error">Saved, but the serving change could not be applied live — restart the server to serve it.</p>
+<?jhs } ?>
+<?jhs if (form_error) { ?>
+    <p class="notice notice-error"><?= form_error ?></p>
+<?jhs } ?>
+
+    <section class="card" aria-labelledby="dominios-titulo">
+      <div class="card-head"><h2 id="dominios-titulo">Host names (<?= domains.length ?>)</h2></div>
+<?jhs if (domains && domains.length) { ?>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th>Host name</th><th>Source</th><th></th></tr>
+          </thead>
+          <tbody>
+<?jhs domains.forEach(function (dominio) { ?>
+            <tr>
+              <td><span class="table-title"><?= dominio.hostname ?></span></td>
+              <td>
+<?jhs if (dominio.is_config) { ?>
+                <span class="status draft">wallermax.toml</span>
+<?jhs } else { ?>
+                <span class="status published">data</span>
+<?jhs } ?>
+              </td>
+              <td>
+<?jhs if (!dominio.is_config) { ?>
+                <div class="row-actions">
+                  <form method="post" action="/admin/tenants/<?= tenant.key ?>/domains/<?= dominio.hostname ?>/delete">
+                    <button class="btn danger" type="submit">Unmap</button>
+                  </form>
+                </div>
+<?jhs } ?>
+              </td>
+            </tr>
+<?jhs }); ?>
+          </tbody>
+        </table>
+      </div>
+<?jhs } else { ?>
+      <div class="empty">
+        <div class="empty-icon">&#9672;</div>
+        <h2>No host names</h2>
+        <p>Nothing is served for this tenant yet — map a name below.</p>
+      </div>
+<?jhs } ?>
+      <div class="card-body">
+        <form method="post" action="/admin/tenants/<?= tenant.key ?>/domains">
+          <div class="field">
+            <label for="hostname">Map a host name</label>
+            <input class="input" id="hostname" type="text" name="hostname" required
+                   maxlength="253" value="<?= domain_form.hostname ?>" autocomplete="off"
+                   placeholder="acme.example.com">
+            <small>A bare host name — it serves this tenant's tree from the next request on, no restart involved. One name maps to one organization; names taken by another tenant are refused with their owner.</small>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" type="submit">Map host name</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+<?jhs if (tenant.is_cms) { ?>
+    <section class="card" aria-labelledby="miembros-titulo">
+      <div class="card-head"><h2 id="miembros-titulo">Members</h2></div>
+      <div class="card-body">
+        <p class="table-sub">
+          The CMS organization's memberships mirror the platform roles: every <strong>administrator</strong> and
+          <strong>editor</strong> account is a member with that role, and every role change moves the membership —
+          on every boot, and on every save in the Users section. Manage them as accounts there; this page refuses
+          to fight the mirror.
+        </p>
+      </div>
+    </section>
+<?jhs } else { ?>
+    <section class="card" aria-labelledby="miembros-titulo">
+      <div class="card-head"><h2 id="miembros-titulo">Members (<?= members.length ?>)</h2></div>
+<?jhs if (members && members.length) { ?>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th>Account</th><th>Role</th><th>Since</th><th></th></tr>
+          </thead>
+          <tbody>
+<?jhs members.forEach(function (miembro) { ?>
+            <tr>
+              <td><span class="table-title"><?= miembro.username ?></span></td>
+              <td><span class="status <?= miembro.role == "admin" ? "scheduled" : "published" ?>"><?= miembro.role ?></span></td>
+              <td><span class="table-sub"><?= miembro.created_at_h ?></span></td>
+              <td>
+                <div class="row-actions">
+                  <form method="post" action="/admin/tenants/<?= tenant.key ?>/members/<?= miembro.user_id ?>/delete">
+                    <button class="btn danger" type="submit">Remove</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+<?jhs }); ?>
+          </tbody>
+        </table>
+      </div>
+<?jhs } else { ?>
+      <div class="empty">
+        <div class="empty-icon">&#9678;</div>
+        <h2>No members</h2>
+        <p>This tenant's team list is empty.</p>
+      </div>
+<?jhs } ?>
+      <div class="card-body">
+        <form method="post" action="/admin/tenants/<?= tenant.key ?>/members">
+          <div class="field">
+            <label for="usuario">Add or move a member</label>
+            <input class="input" id="usuario" type="text" name="username" required
+                   maxlength="32" value="<?= member_form.username ?>" autocomplete="off"
+                   placeholder="username">
+            <small>Re-adding an existing member with another role moves them.</small>
+          </div>
+          <div class="field">
+            <label for="rol">Role</label>
+            <select class="select" id="rol" name="role">
+              <option value="editor"<?= member_form.role == "admin" ? "" : " selected" ?>>Editor</option>
+              <option value="admin"<?= member_form.role == "admin" ? " selected" : "" ?>>Administrator</option>
+            </select>
+            <small>The tenant's team list, ready for the per-tenant panels — a membership opens nothing by itself today.</small>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" type="submit">Save membership</button>
+          </div>
+        </form>
+      </div>
+    </section>
+<?jhs } ?>
+
+    <section class="card" aria-labelledby="ajustes-titulo">
+      <div class="card-head"><h2 id="ajustes-titulo">Settings</h2></div>
+      <div class="card-body">
+<?jhs if (tenant.is_cms) { ?>
+        <div class="field">
+          <label>Name</label>
+          <input class="input" type="text" value="<?= tenant.name ?>" disabled>
+          <small>Follows wallermax.toml — the seed restores it on every boot.</small>
+        </div>
+        <div class="field">
+          <label>Document root</label>
+          <input class="input" type="text" value="<?= tenant.document_root ?>" disabled>
+          <small>The views tree's root: <code>[templates] views_dir</code>. The seed keeps them in step.</small>
+        </div>
+<?jhs } else if (tenant.is_seeded) { ?>
+        <div class="field">
+          <label>Name</label>
+          <input class="input" type="text" value="<?= tenant.name ?>" disabled>
+          <small>Follows wallermax.toml — the seed restores it on every boot.</small>
+        </div>
+        <div class="field">
+          <label>Document root</label>
+          <input class="input" type="text" value="<?= tenant.document_root ?>" disabled>
+          <small>The static tree's root: <code>[static] root_dir</code>. The seed keeps them in step.</small>
+        </div>
+<?jhs } else { ?>
+        <form method="post" action="/admin/tenants/<?= tenant.key ?>">
+          <div class="field">
+            <label for="nombre">Name</label>
+            <input class="input" id="nombre" type="text" name="name" required
+                   maxlength="200" value="<?= tenant.name ?>">
+            <small>Human-readable, for this panel only.</small>
+          </div>
+          <div class="field">
+            <label for="raiz">Document root</label>
+            <input class="input" id="raiz" type="text" name="document_root" required
+                   maxlength="500" value="<?= tenant.document_root ?>">
+            <small>The tenant's content tree — served from the next request on. Relative paths resolve against the working directory; a missing directory answers 404s until it appears.</small>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" type="submit">Save settings</button>
+          </div>
+        </form>
+<?jhs } ?>
+      </div>
+    </section>
+  </section>
+</main>
+<?jhs include("partials/admin/foot") ?>

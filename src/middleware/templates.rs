@@ -158,17 +158,17 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
     // F14/F17: while any hostname is mapped, this middleware
     // classifies the request with the same pure function the
     // dispatcher uses (crate::vhosts::classify), so both layers
-    // agree on every request. The bindings live in the state (F17):
-    // the `domains` table joined to the `organizations` rows on a
-    // database boot, the `[cms] hosts` bootstrap otherwise. The
-    // CMS-host behaviours (default page, views auto-routing) then
-    // run only there, and `.jhs` files render from the static root
-    // on the main host and from the organization's document root on
-    // a tenant host. While nothing is mapped — the default — every
+    // agree on every request. The bindings live in the state's live
+    // snapshot (F17 loaded it at boot; F18 made it reloadable — the
+    // Tenants pages swap it after their writes). The CMS-host
+    // behaviours (default page, views auto-routing) then run only
+    // there, and `.jhs` files render from the static root on the
+    // main host and from the organization's document root on a
+    // tenant host. While nothing is mapped — the default — every
     // check below runs for everyone, exactly as before F14.
     let bindings = state.host_bindings();
     let vhosts = !bindings.is_empty();
-    let class = crate::vhosts::classify(request.uri(), request.headers(), bindings);
+    let class = crate::vhosts::classify(request.uri(), request.headers(), &bindings);
     let on_cms_host = matches!(class, crate::vhosts::HostClass::Cms);
 
     // The `.jhs` rendering root for this request (F17): the tenant's
@@ -367,10 +367,11 @@ pub(crate) fn pinned_theme(headers: &HeaderMap) -> Option<&str> {
 /// for cross-host links, or the empty string while every surface
 /// shares one host. Public information by construction — the first
 /// mapped CMS host and the serving scheme — so no gating is needed;
-/// the value is precomputed at boot (F17) and the derivation and
-/// precedence live in [`crate::vhosts::cms_origin`].
+/// the value is derived at boot and re-derived on every snapshot
+/// refresh (F17/F18), the derivation and precedence living in
+/// [`crate::vhosts::cms_origin`].
 fn cms_origin_global(state: &AppState) -> Value {
-    Value::String(state.cms_origin().to_owned())
+    Value::String(state.cms_origin())
 }
 
 /// The `req` global (v0.9.0): an Express-shaped request object with a

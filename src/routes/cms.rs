@@ -1976,7 +1976,7 @@ async fn import_page(
     // F17: resolve strictly inside the main organization's document
     // root — the serving truth, which the seed keeps equal to
     // `[static] root_dir`.
-    let root = state.main_document_root().to_owned();
+    let root = state.main_document_root();
 
     let root_path = std::path::Path::new(&root)
         .canonicalize()
@@ -2086,7 +2086,7 @@ fn list_importable_files(state: &AppState) -> Vec<Value> {
 
     // F17: the main organization's document root is the serving
     // truth — the same tree the main host serves.
-    let root = std::path::Path::new(state.main_document_root()).to_path_buf();
+    let root = std::path::Path::new(&state.main_document_root()).to_path_buf();
     let mut files = Vec::new();
     collect_importable(&root, &root, 0, &mut files);
     files

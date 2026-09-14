@@ -2480,6 +2480,494 @@ impl MediaRepository for SqliteMediaRepository {
     }
 }
 
+// ─── Organizations, domains and memberships (F18) ────────────────────
+
+/// One `organizations` row (F15): a tenant. `key` is the stable
+/// identifier the code and the panel address organizations by;
+/// `name` and `document_root` are the display/serving data.
+#[derive(Debug, Clone)]
+pub struct OrganizationRecord {
+    pub id: i64,
+    /// The stable key: `main`/`cms` for the bootstrap organizations
+    /// (the seeders' own — their data follows `wallermax.toml`), any
+    /// unique slug the panel accepted for a tenant.
+    pub key: String,
+    /// Human-readable name.
+    pub name: String,
+    /// The tenant's content root — the serving truth (F17).
+    pub document_root: String,
+    /// Creation time, unix seconds.
+    pub created_at: i64,
+}
+
+/// An `organizations` row with its listing badges (F18): how many
+/// host names map to the tenant and how many members it has — the
+/// counts the Tenants page shows, computed in one query.
+#[derive(Debug, Clone)]
+pub struct OrganizationListing {
+    /// The row itself.
+    pub record: OrganizationRecord,
+    /// Rows in `domains` pointing at the organization.
+    pub domain_count: i64,
+    /// Rows in `memberships` pointing at the organization.
+    pub member_count: i64,
+}
+
+/// One `domains` row (F16): a mapped host name. `source` carries the
+/// provenance the seeder rules live by — `config` rows follow the
+/// `[cms] hosts` list, `manual` rows are data.
+#[derive(Debug, Clone)]
+pub struct DomainRecord {
+    pub id: i64,
+    /// The host name in the table's canonical shape.
+    pub hostname: String,
+    /// `'config'` or `'manual'`.
+    pub source: String,
+}
+
+/// One `memberships` row joined to its account (F18): the tenant's
+/// member list the panel shows. User deletion removes memberships
+/// explicitly (the F15 repository contract), so the join never
+/// orphans.
+#[derive(Debug, Clone)]
+pub struct MemberRecord {
+    pub user_id: i64,
+    pub username: String,
+    /// `admin` or `editor` — the membership vocabulary; a plain
+    /// `user` has no membership row at all.
+    pub role: UserRole,
+    /// When the membership was granted, unix seconds.
+    pub created_at: i64,
+}
+
+/// What [`OrganizationRepository::remove_domain`] decided, so the
+/// panel can answer each outcome with its own explanation instead of
+/// a bare yes/no (F18).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DomainRemoval {
+    /// The row was deleted.
+    Removed,
+    /// The row is the seeder's own (`source = 'config'`): it follows
+    /// the `[cms] hosts` list and would come back on the next boot —
+    /// the configuration is where it must be removed.
+    ConfigProtected,
+    /// No such row for this organization.
+    Missing,
+}
+
+/// Storage abstraction for the tenant model F15–F17 built: the
+/// `organizations`, `domains` and `memberships` rows as the panel's
+/// forms see them (F18).
+///
+/// The bootstrap organizations (`main`, `cms`) are the seeders' own —
+/// the repository does not treat them specially (the routes enforce
+/// what the seed would heal), but their rows are listed and detailed
+/// like any tenant's, because their host names and members are as
+/// much a part of the picture.
+#[async_trait]
+pub trait OrganizationRepository: Send + Sync + 'static {
+    /// Every organization in insertion order (the boot's order), with
+    /// its domain and member counts.
+    async fn list(&self) -> Result<Vec<OrganizationListing>, RepositoryError>;
+
+    /// Looks up an organization by its stable key.
+    async fn find(&self, key: &str) -> Result<Option<OrganizationRecord>, RepositoryError>;
+
+    /// Inserts an organization. Fails with
+    /// [`RepositoryError::Duplicate`] when the key is taken.
+    async fn create(
+        &self,
+        key: &str,
+        name: &str,
+        document_root: &str,
+    ) -> Result<OrganizationRecord, RepositoryError>;
+
+    /// Replaces the display data (`name`, `document_root`) of the
+    /// organization keyed `key` — the key itself is immutable. Returns
+    /// `false` when no such organization exists.
+    async fn update(
+        &self,
+        key: &str,
+        name: &str,
+        document_root: &str,
+    ) -> Result<bool, RepositoryError>;
+
+    /// Deletes the organization keyed `key` **and its rows**: its
+    /// `domains` and its `memberships` go first, explicitly, matching
+    /// the schema's no-foreign-key style (the users and menus deletes
+    /// work the same way). Returns `false` when no such organization
+    /// exists.
+    async fn delete(&self, key: &str) -> Result<bool, RepositoryError>;
+
+    /// The organization's host names, in insertion order (the order
+    /// the `cms_origin` derivation treats as canonical).
+    async fn domains(&self, organization_id: i64) -> Result<Vec<DomainRecord>, RepositoryError>;
+
+    /// Maps `hostname` to the organization as data (`source =
+    /// 'manual'`, the table's default). Fails with
+    /// [`RepositoryError::Duplicate`] when the host name is already
+    /// mapped — to this or any other organization (host names are
+    /// `UNIQUE`).
+    async fn add_domain(&self, organization_id: i64, hostname: &str)
+        -> Result<(), RepositoryError>;
+
+    /// Deletes the `manual` row mapping `hostname` to the
+    /// organization. See [`DomainRemoval`] for the outcomes.
+    async fn remove_domain(
+        &self,
+        organization_id: i64,
+        hostname: &str,
+    ) -> Result<DomainRemoval, RepositoryError>;
+
+    /// Which organization's stable key owns `hostname`, if any (the
+    /// duplicate-host error message).
+    async fn find_domain_owner(&self, hostname: &str) -> Result<Option<String>, RepositoryError>;
+
+    /// The organization's members with their account names, ordered
+    /// by username.
+    async fn members(&self, organization_id: i64) -> Result<Vec<MemberRecord>, RepositoryError>;
+
+    /// Grants `role` to `user_id` in the organization, or changes it
+    /// when a membership already exists (the panel's add form is an
+    /// upsert: re-adding a member with another role moves them).
+    async fn upsert_member(
+        &self,
+        organization_id: i64,
+        user_id: i64,
+        role: UserRole,
+    ) -> Result<(), RepositoryError>;
+
+    /// Removes `user_id`'s membership of the organization. Returns
+    /// `false` when there was none.
+    async fn remove_member(
+        &self,
+        organization_id: i64,
+        user_id: i64,
+    ) -> Result<bool, RepositoryError>;
+
+    /// The boot-resolution inputs (F17): every organization's document
+    /// root keyed by its stable key, and every mapped host name with
+    /// the organization it routes to. What [`AppState`] reloads its
+    /// vhost snapshot from after a panel write (F18) — the same reads
+    /// the boot itself performs.
+    async fn vhost_inputs(
+        &self,
+    ) -> Result<(Vec<(String, String)>, Vec<HostBinding>), RepositoryError>;
+}
+
+/// SQLite-backed [`OrganizationRepository`] over a shared pool.
+#[derive(Clone)]
+pub struct SqliteOrganizationRepository {
+    pool: SqlitePool,
+}
+
+impl SqliteOrganizationRepository {
+    /// Wraps an already-migrated pool into a repository.
+    pub fn new(pool: SqlitePool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl OrganizationRepository for SqliteOrganizationRepository {
+    async fn list(&self) -> Result<Vec<OrganizationListing>, RepositoryError> {
+        sqlx::query(
+            "SELECT o.id, o.key, o.name, o.document_root, o.created_at, \
+             (SELECT COUNT(*) FROM domains WHERE organization_id = o.id) AS domain_count, \
+             (SELECT COUNT(*) FROM memberships WHERE organization_id = o.id) AS member_count \
+             FROM organizations o ORDER BY o.id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| {
+                    let domain_count = row
+                        .try_get::<i64, _>("domain_count")
+                        .expect("domain_count is always present");
+                    let member_count = row
+                        .try_get::<i64, _>("member_count")
+                        .expect("member_count is always present");
+                    OrganizationListing {
+                        record: organization_of_row(&row),
+                        domain_count,
+                        member_count,
+                    }
+                })
+                .collect()
+        })
+        .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn find(&self, key: &str) -> Result<Option<OrganizationRecord>, RepositoryError> {
+        sqlx::query(
+            "SELECT id, key, name, document_root, created_at \
+             FROM organizations WHERE key = ?1",
+        )
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map(|row| row.map(|row| organization_of_row(&row)))
+        .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn create(
+        &self,
+        key: &str,
+        name: &str,
+        document_root: &str,
+    ) -> Result<OrganizationRecord, RepositoryError> {
+        let created_at = unix_now();
+        sqlx::query(
+            "INSERT INTO organizations (key, name, document_root, created_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(key)
+        .bind(name)
+        .bind(document_root)
+        .bind(created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)?;
+        self.find(key)
+            .await
+            .map(|record| record.expect("the row just inserted is visible to the same pool"))
+    }
+
+    async fn update(
+        &self,
+        key: &str,
+        name: &str,
+        document_root: &str,
+    ) -> Result<bool, RepositoryError> {
+        let updated =
+            sqlx::query("UPDATE organizations SET name = ?2, document_root = ?3 WHERE key = ?1")
+                .bind(key)
+                .bind(name)
+                .bind(document_root)
+                .execute(&self.pool)
+                .await
+                .map_err(RepositoryError::from_sqlx)?;
+        Ok(updated.rows_affected() > 0)
+    }
+
+    async fn delete(&self, key: &str) -> Result<bool, RepositoryError> {
+        // The rows that point at the organization go first, explicitly
+        // — the schema's no-foreign-key style (a users delete works
+        // the same way). One statement per table keeps each failure
+        // addressable; the organization row itself is the last to go.
+        let id: Option<i64> = sqlx::query_scalar("SELECT id FROM organizations WHERE key = ?1")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(RepositoryError::from_sqlx)?;
+        let Some(id) = id else {
+            return Ok(false);
+        };
+        for statement in [
+            "DELETE FROM domains WHERE organization_id = ?1",
+            "DELETE FROM memberships WHERE organization_id = ?1",
+            "DELETE FROM organizations WHERE id = ?1",
+        ] {
+            sqlx::query(statement)
+                .bind(id)
+                .execute(&self.pool)
+                .await
+                .map_err(RepositoryError::from_sqlx)?;
+        }
+        Ok(true)
+    }
+
+    async fn domains(&self, organization_id: i64) -> Result<Vec<DomainRecord>, RepositoryError> {
+        sqlx::query_as::<_, (i64, String, String)>(
+            "SELECT id, hostname, source FROM domains \
+             WHERE organization_id = ?1 ORDER BY id",
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|(id, hostname, source)| DomainRecord {
+                    id,
+                    hostname,
+                    source,
+                })
+                .collect()
+        })
+        .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn add_domain(
+        &self,
+        organization_id: i64,
+        hostname: &str,
+    ) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "INSERT INTO domains (hostname, organization_id, source, created_at) \
+             VALUES (?1, ?2, 'manual', ?3)",
+        )
+        .bind(hostname)
+        .bind(organization_id)
+        .bind(unix_now())
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn remove_domain(
+        &self,
+        organization_id: i64,
+        hostname: &str,
+    ) -> Result<DomainRemoval, RepositoryError> {
+        // Only a manual row goes: the seeder's own (`source =
+        // 'config'`) follows the `[cms] hosts` list and would be
+        // re-seeded on the next boot, so deleting it from the panel
+        // would only hide it until the restart — the configuration
+        // is where it must be removed.
+        let removed = sqlx::query(
+            "DELETE FROM domains \
+             WHERE organization_id = ?1 AND hostname = ?2 AND source = 'manual'",
+        )
+        .bind(organization_id)
+        .bind(hostname)
+        .execute(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)?;
+        if removed.rows_affected() > 0 {
+            return Ok(DomainRemoval::Removed);
+        }
+        let protected: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM domains WHERE organization_id = ?1 AND hostname = ?2",
+        )
+        .bind(organization_id)
+        .bind(hostname)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)?;
+        Ok(if protected.is_some() {
+            DomainRemoval::ConfigProtected
+        } else {
+            DomainRemoval::Missing
+        })
+    }
+
+    async fn find_domain_owner(&self, hostname: &str) -> Result<Option<String>, RepositoryError> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT organizations.key FROM domains \
+             JOIN organizations ON organizations.id = domains.organization_id \
+             WHERE domains.hostname = ?1",
+        )
+        .bind(hostname)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn members(&self, organization_id: i64) -> Result<Vec<MemberRecord>, RepositoryError> {
+        sqlx::query_as::<_, (i64, String, String, i64)>(
+            "SELECT memberships.user_id, users.username, memberships.role, \
+             memberships.created_at \
+             FROM memberships JOIN users ON users.id = memberships.user_id \
+             WHERE memberships.organization_id = ?1 ORDER BY users.username",
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .filter_map(|(user_id, username, role, created_at)| {
+                    // Fail closed, the rule the guards apply: an
+                    // unparseable role is not a membership (the CHECK
+                    // constraint makes the branch unreachable — this
+                    // only guards a corrupted file).
+                    Some(MemberRecord {
+                        user_id,
+                        username,
+                        role: UserRole::parse(&role)?,
+                        created_at,
+                    })
+                })
+                .collect()
+        })
+        .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn upsert_member(
+        &self,
+        organization_id: i64,
+        user_id: i64,
+        role: UserRole,
+    ) -> Result<(), RepositoryError> {
+        // The explicit WHERE keeps SQLite's parser reading the ON
+        // CONFLICT as the upsert clause, not a stray join constraint
+        // (the seeder statements work the same way).
+        sqlx::query(
+            "INSERT INTO memberships (user_id, organization_id, role, created_at) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (user_id, organization_id) DO UPDATE SET role = excluded.role",
+        )
+        .bind(user_id)
+        .bind(organization_id)
+        .bind(role.as_str())
+        .bind(unix_now())
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn remove_member(
+        &self,
+        organization_id: i64,
+        user_id: i64,
+    ) -> Result<bool, RepositoryError> {
+        let removed =
+            sqlx::query("DELETE FROM memberships WHERE organization_id = ?1 AND user_id = ?2")
+                .bind(organization_id)
+                .bind(user_id)
+                .execute(&self.pool)
+                .await
+                .map_err(RepositoryError::from_sqlx)?;
+        Ok(removed.rows_affected() > 0)
+    }
+
+    async fn vhost_inputs(
+        &self,
+    ) -> Result<(Vec<(String, String)>, Vec<HostBinding>), RepositoryError> {
+        let roots = load_document_roots(&self.pool)
+            .await
+            .map_err(RepositoryError::Internal)?;
+        let bindings = load_host_bindings(&self.pool)
+            .await
+            .map_err(RepositoryError::Internal)?;
+        Ok((roots, bindings))
+    }
+}
+
+/// Builds an [`OrganizationRecord`] from a selected row (the shared
+/// shape of `list` and `find`).
+fn organization_of_row(row: &SqliteRow) -> OrganizationRecord {
+    OrganizationRecord {
+        id: row
+            .try_get("id")
+            .expect("organizations.id is always present"),
+        key: row
+            .try_get("key")
+            .expect("organizations.key is always present"),
+        name: row
+            .try_get("name")
+            .expect("organizations.name is always present"),
+        document_root: row
+            .try_get("document_root")
+            .expect("organizations.document_root is always present"),
+        created_at: row
+            .try_get("created_at")
+            .expect("organizations.created_at is always present"),
+    }
+}
+
 /// Opens a SQLite pool with the project's recommended settings.
 ///
 /// # Errors
@@ -2615,7 +3103,7 @@ fn unix_now() -> i64 {
 /// without the DNS trailing dot — the same shape the [`CmsConfig`]
 /// normalization produces for `[cms] hosts` (F14), so rows and the
 /// configuration list compare equal no matter who wrote them.
-fn normalize_hostname(raw: &str) -> String {
+pub(crate) fn normalize_hostname(raw: &str) -> String {
     let raw = raw.trim();
     let raw = raw.strip_suffix('.').unwrap_or(raw);
     raw.to_ascii_lowercase()
@@ -3230,6 +3718,190 @@ mod tests {
                 (String::from("third"), String::from("sites/third")),
             ],
             "every organization's root, ordered by key"
+        );
+    }
+
+    /// The organization repository under test (F18), on a migrated
+    /// temporary database.
+    async fn organizations(db: &TempDb) -> SqliteOrganizationRepository {
+        let repo = repository(db).await;
+        SqliteOrganizationRepository::new(repo.pool.clone())
+    }
+
+    #[tokio::test]
+    async fn tenants_crud_with_explicit_cascade() {
+        let db = TempDb::new();
+        let repo = organizations(&db).await;
+        seed_organizations(&repo.pool, "sites/main", "sites/cms")
+            .await
+            .expect("organizations seed");
+
+        let created = repo
+            .create("acme", "Acme Corp", "sites/acme")
+            .await
+            .expect("tenant created");
+        assert_eq!(created.key, "acme");
+        assert_eq!(created.name, "Acme Corp");
+
+        // Duplicate keys are refused by the uniqueness constraint.
+        assert!(matches!(
+            repo.create("acme", "Again", "sites/again").await,
+            Err(RepositoryError::Duplicate)
+        ));
+
+        // The listing counts what points at each row.
+        repo.add_domain(created.id, "acme.example.com")
+            .await
+            .expect("domain mapped");
+        let user_repo = repository(&db).await;
+        let user = seed(&user_repo, "penelope").await;
+        repo.upsert_member(created.id, user.id, UserRole::Editor)
+            .await
+            .expect("member granted");
+        let listings = repo.list().await.expect("listing");
+        let acme = listings
+            .iter()
+            .find(|listing| listing.record.key == "acme")
+            .expect("the tenant is listed");
+        assert_eq!(acme.domain_count, 1);
+        assert_eq!(acme.member_count, 1);
+
+        // The update replaces the display data; the key is the
+        // addressing.
+        assert!(repo
+            .update("acme", "Acme Incorporated", "sites/acme-v2")
+            .await
+            .expect("tenant updated"));
+        let found = repo.find("acme").await.expect("lookup");
+        assert_eq!(found.expect("still there").document_root, "sites/acme-v2");
+
+        // The delete removes the rows that point at the organization
+        // first — explicitly, the schema's no-foreign-key style.
+        assert!(repo.delete("acme").await.expect("tenant deleted"));
+        let orphans: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM domains WHERE organization_id = ?1")
+                .bind(created.id)
+                .fetch_one(&repo.pool)
+                .await
+                .expect("domains counted");
+        assert_eq!(orphans, 0, "the tenant's host names went with it");
+        let orphans: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM memberships WHERE organization_id = ?1")
+                .bind(created.id)
+                .fetch_one(&repo.pool)
+                .await
+                .expect("memberships counted");
+        assert_eq!(orphans, 0, "the tenant's memberships went with it");
+        assert!(repo.find("acme").await.expect("lookup").is_none());
+        assert!(
+            !repo.delete("acme").await.expect("second delete"),
+            "gone is gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn domain_removal_honours_the_provenance() {
+        let db = TempDb::new();
+        let repo = organizations(&db).await;
+        seed_organizations(&repo.pool, "sites/main", "sites/cms")
+            .await
+            .expect("organizations seed");
+        seed_domains(&repo.pool, &["cms.example.com".to_owned()])
+            .await
+            .expect("domains seed");
+
+        let cms = repo.find("cms").await.expect("lookup").expect("seeded");
+        let acme = repo
+            .create("acme", "Acme Corp", "sites/acme")
+            .await
+            .expect("tenant created");
+
+        // The seeder's own row is protected: it follows [cms] hosts.
+        assert_eq!(
+            repo.remove_domain(cms.id, "cms.example.com")
+                .await
+                .expect("removal"),
+            DomainRemoval::ConfigProtected
+        );
+        // Unknown rows are simply missing.
+        assert_eq!(
+            repo.remove_domain(cms.id, "no-such.host")
+                .await
+                .expect("removal"),
+            DomainRemoval::Missing
+        );
+
+        // A manual row goes, whoever it points at.
+        repo.add_domain(acme.id, "acme.example.com")
+            .await
+            .expect("domain mapped");
+        assert_eq!(
+            repo.remove_domain(acme.id, "acme.example.com")
+                .await
+                .expect("removal"),
+            DomainRemoval::Removed
+        );
+
+        // A host name maps to exactly one organization, and the
+        // duplicate names the owner.
+        repo.add_domain(acme.id, "shared.example.com")
+            .await
+            .expect("domain mapped");
+        assert!(matches!(
+            repo.add_domain(cms.id, "shared.example.com").await,
+            Err(RepositoryError::Duplicate)
+        ));
+        assert_eq!(
+            repo.find_domain_owner("shared.example.com")
+                .await
+                .expect("owner lookup"),
+            Some(String::from("acme"))
+        );
+    }
+
+    #[tokio::test]
+    async fn memberships_upsert_and_remove() {
+        let db = TempDb::new();
+        let repo = organizations(&db).await;
+        seed_organizations(&repo.pool, "sites/main", "sites/cms")
+            .await
+            .expect("organizations seed");
+        let acme = repo
+            .create("acme", "Acme Corp", "sites/acme")
+            .await
+            .expect("tenant created");
+
+        let user_repo = repository(&db).await;
+        let user = seed(&user_repo, "penelope").await;
+
+        repo.upsert_member(acme.id, user.id, UserRole::Editor)
+            .await
+            .expect("member granted");
+        let members = repo.members(acme.id).await.expect("member list");
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].username, "penelope");
+        assert_eq!(members[0].role, UserRole::Editor);
+
+        // The add form is an upsert: re-granting with another role
+        // moves the member, it does not duplicate them.
+        repo.upsert_member(acme.id, user.id, UserRole::Admin)
+            .await
+            .expect("member moved");
+        let members = repo.members(acme.id).await.expect("member list");
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].role, UserRole::Admin);
+
+        assert!(repo
+            .remove_member(acme.id, user.id)
+            .await
+            .expect("member removed"));
+        assert!(repo.members(acme.id).await.expect("member list").is_empty());
+        assert!(
+            !repo
+                .remove_member(acme.id, user.id)
+                .await
+                .expect("second removal"),
+            "gone is gone"
         );
     }
 

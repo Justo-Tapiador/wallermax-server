@@ -77,6 +77,11 @@ pub struct CmsContext {
     /// Media library metadata behind the [`MediaRepository`]
     /// abstraction (F9).
     pub media: Arc<dyn MediaRepository>,
+    /// The tenant model behind the [`OrganizationRepository`]
+    /// abstraction (F18): the organizations, domains and memberships
+    /// the Tenants pages manage — and the reads the live vhost
+    /// snapshot refreshes from.
+    pub organizations: Arc<dyn crate::db::OrganizationRepository>,
     /// Absolute, startup-frozen directory the media files live in
     /// (F9). Resolved from `[cms] media_dir` exactly like `views_dir`
     /// and created at startup, so request handling only ever *joins*
@@ -279,12 +284,12 @@ pub(crate) fn absolutize(path: &str) -> std::path::PathBuf {
 pub(crate) struct VhostData {
     /// The `main` organization's document root: the static tree's
     /// serving truth.
-    main_root: String,
+    pub(crate) main_root: String,
     /// The `cms` organization's document root: the views tree's
     /// serving truth (the template engine's views directory).
-    cms_root: String,
+    pub(crate) cms_root: String,
     /// Every mapped hostname, in insertion order.
-    bindings: Vec<HostBinding>,
+    pub(crate) bindings: Vec<HostBinding>,
 }
 
 impl VhostData {
@@ -349,6 +354,74 @@ impl VhostData {
             bindings,
         }
     }
+
+    /// The mapped hostnames, in insertion order (the order the
+    /// `cms_origin` derivation treats as canonical).
+    pub(crate) fn bindings(&self) -> &[HostBinding] {
+        &self.bindings
+    }
+
+    /// The `cms_origin` template global this resolution derives
+    /// (F17): `cms.site_url` when set, else an origin from the first
+    /// mapped CMS host, else the empty string.
+    pub(crate) fn cms_origin(&self, config: &AppConfig) -> String {
+        let cms_hosts: Vec<&str> = self
+            .bindings
+            .iter()
+            .filter(|binding| binding.organization == CMS_ORGANIZATION_KEY)
+            .map(|binding| binding.hostname.as_str())
+            .collect();
+        crate::vhosts::cms_origin(
+            config.cms.site_url.as_deref(),
+            &cms_hosts,
+            config.tls.enabled,
+            config.server.port,
+        )
+    }
+}
+
+/// The live virtual-host snapshot (F18): everything the request path
+/// needs to classify and serve a host — the resolution data of
+/// [`VhostData`] plus one ready router per tenant organization —
+/// swapped **wholesale** behind a single write lock so a refresh is
+/// atomic: a reader either sees the old table and the old trees, or
+/// the new table and the new trees, never a mixture.
+///
+/// The boot installs the initial snapshot (trees included, by
+/// [`crate::routes::vhost_routes`]); the Tenants pages re-derive a
+/// whole snapshot from the database after every write and swap it
+/// in, which is what makes a host move — or a tenant's whole site —
+/// take effect without a restart.
+#[derive(Clone)]
+pub(crate) struct VhostSnapshot {
+    /// The `main` organization's document root (see
+    /// [`AppState::main_document_root`]).
+    pub(crate) main_root: String,
+    /// The `cms_origin` template global (see
+    /// [`AppState::cms_origin`]).
+    pub(crate) cms_origin: String,
+    /// Every mapped hostname with its organization and that
+    /// organization's document root (absolute).
+    pub(crate) bindings: Vec<HostBinding>,
+    /// One self-contained serving tree per tenant organization (the
+    /// bootstrap two excluded — the main and CMS trees are mounted
+    /// once at boot, their roots being the configuration's).
+    pub(crate) tenants: Vec<(String, axum::Router)>,
+}
+
+impl VhostSnapshot {
+    /// The snapshot a fresh state starts from: the boot resolution,
+    /// no tenant trees yet ([`crate::routes::vhost_routes`] installs
+    /// them right after — a state without them simply serves every
+    /// host from the main tree, the single-host shape).
+    fn from_data(data: VhostData, cms_origin: String) -> Self {
+        Self {
+            main_root: data.main_root,
+            cms_origin,
+            bindings: data.bindings,
+            tenants: Vec::new(),
+        }
+    }
 }
 
 /// Cheap-to-clone shared application state (internally an `Arc`).
@@ -372,21 +445,12 @@ struct StateInner {
     metrics: Option<Metrics>,
     templates: Option<TemplateEngine>,
     cms: Option<CmsContext>,
-    /// The `main` organization's document root (F17): the static
-    /// tree's serving truth. The organization's row on a database
-    /// boot (kept in step with `[static] root_dir` by the startup
-    /// seed), the configuration value otherwise. See
-    /// [`AppState::main_document_root`].
-    main_root: String,
-    /// The boot-time host resolution table (F17): every mapped
-    /// hostname with its organization and that organization's
-    /// document root. See [`AppState::host_bindings`].
-    bindings: Vec<HostBinding>,
-    /// The `cms_origin` template global, precomputed (F17):
-    /// `cms.site_url` when set, else an origin derived from the
-    /// first mapped CMS host, else empty. See
-    /// [`AppState::cms_origin`].
-    cms_origin: String,
+    /// The live virtual-host snapshot (the data since F17, reloadable
+    /// since F18): the host resolution table, the derived origins and
+    /// one serving tree per tenant organization — everything behind
+    /// one lock so a panel refresh swaps it atomically. See
+    /// [`AppState::vhost_snapshot`].
+    vhosts: std::sync::RwLock<VhostSnapshot>,
 }
 
 impl AppState {
@@ -503,20 +567,9 @@ impl AppState {
         // The `cms_origin` global (F17): `cms.site_url` when set, else
         // an origin derived from the first mapped CMS host — the
         // domains table's insertion order on a database boot, the
-        // `[cms] hosts` list otherwise. All inputs are startup
-        // decisions, so the value is precomputed here.
-        let cms_hosts: Vec<&str> = vhosts
-            .bindings
-            .iter()
-            .filter(|binding| binding.organization == CMS_ORGANIZATION_KEY)
-            .map(|binding| binding.hostname.as_str())
-            .collect();
-        let cms_origin = crate::vhosts::cms_origin(
-            config.cms.site_url.as_deref(),
-            &cms_hosts,
-            config.tls.enabled,
-            config.server.port,
-        );
+        // `[cms] hosts` list otherwise. F18 recomputes it with the
+        // same derivation on every snapshot refresh.
+        let cms_origin = vhosts.cms_origin(&config);
 
         Self {
             inner: Arc::new(StateInner {
@@ -532,9 +585,7 @@ impl AppState {
                 metrics,
                 templates,
                 cms,
-                main_root: vhosts.main_root,
-                bindings: vhosts.bindings,
-                cms_origin,
+                vhosts: std::sync::RwLock::new(VhostSnapshot::from_data(vhosts, cms_origin)),
             }),
         }
     }
@@ -583,11 +634,11 @@ impl AppState {
     /// database boot (kept in step with `[static] root_dir` by the
     /// startup seed), the configuration value otherwise. Absolute,
     /// resolved at boot.
-    pub fn main_document_root(&self) -> &str {
-        &self.inner.main_root
+    pub fn main_document_root(&self) -> String {
+        self.vhost_snapshot().main_root
     }
 
-    /// The boot-time host resolution table (F17): every mapped
+    /// The host resolution table (F17, live since F18): every mapped
     /// hostname with its organization and that organization's
     /// document root — the `domains` table joined to the
     /// `organizations` rows on a database boot (seeded from
@@ -595,19 +646,59 @@ impl AppState {
     /// database is attached. The dispatcher and the templates
     /// middleware both classify requests against this table — never
     /// the configuration — so the two layers agree on every request
-    /// by construction.
-    pub fn host_bindings(&self) -> &[HostBinding] {
-        &self.inner.bindings
+    /// by construction. A panel write swaps the whole snapshot (see
+    /// [`Self::replace_vhosts`]), so what this returns is always the
+    /// table the next request will be classified with.
+    pub fn host_bindings(&self) -> Vec<HostBinding> {
+        self.vhost_snapshot().bindings
     }
 
     /// The `cms_origin` template global (F14 follow-up, data-driven
     /// since F17): `cms.site_url` when set, else an origin derived
     /// from the first mapped CMS host (the domains table's insertion
     /// order on a database boot), else the empty string — the
-    /// single-host server needs no cross-host links. Precomputed at
-    /// boot because every input is a startup decision.
-    pub fn cms_origin(&self) -> &str {
-        &self.inner.cms_origin
+    /// single-host server needs no cross-host links. Derived at boot
+    /// and re-derived on every snapshot refresh (F18).
+    pub fn cms_origin(&self) -> String {
+        self.vhost_snapshot().cms_origin
+    }
+
+    /// A clone of the live virtual-host snapshot (F18): the host
+    /// resolution table, the derived origins, and one ready serving
+    /// tree per tenant organization. What the dispatcher and the
+    /// templates middleware classify and route every request with.
+    ///
+    /// The clone is cheap by construction — the bindings are a
+    /// handful of small rows and a router is a shared handle — the
+    /// same trade the F16 dispatcher already made with its captured
+    /// host list.
+    pub(crate) fn vhost_snapshot(&self) -> VhostSnapshot {
+        // Poison-tolerant: a panic mid-swap leaves a structurally
+        // complete snapshot behind (the write is a plain assignment),
+        // and refusing to serve the whole server over a lock flag
+        // would be the worse failure.
+        self.inner
+            .vhosts
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Swaps the live virtual-host snapshot wholesale (F18): the one
+    /// write path, so the table and the tenant trees it routes to
+    /// always change together — atomic for every reader.
+    ///
+    /// The boot installs the initial snapshot's trees this way (via
+    /// [`crate::routes::vhost_routes`]); the Tenants pages call it
+    /// after their writes, with a snapshot re-derived from the
+    /// database (see [`crate::routes::refresh_vhost_state`]).
+    pub(crate) fn replace_vhosts(&self, replacement: VhostSnapshot) {
+        // Poison-tolerant, same reasoning as the read side.
+        *self
+            .inner
+            .vhosts
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = replacement;
     }
 
     /// Whether the authentication and admin routes are mounted.
