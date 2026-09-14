@@ -682,7 +682,8 @@ included — fail safe) serves what an operator runs: the static site
 under `[static] root_dir`, the `.jhs` files living there rendered on
 the fly, and the machinery — `/api`, `/api/auth/*`,
 `/api/admin/users`, `/health`, `/metrics`, the external proxy. Its
-homepage is its own `public/index.html`.
+homepage is its own chain: a `public/index.jhs` rendered when one
+exists, else the static `public/index_file`.
 
 The **CMS host** serves the visitor surface: the public pages, the
 `views/` auto-routing, the panel, the media library, search, feeds
@@ -696,6 +697,34 @@ things from the static root: `/assets/*` (the shared stylesheets),
 `style-src 'self'`, and nothing else: `public/`'s content never
 duplicates onto the CMS host, and `.jhs` sources never render or
 serve there (their raw bytes are never served anywhere either).
+
+### The homepage chain, host by host
+
+Both hosts resolve `/` through an explicit chain, and the main
+host's can be dynamic: drop an `index.jhs` beside the static
+`index.html` and it takes the homepage, rendered through the
+sandboxed engine with the usual globals (`user`, `path`, `query`,
+`pages`, `menus`, `req` — the main site can list the CMS's published
+pages too). The order, most specific first:
+
+- **main host**: `public/index.jhs` (rendered) → `public/index_file`
+  (static, `index.html` by default) → JSON 404;
+- **CMS host**: `cms.default_page` (the `/p/{slug}` pipeline) →
+  `views/index.jhs` (auto-route) → JSON 404;
+- **single host** (empty `hosts`): `cms.default_page` →
+  `public/index.jhs` → `public/index_file` → `views/index.jhs` →
+  JSON 404 — the explicit configuration beats every filesystem
+  convention, and the static root beats the views root.
+
+The same `index.jhs`-first rule covers every **directory** on the
+main host: `/docs/` renders `public/docs/index.jhs` when present,
+else serves `public/docs/index.html` — and `/docs` (no trailing
+slash) reaches the same place through the static layer's own
+add-the-slash redirect. Rendered indexes answer `no-store` with the
+full middleware pipeline around them (security headers, the F13
+error page on failure); the source bytes are never served, exactly
+like every other `.jhs` under the static root. No new keys: the
+chain is a convention, like the `.jhs` extension itself.
 
 ### The mechanics, deliberately boring
 
@@ -872,7 +901,8 @@ the same discipline as the phases before it:
   a main host (the static site plus the API machinery) and a CMS
   host (public pages, panel, media, feeds, search, the auth forms
   and the shared assets) by the `Host` header — one IP, one port —
-  this document.
+  with the follow-up homepage chain: `index.jhs` renders before the
+  static index, `/` and every directory alike — this document.
 
 Each phase ships as one patch with tests and this document updated;
 nothing lands half-featured.

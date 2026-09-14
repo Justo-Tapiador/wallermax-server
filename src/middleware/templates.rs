@@ -21,21 +21,32 @@
 //!    `GET /p/{slug}` pipeline (sandboxed body render,
 //!    `views/cms_page.jhs` wrapper, draft gating) and **before** the
 //!    normal pipeline below, so the explicit configuration beats the
-//!    static index file, the views auto-routing and the JSON 404.
+//!    public `index.jhs`, the static index file, the views
+//!    auto-routing and the JSON 404.
 //!    Rendering directly (no redirect) keeps `/` the canonical URL. A
 //!    slug that no longer exists logs a warning and falls back to the
 //!    normal chain; a draft default page follows the `/p/{slug}`
 //!    gating (404 for the public, banner for editors).
-//! 5. Everything else runs the normal pipeline (API routes first, then
+//! 5. Directory requests on the **main host** (the single host
+//!    included) render the directory's `index.jhs` when one exists:
+//!    `GET /` renders `root/index.jhs`, `GET /docs/` renders
+//!    `root/docs/index.jhs` — before the static index answer, after
+//!    the `default_page` check (the explicit configuration still
+//!    wins). The chain per directory: `index.jhs` rendered, then
+//!    `index_file`/`index.html` served statically, then the normal
+//!    404 handling below.
+//! 6. Everything else runs the normal pipeline (API routes first, then
 //!    static files).
-//! 6. A pipeline `404` auto-routes to the views directory before the
+//! 7. A pipeline `404` auto-routes to the views directory before the
 //!    JSON envelope is returned: `GET /contact` renders
 //!    `views/contact.jhs`, `GET /blog` renders `views/blog.jhs` or
 //!    `views/blog/index.jhs`, and `GET /` falls back to
 //!    `views/index.jhs` when the static index file is missing (and no
 //!    CMS default page took it over). (F14: while `cms.hosts` is set,
-//!    steps 4 and 6 — the CMS-host behaviours — only run for requests
-//!    whose `Host` is one of them; the main host's 404s stay 404s.)
+//!    steps 4 and 7 — the CMS-host behaviours — only run for requests
+//!    whose `Host` is one of them, and step 5 — the main host's
+//!    directory indexes — only for every other host; the main host's
+//!    404s stay 404s.)
 //!
 //! Rendering happens on the blocking pool (`spawn_blocking`): the JS
 //! engine is CPU-bound and the fresh-sandbox-per-render design keeps it
@@ -195,6 +206,31 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
                          to the normal homepage chain"
                     ),
                 }
+            }
+        }
+    }
+
+    // The main host's directory indexes: `index.jhs` before the
+    // static index (the single host included). A directory request —
+    // `/` or any path ending in `/` — whose directory holds an
+    // `index.jhs` renders it through the same pipeline an explicit
+    // `.jhs` request takes (sandboxed render, `no-store`, never the
+    // raw source); directories without one flow on to the static
+    // answer unchanged. The CMS host is excluded: its directories
+    // are the views tree's business, and `public/` never leaks there.
+    if (decoded == "/" || decoded.ends_with('/')) && (!vhosts || !on_cms_host) {
+        if let Some(static_root) = templates.static_root() {
+            let candidate = directory_index_jhs(static_root, &decoded);
+            if candidate.is_file() {
+                return render_response(
+                    templates.engine(),
+                    candidate,
+                    data,
+                    request_id,
+                    &method,
+                    StatusCode::OK,
+                )
+                .await;
             }
         }
     }
@@ -536,6 +572,20 @@ fn view_candidate(views_dir: &Path, decoded: &str) -> Option<PathBuf> {
     candidates.into_iter().find(|candidate| candidate.is_file())
 }
 
+/// The `index.jhs` candidate for a directory request (`/` or a path
+/// ending in `/`): `/` maps to the static root's own `index.jhs`,
+/// `/docs/` to `docs/index.jhs` inside the root. It stays a
+/// **candidate** — the caller renders it only when it exists, and
+/// otherwise the static index answer flows on unchanged.
+fn directory_index_jhs(static_root: &Path, decoded: &str) -> PathBuf {
+    let relative = decoded.trim_matches('/');
+    if relative.is_empty() {
+        static_root.join("index.jhs")
+    } else {
+        static_root.join(relative).join("index.jhs")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,5 +631,19 @@ mod tests {
         assert_eq!(view_candidate(&dir, "/missing"), None);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn directory_index_candidates_map_request_shapes_onto_the_root() {
+        let root = Path::new("/srv/public");
+        assert_eq!(directory_index_jhs(root, "/"), root.join("index.jhs"));
+        assert_eq!(
+            directory_index_jhs(root, "/docs/"),
+            root.join("docs").join("index.jhs")
+        );
+        assert_eq!(
+            directory_index_jhs(root, "/deep/tree/"),
+            root.join("deep").join("tree").join("index.jhs")
+        );
     }
 }

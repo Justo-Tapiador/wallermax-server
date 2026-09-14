@@ -160,15 +160,27 @@ response_limit_bytes = 262144
 
 [static]
 # Static file serving for otherwise unmatched paths.
-# While enabled: GET / answers with public/index.html, other paths resolve
-# against files inside public/ (e.g. /style.css -> public/style.css),
-# missing files answer the standard JSON 404 envelope, and the JSON
-# service index moves to GET /api.
+# While enabled: GET / answers with public/index.jhs RENDERED when that
+# file exists (a dynamic homepage for the static site — the template
+# engine runs it with the usual globals: user, path, query, pages,
+# menus, req), else with the index_file below (index.html by default,
+# a plain static answer); other paths resolve against files inside
+# public/ (e.g. /style.css -> public/style.css), missing files answer
+# the standard JSON 404 envelope, and the JSON service index moves to
+# GET /api.
 #
-# NOTE (v0.8.0): the stock public/index.html was REMOVED so the site
-# home falls through to views/index.jhs — the dynamic CMS home that
-# lists the published pages and carries the login/logout header.
-# Drop your own index.html back in to pin a static home instead.
+# Directory requests follow the same rule: /docs/ renders
+# public/docs/index.jhs when present, else serves
+# public/docs/index.html. Drop index.jhs files only where the static
+# tree needs server-side data — plain static pages keep their
+# zero-cost static serving.
+#
+# NOTE (F14): with [cms] hosts set, this is the MAIN host's root — the
+# CMS host only borrows /assets, /favicon.ico and /robots.txt from it.
+# The stock public/index.html is the wallermax landing page; create an
+# index.jhs beside it and it takes the main host's homepage, while the
+# CMS homepage (cms.default_page or views/index.jhs) lives on the CMS
+# host.
 enabled = true
 
 # Directory holding the static assets, relative to the working directory
@@ -176,8 +188,9 @@ enabled = true
 # static serving is enabled. `..` segments are rejected at validation.
 root_dir = "public"
 
-# File served for GET / (looked up inside root_dir). Directory requests
-# such as /docs/ always resolve to docs/index.html inside that directory.
+# File served for GET / when no index.jhs exists beside it (looked up
+# inside root_dir). Directory requests such as /docs/ resolve to
+# docs/index.jhs (rendered) or docs/index.html in the same order.
 index_file = "index.html"
 
 # NOTE: the default [security_headers] content_security_policy is

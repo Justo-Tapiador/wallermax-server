@@ -3,10 +3,14 @@
 //! While enabled, two pieces are mounted:
 //!
 //! - `GET /` answers with `root_dir/index_file` (via [`ServeFile`], so
-//!   conditional requests, `Range` and `ETag`/`Last-Modified` all work);
+//!   conditional requests, `Range` and `ETag`/`Last-Modified` all work)
+//!   — unless the templates middleware already rendered a
+//!   `root_dir/index.jhs` (the dynamic index takes the directory; see
+//!   `src/middleware/templates.rs`);
 //! - every other otherwise-unmatched path is served from `root_dir` by
 //!   [`ServeDir`] (e.g. `/style.css` -> `root_dir/style.css`, `/docs/` ->
-//!   `root_dir/docs/index.html`).
+//!   `root_dir/docs/index.html`, after the same middleware's chance to
+//!   render `root_dir/docs/index.jhs` first).
 //!
 //! Requests that do not map to a file — and non-`GET`/`HEAD` requests to
 //! file paths — fall back to the standard JSON 404 envelope used by the
@@ -28,7 +32,9 @@ use tower_http::services::{ServeDir, ServeFile};
 use crate::config::StaticConfig;
 use crate::state::AppState;
 
-/// Route fragment for this module: `GET /` -> the configured index file.
+/// Route fragment for this module: `GET /` -> the configured index
+/// file (the static fallback — the templates middleware renders an
+/// existing `index.jhs` beside it first).
 pub fn routes(config: &StaticConfig) -> Router<AppState> {
     Router::new().route("/", get_service(ServeFile::new(config.index_path())))
 }
@@ -39,7 +45,8 @@ pub fn routes(config: &StaticConfig) -> Router<AppState> {
 /// resolved against `root_dir`:
 ///
 /// - `GET`/`HEAD` for an existing file (or `dir/index.html` for
-///   directories) -> the file;
+///   directories — `dir/index.jhs` renders first when present, via
+///   the templates middleware) -> the file;
 /// - anything else -> the JSON 404 envelope via the nested router (the
 ///   same handler used when static serving is disabled).
 pub fn mount_fallback(router: Router<AppState>, config: &StaticConfig) -> Router<AppState> {

@@ -559,7 +559,9 @@ pub struct CmsConfig {
     /// Requires `cms.enabled` and `static.enabled` (validated at
     /// startup; the CMS host borrows its stylesheets from the static
     /// root). `cms.default_page` then takes over `/` on the **CMS**
-    /// host, and the main host's `/` is `public/index.html`.
+    /// host, and the main host's `/` is its own chain: a
+    /// `public/index.jhs` rendered when present, else the static
+    /// `public/index_file`.
     ///
     /// Entries are normalized (trimmed, lowercased) at load time.
     /// TOML-only, like every list in this file.
@@ -669,8 +671,11 @@ impl Default for CmsConfig {
 
 /// Static file serving settings.
 ///
-/// While `enabled`, `GET /` answers with `root_dir/index_file` and any
-/// request path that matches a file under `root_dir` is served from disk
+/// While `enabled`, `GET /` answers with `root_dir/index_file` — after
+/// the templates middleware had its chance to render an existing
+/// `root_dir/index.jhs` first (the dynamic index takes the directory;
+/// this file is the static fallback) — and any request path that
+/// matches a file under `root_dir` is served from disk
 /// (see `src/routes/static_files.rs`). The JSON service index remains
 /// available at `GET /api`, and unmatched paths keep answering the
 /// standard JSON 404 envelope.
@@ -683,9 +688,11 @@ pub struct StaticConfig {
     /// working directory (absolute paths are allowed too). The directory
     /// must exist at startup when static serving is enabled.
     pub root_dir: String,
-    /// File served for `GET /`, looked up inside `root_dir`. Directory
-    /// requests (e.g. `/docs/`) always resolve to `index.html` inside
-    /// that directory.
+    /// File served for `GET /` when no `index.jhs` exists beside it
+    /// (looked up inside `root_dir`): the templates middleware renders
+    /// an existing `index.jhs` first, so this file is the static
+    /// fallback. Directory requests follow the same order —
+    /// `docs/index.jhs` rendered, then `docs/index.html`.
     pub index_file: String,
 }
 
