@@ -463,6 +463,31 @@ pub struct AuthConfig {
     /// explicitly — `always` for TLS-terminating reverse proxies where the
     /// server itself speaks HTTP.
     pub secure_cookies: SecureCookieMode,
+    /// The `Domain` attribute of the `wallermax_session` cookie — the
+    /// **shared session** (F19).
+    ///
+    /// Empty (the default) keeps the cookie **host-only**: whatever
+    /// host set it is the only host that ever sees it — the pre-F19
+    /// behaviour, and the safest default. Set to a parent domain of
+    /// every serving host (`"app.localhost"` for the local dev split
+    /// of `app.localhost` + `cms.app.localhost`, `"example.com"` for
+    /// `example.com` + `cms.example.com` + tenant sites), one sign-in
+    /// personalises them all: the main host's `public/index.jhs`
+    /// greets `user.username`, the tenant sites render their visitor
+    /// surfaces signed-in, `logout` clears the cookie everywhere.
+    ///
+    /// The parent needs at least **two labels**: browsers treat every
+    /// one-label domain as a public suffix, so `Domain=localhost` set
+    /// from `cms.localhost` is silently refused (and from `localhost`
+    /// itself it stays host-only) — the local dev convention is
+    /// `app.localhost`, never bare `localhost`.
+    ///
+    /// Must be a bare parent domain (no scheme, port, path, leading
+    /// dot or whitespace) — a `Domain` the serving host does not
+    /// belong to makes browsers silently refuse the cookie, and a
+    /// refused cookie is a session that never starts. Validated at
+    /// startup while `auth.enabled`.
+    pub cookie_domain: String,
 }
 
 /// Policy for the `Secure` attribute of the session cookie.
@@ -491,6 +516,57 @@ impl SecureCookieMode {
     }
 }
 
+/// Checks a `[auth] cookie_domain` value (F19): empty is the host-only
+/// default, anything else must be a **bare parent domain of at least
+/// two labels**.
+///
+/// The value goes verbatim into the cookie's `Domain` attribute, so
+/// anything a browser would choke on is rejected **at startup** instead
+/// of at the first sign-in:
+///
+/// - a scheme (`https://…`), port (`…:8443`, the classic
+///   copy-paste-from-a-URL accident), path (`/`), percent-escape,
+///   whitespace or control characters;
+/// - the leading dot of the `Domain=.example.com` habit (RFC 6265
+///   tolerates it, but the project speaks the bare form — same as the
+///   `[cms] hosts` entries — so there is exactly one way to write it);
+/// - **a single-label domain** (`"localhost"` above all): browsers
+///   treat every one-label domain as a public suffix, so a cookie
+///   `Domain=localhost` set from `cms.localhost` is silently refused
+///   (the sign-in "succeeds", the redirect happens, every page answers
+///   anonymous — F19's first attempt shipped exactly that) and set from
+///   `localhost` itself it stays host-only anyway. Sharing needs a
+///   two-label parent: `app.localhost`, not `localhost`.
+///
+/// Returns `Err` with the specific problem for the validation message.
+fn validate_cookie_domain(value: &str) -> Result<(), &'static str> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    if !value.contains('.') {
+        return Err(
+            "a one-label domain is a public suffix to every browser — the cookie \
+             can never share it. Use a two-label parent (\"app.localhost\", \
+             \"example.com\") covering every serving host",
+        );
+    }
+    if value.starts_with('.') || value.ends_with('.') {
+        return Err("it must not start or end with a dot");
+    }
+    if value.contains("..") {
+        return Err("it must not contain consecutive dots");
+    }
+    for character in value.chars() {
+        let forbidden = character.is_whitespace()
+            || character.is_control()
+            || matches!(character, ':' | '/' | '\\' | '%' | '?' | '#' | '@');
+        if forbidden {
+            return Err("no scheme, port, path or whitespace can ride along");
+        }
+    }
+    Ok(())
+}
+
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
@@ -504,6 +580,8 @@ impl Default for AuthConfig {
             // 30 days, the common default for web sessions.
             refresh_token_ttl_secs: 2_592_000,
             secure_cookies: SecureCookieMode::default(),
+            // Host-only session cookie: the pre-F19 default.
+            cookie_domain: String::new(),
         }
     }
 }
@@ -1249,6 +1327,13 @@ impl AppConfig {
                 "`auth.refresh_token_ttl_secs` must be greater than zero".to_owned(),
             ));
         }
+        if let Err(problem) = validate_cookie_domain(&self.auth.cookie_domain) {
+            return Err(ConfigError::Message(format!(
+                "`auth.cookie_domain` is not a bare parent domain: {problem}. Write it without \
+                 scheme, port, path or leading dot — e.g. \"localhost\" or \"example.com\" — or \
+                 leave it empty for the host-only cookie"
+            )));
+        }
         Ok(())
     }
 
@@ -1663,6 +1748,9 @@ mod tests {
         assert_eq!(config.auth.min_password_len, 8);
         assert!(config.auth.refresh_tokens_enabled);
         assert_eq!(config.auth.refresh_token_ttl_secs, 2_592_000);
+        // F19: the session cookie stays host-only unless the operator
+        // opts into the shared session.
+        assert!(config.auth.cookie_domain.is_empty());
 
         // Phase 4 features are off in the built-in defaults; the
         // versioned wallermax.toml enables the ones meant for real use.
@@ -2304,5 +2392,52 @@ mod tests {
         let mut config = external_api_config_with("svc", "https://api.example.com", &[]);
         config.external_api.response_limit_bytes = 16 * 1_048_576 + 1;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn cookie_domain_accepts_two_label_parent_domains() {
+        let mut config = auth_ready_config();
+        // Empty is the host-only default; the shared session needs a
+        // parent of at least two labels.
+        for value in ["", "app.localhost", "example.com", "example.co.uk"] {
+            config.auth.cookie_domain = String::from(value);
+            assert!(
+                config.validate_auth().is_ok(),
+                "a two-label parent domain passes: {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cookie_domain_rejects_what_browsers_would_refuse() {
+        let mut config = auth_ready_config();
+        for value in [
+            "localhost",             // one label: a public suffix to browsers
+            "test",                  // same, any single label
+            ".localhost",            // the Domain=.host habit
+            "app.localhost.",        // trailing dot
+            "https://app.localhost", // a scheme
+            "app.localhost:8443",    // a port (the URL copy-paste)
+            "app.localhost/",        // a path
+            "app. localhost",        // whitespace
+            "app..localhost",        // consecutive dots
+            "100%",
+        ] {
+            config.auth.cookie_domain = String::from(value);
+            assert!(
+                config.validate_auth().is_err(),
+                "the browser-hostile value must refuse startup: {value:?}"
+            );
+        }
+    }
+
+    /// The minimal `validate_auth`-ready config: database on (the
+    /// feature dependency), a secret, defaults elsewhere.
+    fn auth_ready_config() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.database.enabled = true;
+        config.auth.enabled = true;
+        config.auth.jwt_secret = String::from("0123456789abcdef0123456789abcdef");
+        config
     }
 }

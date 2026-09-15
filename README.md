@@ -862,6 +862,31 @@ adding a second credential:
   (curl and PowerShell were lax about it, which made the failure look
   like a server bug — that was the v0.7.0 gotcha). `always` pins it for
   TLS-terminating proxies; `never` for HTTP-only local testing.
+- **`Domain` follows `[auth] cookie_domain` (F19) — the shared
+  session.** While empty (the default) the cookie is **host-only**:
+  whatever host set it is the only host that sees it. Set it to a
+  parent domain of every serving host and one sign-in personalises
+  them all — the main host's `public/index.jhs` greets
+  `user.username`, the tenant sites render signed-in, `logout`
+  clears the cookie everywhere. Two rules, both validated at
+  startup:
+  1. **The parent needs at least two labels** (`app.localhost`,
+     `example.com` — never a bare `localhost`). Browsers treat every
+     one-label domain as a public suffix: `Domain=localhost` set from
+     `cms.localhost` is **silently refused** — the sign-in answers
+     its `303`, the redirect happens, and every page answers
+     anonymous (green tests included: curl and reqwest are lax where
+     browsers are strict — F19's first attempt shipped exactly that,
+     which is why the rule is now a startup error).
+  2. **It must cover every serving host** (no scheme, port, path or
+     leading dot in the value): a host outside the parent never sees
+     the session. The local dev convention: `app.localhost` (main) +
+     `cms.app.localhost` (CMS) + `*.app.localhost` (tenants), with
+     `cookie_domain = "app.localhost"` — `*.localhost` names resolve
+     to `127.0.0.1` in every modern browser.
+  `SameSite=Strict` stays: hosts under one registrable domain are
+  the same site, so links and redirects between them carry the
+  cookie (verified against a real browser, not just the test jar).
 - **The cookie is accepted wherever the header is** — the
   `AuthUser`/`AdminUser` extractors, `/api/auth/me` and the `user`
   template global. When both are present the **Bearer header wins**, so

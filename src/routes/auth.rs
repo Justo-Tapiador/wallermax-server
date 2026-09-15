@@ -309,7 +309,10 @@ fn register_failure(
 
     let secure = secure_cookies(state);
     let target = redirect_with_error(redirect, "register_error", code, "#register");
-    redirect_response(&target, Some(session::clear_cookie_value(secure)))
+    redirect_response(
+        &target,
+        Some(session::clear_cookie_value(secure, cookie_domain(state))),
+    )
 }
 
 /// `POST /api/auth/login`: exchanges credentials for an access token
@@ -382,7 +385,10 @@ async fn login(
                 if error.status_code() == StatusCode::UNAUTHORIZED {
                     let secure = secure_cookies(&state);
                     let target = redirect_with_error(&redirect, "login_error", "invalid", "#login");
-                    redirect_response(&target, Some(session::clear_cookie_value(secure)))
+                    redirect_response(
+                        &target,
+                        Some(session::clear_cookie_value(secure, cookie_domain(&state))),
+                    )
                 } else {
                     error.into_response_with_request_id(request_id.as_deref())
                 }
@@ -454,7 +460,12 @@ fn respond_login(
     redirect: &str,
 ) -> Response {
     let ttl = state.config().auth.token_ttl_secs;
-    let cookie = session::set_cookie_value(&success.access_token, ttl, secure_cookies(state));
+    let cookie = session::set_cookie_value(
+        &success.access_token,
+        ttl,
+        secure_cookies(state),
+        cookie_domain(state),
+    );
 
     if is_form {
         return redirect_response(redirect, Some(cookie));
@@ -592,7 +603,12 @@ async fn refresh(
     // The browser session follows the rotation: a new cookie value for
     // the new access token (curl and friends can keep ignoring it).
     let ttl = state.config().auth.token_ttl_secs;
-    let cookie = session::set_cookie_value(&access_token, ttl, secure_cookies(&state));
+    let cookie = session::set_cookie_value(
+        &access_token,
+        ttl,
+        secure_cookies(&state),
+        cookie_domain(&state),
+    );
 
     let mut response = Json(LoginResponse {
         access_token,
@@ -653,7 +669,10 @@ async fn logout(State(state): State<AppState>, request: Request) -> Response {
         }
 
         let secure = secure_cookies(&state);
-        return redirect_response(&redirect, Some(session::clear_cookie_value(secure)));
+        return redirect_response(
+            &redirect,
+            Some(session::clear_cookie_value(secure, cookie_domain(&state))),
+        );
     }
 
     // JSON path: the extractor's rejection envelope is preserved by
@@ -881,7 +900,7 @@ fn cleared_session_response(state: &AppState) -> Response {
     set_header(
         &mut response,
         header::SET_COOKIE,
-        &session::clear_cookie_value(secure_cookies(state)),
+        &session::clear_cookie_value(secure_cookies(state), cookie_domain(state)),
     );
     response
 }
@@ -894,6 +913,19 @@ fn secure_cookies(state: &AppState) -> bool {
         .auth
         .secure_cookies
         .resolve(state.config().tls.enabled)
+}
+
+/// The shared session's cookie domain (F19): `Some(domain)` adds the
+/// `Domain` attribute so one sign-in personalises every host under
+/// it — the main site, the CMS host and the tenant sites alike — while
+/// `None` keeps the cookie host-only, exactly as before F19.
+///
+/// The empty string (the default) is normalized to `None`: an empty
+/// `Domain=` attribute would be a browser refusal, not a host-only
+/// cookie.
+fn cookie_domain(state: &AppState) -> Option<&str> {
+    let domain = state.config().auth.cookie_domain.as_str();
+    (!domain.is_empty()).then_some(domain)
 }
 
 /// Builds `{redirect}{?|&}{param}={code}{fragment}`.

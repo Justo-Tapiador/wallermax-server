@@ -1204,6 +1204,95 @@ re-invent:
 - **No new configuration.** F18 adds zero keys to `wallermax.toml`;
   the panel is the surface, the database is the truth.
 
+## The shared session (F19): one sign-in, every host
+
+F14 split the server into hosts; F15–F17 made the hosts data; F18
+gave them management forms. Through all of it the session cookie
+stayed **host-only** — the pre-vhost default surviving on inertia —
+so the operator signed in on the CMS host and the main host's
+`public/index.jhs` kept answering anonymous: the greeting template
+was there, the `user` global was there, only the cookie never
+crossed the `Host` line. F19 closes that with exactly one
+attribute.
+
+### What changed
+
+- **`[auth] cookie_domain`** (new, default empty): the `Domain`
+  attribute of the `wallermax_session` cookie. Empty keeps the
+  host-only cookie of every phase before F19 — a single-host
+  deployment loses nothing and changes nothing. Set to a parent
+  domain of every serving host, the cookie travels: sign in on
+  `cms.example.com` and `example.com`, `www.example.com` and every
+  tenant host under the registrable domain render signed-in — the
+  main host's `public/index.jhs` greets `user.username` **without a
+  line of template code**, because the `user` global was always
+  computed from the cookie on every host; only the cookie was
+  missing.
+- **The value is validated at startup** (while `auth.enabled`), with
+  two rules learned from the first attempt's failure:
+  1. **A bare parent domain** — no scheme, no port, no path, no
+     leading dot, no whitespace.
+  2. **At least two labels** (`app.localhost`, `example.com` — never
+     a bare `localhost`). Browsers treat every one-label domain as a
+     public suffix: a cookie `Domain=localhost` set from
+     `cms.localhost` is **silently refused** — the sign-in POST
+     answers its `303`, the redirect happens, and every page answers
+     anonymous. F19's first attempt shipped exactly that bug (the
+     tests green — curl and reqwest are lax where browsers are
+     strict — the browser dead), which is why both the validation
+     and the live-browser acceptance walk below exist.
+- **Every cookie write carries the domain, symmetrically**: login,
+  register (the form path logs the fresh account straight in),
+  `refresh` (the rotation keeps the shared session), the failure
+  bounces (a refused login clears what it may have set) and
+  `logout` / `logout_all` — a clear that forgot the `Domain` would
+  expire a different cookie and leave the shared one alive in the
+  browser.
+- **The verification path is unchanged**: the cookie stays a mirror
+  of the access token, read by the same `session_token` +
+  `verify_token` pair on every host, and the Bearer header still
+  wins when both are present.
+- **`SameSite=Strict` stays** — and keeps working across the hosts:
+  hosts under one registrable domain are the same site, so links,
+  redirects and reloads between `app.localhost` and
+  `cms.app.localhost` carry the cookie (verified against a real
+  browser, not just the reqwest jar).
+
+### The local-dev recipe
+
+The shipped `wallermax.toml` leaves `cookie_domain` **empty** (the
+safe host-only default), with the recipe in its comment block:
+
+```
+main host    app.localhost          (the [static] site — public/)
+cms host     cms.app.localhost       ([cms] hosts / the domains table)
+tenants      anything.app.localhost (organizations' document roots)
+cookie_domain = "app.localhost"
+```
+
+`*.localhost` names resolve to `127.0.0.1` in every modern browser,
+so no hosts-file editing is involved; a TLS setup regenerates its
+certificate with the new SANs. Moving the host names is a domains
+table edit — the F18 panel's Tenants pages do it live, no restart.
+
+### The battery, and its honest limits
+
+`tests/shared_session.rs` walks the operator's browser: the form
+login's `Set-Cookie` (with and without the `Domain`), the `/profile`
+render right after it, the main host's greeting, the tenant host's
+greeting, the register path, the refresh rotation and both logout
+shapes. What reqwest cannot model is the browser's per-domain
+cookie jar across virtual host names (its jar keys on the
+connection's URL host) — and, being lax where browsers are strict,
+it would have accepted the one-label `localhost` that killed the
+first attempt. The true cross-host behaviour — store, replay,
+clear — was therefore verified against a live server with a real
+browser (sign in on `http://cms.app.localhost:8080/login`, the
+profile greets, `http://app.localhost:8080/` greets, a cross-host
+link click carries the session, logout clears it everywhere)
+before the patch shipped. That manual walk is the acceptance bar
+for any future change to the cookie attributes.
+
 ## Configuration
 
 Two keys from F7, two from F9, two from F10, one from F11 (all
@@ -1365,10 +1454,14 @@ the same discipline as the phases before it:
   next request — the first sanctioned divergence of the membership
   mirror, and the end of "restarting to move a host" — this
   document.
-- **F19 — the shared session** (next): `[auth] cookie_domain` and
+- **F19 — the shared session** (done): `[auth] cookie_domain` and
   the sign-on that carries across the organizations' host names —
-  the natural follow-up to tenants with teams: a member of several
-  organizations signs in once.
+  a member of several organizations signs in once: the cookie gains
+  a validated `Domain`, every set/clear/rotation carries it
+  symmetrically, and `public/index.jhs` greets `user.username`
+  with zero template changes — this document.
+- **F20** (next candidate): per-tenant panels — a tenant
+  administrator manages their organization's own content.
 
 Each phase ships as one patch with tests and this document updated;
 nothing lands half-featured.

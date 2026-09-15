@@ -400,6 +400,41 @@ min_password_len = 8
 # HTTP-only local testing.
 secure_cookies = "auto"
 
+# The shared session (F19): the `Domain` attribute of the
+# `wallermax_session` cookie.
+#
+# While set to a PARENT DOMAIN of every serving host, one sign-in
+# personalises them all — the main host's public/index.jhs greets
+# user.username, the tenant sites render signed-in, /api/auth/logout
+# clears the cookie everywhere — without a line of template code.
+# While empty (the default) the cookie stays HOST-ONLY: whatever host
+# set it is the only host that sees it (the pre-F19 behaviour, and the
+# safest posture for single-host deployments).
+#
+# TWO RULES, both validated at startup:
+#
+# 1. The parent domain needs at least TWO LABELS. Browsers treat
+#    every one-label domain as a public suffix: a cookie
+#    `Domain=localhost` set from `cms.localhost` is SILENTLY REFUSED
+#    (the sign-in answers its redirect and every page then answers
+#    anonymous — F19's first attempt shipped exactly that, green
+#    tests included, because curl and reqwest are lax about it), and
+#    set from `localhost` itself it stays host-only anyway. So the
+#    local dev convention is a two-label parent:
+#      main host  -> app.localhost
+#      cms host   -> cms.app.localhost   ([cms] hosts / domains table)
+#      tenants    -> anything.app.localhost
+#      cookie_domain = "app.localhost"
+#    (*.localhost names resolve to 127.0.0.1 in every modern
+#    browser; for your own domain use "example.com".)
+#
+# 2. It must cover EVERY serving host — a host outside the parent
+#    never sees the session, and the host that set a foreign Domain
+#    never stores it. No scheme, port, path, leading dot or
+#    whitespace: write the bare parent domain.
+#
+# cookie_domain = "app.localhost"
+
 # Refresh tokens: long-lived opaque tokens returned by login and rotated
 # by POST /api/auth/refresh. Presenting a rotated token (a replay,
 # presumably theft) revokes the whole session family. Disable to get the
@@ -411,7 +446,8 @@ refresh_token_ttl_secs = 2592000
 
 # NOTE (v0.7.0): login and refresh also attach the access token as the
 # `wallermax_session` cookie (HttpOnly, SameSite=Strict, Path=/,
-# Max-Age = token_ttl_secs, and `Secure` per [auth] secure_cookies)
+# Max-Age = token_ttl_secs, `Secure` per [auth] secure_cookies and
+# `Domain` per [auth] cookie_domain — see the shared session, F19)
 # so BROWSERS stay authenticated across page navigation;
 # logout/logout_all clear it. The cookie is verified exactly
 # like the Bearer header (the header always wins when both are present).
@@ -451,9 +487,15 @@ enabled = true
 #
 # Entries are bare hostnames (no scheme, port or path; matching
 # ignores case and the request's port; IDN names go in punycode):
-#   hosts = ["cms.localhost"]                # the local dev subdomain
+#   hosts = ["cms.app.localhost"]           # the local dev subdomain
 #   hosts = ["cms.example.com"]              # your own domain
 #   hosts = ["cms.example.com", "cms.example.net"]
+#
+# NOTE (F19): while the shared session is on, every serving host must
+# live under [auth] cookie_domain, and that parent needs two labels
+# (browsers refuse one-label cookie domains) — the local convention:
+# app.localhost (main), cms.app.localhost (CMS), *.app.localhost
+# (tenants), cookie_domain = "app.localhost".
 # Requires cms.enabled and static.enabled (validated at startup).
 # Local testing: modern browsers resolve *.localhost to 127.0.0.1
 # already; for curl, add an entry to the hosts file. A TLS deployment

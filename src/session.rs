@@ -12,6 +12,20 @@
 //! - name `wallermax_session`, value = the access token verbatim;
 //! - `Path=/`, `Max-Age` = `[auth] token_ttl_secs`, `HttpOnly`,
 //!   `SameSite=Strict`;
+//! - `Domain` — only while `[auth] cookie_domain` names a parent
+//!   domain (F19, the **shared session**): the cookie then travels
+//!   across every host under it (the main site, the CMS host and the
+//!   tenant sites of `app.localhost`/`example.com` alike), so one
+//!   sign-in personalises them all — `public/index.jhs` greets
+//!   `user.username` without a line of template code. While unset
+//!   (the default) the cookie stays **host-only**, exactly as every
+//!   phase before F19: whatever host set it is the only host that
+//!   sees it. The value must be a parent domain of at least two
+//!   labels covering **every** serving host — browsers refuse a
+//!   `Domain` the serving host does not belong to, and a one-label
+//!   domain is a public suffix to them (`Domain=localhost` from
+//!   `cms.localhost` is silently refused — the failure mode that
+//!   motivated F19's startup validation);
 //! - `Secure` follows `[auth] secure_cookies` (v0.8.0): `auto` (the
 //!   default) sets it only while `[tls]` is enabled. An unconditional
 //!   `Secure` silently broke browser logins on plain-HTTP servers —
@@ -41,19 +55,28 @@ pub const COOKIE_NAME: &str = "wallermax_session";
 ///
 /// `ttl_secs` mirrors `[auth] token_ttl_secs`: the cookie dies with the
 /// access token it carries. `secure` controls the `Secure` attribute
-/// (see `[auth] secure_cookies`).
-pub fn set_cookie_value(token: &str, ttl_secs: u64, secure: bool) -> String {
+/// (see `[auth] secure_cookies`). `domain` adds the `Domain` attribute
+/// — the shared session of F19 — or keeps the cookie host-only while
+/// `None`.
+pub fn set_cookie_value(token: &str, ttl_secs: u64, secure: bool, domain: Option<&str>) -> String {
     format!(
-        "{COOKIE_NAME}={token}; Path=/; Max-Age={ttl_secs}; HttpOnly; SameSite=Strict{}",
-        secure_part(secure)
+        "{COOKIE_NAME}={token}; Path=/; Max-Age={ttl_secs}; HttpOnly; SameSite=Strict{}{}",
+        secure_part(secure),
+        domain_part(domain),
     )
 }
 
 /// Builds the `Set-Cookie` value expiring the session cookie.
-pub fn clear_cookie_value(secure: bool) -> String {
+///
+/// The `Domain` must match the one the cookie was set with — a browser
+/// only overwrites a cookie when the replacement addresses it the same
+/// way — so the clear carries whatever `[auth] cookie_domain`
+/// configured, exactly like the set.
+pub fn clear_cookie_value(secure: bool, domain: Option<&str>) -> String {
     format!(
-        "{COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{}",
-        secure_part(secure)
+        "{COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict{}{}",
+        secure_part(secure),
+        domain_part(domain),
     )
 }
 
@@ -63,6 +86,18 @@ fn secure_part(secure: bool) -> &'static str {
         "; Secure"
     } else {
         ""
+    }
+}
+
+/// The `Domain` fragment, with its leading separator, or nothing.
+///
+/// An empty or absent domain stays host-only — every phase before F19
+/// behaved exactly so, and the empty string must not silently change
+/// that.
+fn domain_part(domain: Option<&str>) -> String {
+    match domain.filter(|domain| !domain.is_empty()) {
+        Some(domain) => format!("; Domain={domain}"),
+        None => String::new(),
     }
 }
 
@@ -108,20 +143,54 @@ mod tests {
     #[test]
     fn set_and_clear_cookie_values() {
         assert_eq!(
-            set_cookie_value("tok", 3600, true),
+            set_cookie_value("tok", 3600, true, None),
             "wallermax_session=tok; Path=/; Max-Age=3600; HttpOnly; SameSite=Strict; Secure"
         );
         assert_eq!(
-            set_cookie_value("tok", 3600, false),
+            set_cookie_value("tok", 3600, false, None),
             "wallermax_session=tok; Path=/; Max-Age=3600; HttpOnly; SameSite=Strict"
         );
         assert_eq!(
-            clear_cookie_value(true),
+            clear_cookie_value(true, None),
             "wallermax_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict; Secure"
         );
         assert_eq!(
-            clear_cookie_value(false),
+            clear_cookie_value(false, None),
             "wallermax_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
+        );
+    }
+
+    #[test]
+    fn a_shared_domain_rides_along_set_and_clear() {
+        // The F19 shared session: the Domain attribute makes one
+        // sign-in travel across every host under it.
+        assert_eq!(
+            set_cookie_value("tok", 3600, false, Some("localhost")),
+            "wallermax_session=tok; Path=/; Max-Age=3600; HttpOnly; SameSite=Strict; Domain=localhost"
+        );
+        assert_eq!(
+            set_cookie_value("tok", 3600, true, Some("example.com")),
+            "wallermax_session=tok; Path=/; Max-Age=3600; HttpOnly; SameSite=Strict; Secure; Domain=example.com"
+        );
+        // The clear must address the cookie the same way, or the
+        // browser keeps the old one.
+        assert_eq!(
+            clear_cookie_value(false, Some("localhost")),
+            "wallermax_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict; Domain=localhost"
+        );
+    }
+
+    #[test]
+    fn an_empty_domain_stays_host_only() {
+        // The empty string must behave exactly like None: host-only,
+        // the pre-F19 default.
+        assert_eq!(
+            set_cookie_value("tok", 60, false, Some("")),
+            set_cookie_value("tok", 60, false, None),
+        );
+        assert_eq!(
+            clear_cookie_value(false, Some("")),
+            clear_cookie_value(false, None),
         );
     }
 
