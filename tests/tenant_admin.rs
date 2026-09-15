@@ -20,10 +20,18 @@
 //!   members are refused (they follow the platform roles), a
 //!   tenant's members are data — the first sanctioned divergence,
 //!   and one that opens nothing by itself.
+//!
+//! The main tree these tests lean on is the battery's own fixture:
+//! `[static] root_dir` points at a per-test directory holding the
+//! index the assertions name, never at the repository's live
+//! `public/`. That tree is the operator's to experiment in — an
+//! `index.jhs` for the main site is the F19 direction — and a
+//! template that misbehaves there must never be able to fail
+//! `cargo test`.
 
 mod common;
 
-use common::{auth_config, TestServer};
+use common::{auth_config, TempDbGuard, TestServer};
 use reqwest::header::{HeaderValue, HOST};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
@@ -34,14 +42,43 @@ use wallermax_server::config::AppConfig;
 /// The single-host shape (no `[cms] hosts`): every surface on one
 /// host, no Host pinning needed. The vhost tests start from here and
 /// set `cms.hosts` — the same shape with the panel on its own name.
-fn single_host_config() -> (AppConfig, common::TempDbGuard) {
+///
+/// The static root is [`main_tree_fixture`]'s directory, kept alive
+/// by the returned guard for as long as the server serves it — the
+/// one call every test in this battery starts from.
+fn single_host_config() -> (AppConfig, TempDbGuard, TenantSite) {
     let (mut config, db) = auth_config();
+    let main = main_tree_fixture();
     config.templates.enabled = true;
     config.static_files.enabled = true;
-    config.static_files.root_dir = String::from("public");
+    config.static_files.root_dir = main.root_string();
     config.static_files.index_file = String::from("index.html");
     config.cms.enabled = true;
-    (config, db)
+    (config, db, main)
+}
+
+/// The battery's own main tree: a directory whose index says what
+/// the assertions expect to read ("Wallermax"), so the main-tree
+/// checks are exact instead of ambient.
+///
+/// The live `public/` stays out on purpose. `GET /` on a
+/// main-classified host renders `index.jhs` when one lives there,
+/// and `host_names_move_without_a_restart` sends the one request
+/// shape in the whole battery that does so **with a session
+/// attached** (the admin's cookie jar travels with the client) — so
+/// an operator's main-site template, however broken for signed-in
+/// visitors, used to fail this suite with a bare `500` that blamed
+/// the wrong layer. The fixture ends that class of failure: the
+/// battery answers for its own tree, the operator answers for
+/// theirs.
+fn main_tree_fixture() -> TenantSite {
+    let main = TenantSite::new("main-tree");
+    main.write(
+        "index.html",
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  \
+         <title>Wallermax Server</title>\n</head>\n<body>\n  <h1>Wallermax Server</h1>\n  <p>The tenants battery's own main tree.</p>\n</body>\n</html>\n",
+    );
+    main
 }
 
 /// A cookie-storing client: `Set-Cookie` in, `Cookie` out — a
@@ -140,8 +177,9 @@ async fn side_db(url: &str) -> sqlx::sqlite::SqlitePool {
         .expect("side pool connects")
 }
 
-/// A throwaway directory tree standing in for one tenant's site,
-/// removed (best-effort) on drop.
+/// A throwaway directory tree standing in for a served site — a
+/// tenant's, or the battery's own main tree (see
+/// [`main_tree_fixture`]) — removed (best-effort) on drop.
 struct TenantSite {
     root: std::path::PathBuf,
 }
@@ -207,7 +245,7 @@ async fn create_tenant(
 
 #[tokio::test]
 async fn the_tenants_pages_are_admin_only() {
-    let (config, _db) = single_host_config();
+    let (config, _db, _main) = single_host_config();
     let server = TestServer::start_full(config).await;
 
     register_admin(&server, "root-admin", "sup3r-secret!").await;
@@ -250,7 +288,7 @@ async fn the_tenants_pages_are_admin_only() {
 
 #[tokio::test]
 async fn the_bootstrap_organizations_are_listed_but_read_only() {
-    let (config, db) = single_host_config();
+    let (config, db, _main) = single_host_config();
     let server = TestServer::start_full(config).await;
 
     register_admin(&server, "root-admin", "sup3r-secret!").await;
@@ -312,7 +350,7 @@ async fn the_bootstrap_organizations_are_listed_but_read_only() {
 
 #[tokio::test]
 async fn a_tenant_lives_its_lifecycle_in_forms() {
-    let (config, db) = single_host_config();
+    let (config, db, _main) = single_host_config();
     let server = TestServer::start_full(config).await;
 
     register_admin(&server, "root-admin", "sup3r-secret!").await;
@@ -420,7 +458,7 @@ async fn a_tenant_lives_its_lifecycle_in_forms() {
 
 #[tokio::test]
 async fn host_names_move_without_a_restart() {
-    let (mut config, db) = single_host_config();
+    let (mut config, db, _main) = single_host_config();
     config.cms.hosts = vec![String::from("cms.localhost")];
     let server = TestServer::start_full(config).await;
     let panel = Some("cms.localhost");
@@ -510,7 +548,7 @@ async fn host_names_move_without_a_restart() {
 
 #[tokio::test]
 async fn config_bootstrapped_host_names_are_protected() {
-    let (mut config, db) = single_host_config();
+    let (mut config, db, _main) = single_host_config();
     config.cms.hosts = vec![String::from("cms.localhost")];
     let server = TestServer::start_full(config).await;
     let panel = Some("cms.localhost");
@@ -567,7 +605,7 @@ async fn config_bootstrapped_host_names_are_protected() {
 
 #[tokio::test]
 async fn a_host_name_maps_to_one_organization() {
-    let (mut config, _db) = single_host_config();
+    let (mut config, _db, _main) = single_host_config();
     config.cms.hosts = vec![String::from("cms.localhost")];
     let server = TestServer::start_full(config).await;
     let panel = Some("cms.localhost");
@@ -609,7 +647,7 @@ async fn a_host_name_maps_to_one_organization() {
 
 #[tokio::test]
 async fn memberships_stop_at_the_cms_mirror() {
-    let (mut config, db) = single_host_config();
+    let (mut config, db, _main) = single_host_config();
     config.cms.hosts = vec![String::from("cms.localhost")];
     let server = TestServer::start_full(config).await;
     let panel = Some("cms.localhost");
@@ -734,7 +772,7 @@ async fn memberships_stop_at_the_cms_mirror() {
 
 #[tokio::test]
 async fn tenant_admins_do_not_open_the_panel() {
-    let (mut config, _db) = single_host_config();
+    let (mut config, _db, _main) = single_host_config();
     config.cms.hosts = vec![String::from("cms.localhost")];
     let server = TestServer::start_full(config).await;
     let panel = Some("cms.localhost");
