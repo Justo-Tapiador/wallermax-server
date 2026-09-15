@@ -33,7 +33,7 @@
         <button type="submit">Sign out</button>
       </form>
     <?jhs } else { ?>
-      <a href="<?= cms_origin ?>/login">Sign in</a>
+      <a href="<?= login_url ?>">Sign in</a>
     <?jhs } ?>
       <button class="theme" type="button" data-click="Dark mode">◐</button>
     </nav>

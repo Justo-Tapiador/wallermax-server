@@ -119,6 +119,7 @@ use crate::routes::cms::{render_public_page, PageParts, PublicPageOutcome};
 use crate::session;
 use crate::state::AppState;
 use crate::template_engine::{RedirectIntent, RenderOutput, TemplateRenderer};
+use crate::util::encode_uri_component;
 
 /// How many published CMS pages the `pages` global carries.
 const PAGES_GLOBAL_LIMIT: i64 = 50;
@@ -326,6 +327,10 @@ pub(crate) async fn base_data(
     data.insert(String::from("req"), req_global(headers, uri, method));
     data.insert(String::from("theme"), theme_global(headers));
     data.insert(String::from("cms_origin"), cms_origin_global(state));
+    data.insert(
+        String::from("login_url"),
+        Value::String(login_url_global(state, headers, uri)),
+    );
     data
 }
 
@@ -372,6 +377,53 @@ pub(crate) fn pinned_theme(headers: &HeaderMap) -> Option<&str> {
 /// [`crate::vhosts::cms_origin`].
 fn cms_origin_global(state: &AppState) -> Value {
     Value::String(state.cms_origin())
+}
+
+/// The `login_url` global (F19's round trip): the no-JavaScript
+/// sign-in entry that **returns to the page asking for it**.
+///
+/// While the CMS surface has its own host, the sign-in link on the
+/// main host's `public/index.jhs` needs both halves of the trip: the
+/// login page lives on the CMS host (`cms_origin` + `/login`), and
+/// the page to return to lives on the caller's — so the global is
+/// `cms_origin` + `/login?redirect=` + this request's absolute URL
+/// (the `Host` header as the browser addressed it, with the scheme
+/// `[tls]` serves — the same derivation `cms_origin` uses; behind a
+/// TLS-terminating proxy the derived scheme can lie about the
+/// protocol, never about the host, and hosts are what the redirect
+/// allowlist checks). On the single-host server the link is the
+/// relative `/login?redirect=<this page's path>`, because `/login`
+/// is same-origin there and a local path is all the `redirect` field
+/// needs.
+///
+/// One template, both shapes: `<a href="<?= login_url ?>">Sign in</a>`
+/// signs the visitor in and lands them back on the very page they
+/// clicked from — the `redirect` allowlist in [`crate::routes::auth`]
+/// is exactly the family of hosts the shared session covers.
+fn login_url_global(state: &AppState, headers: &HeaderMap, uri: &Uri) -> String {
+    let here = uri
+        .path_and_query()
+        .map(|path_and_query| path_and_query.as_str())
+        .unwrap_or("/");
+    let cms_origin = state.cms_origin();
+    if cms_origin.is_empty() {
+        return format!("/login?redirect={}", encode_uri_component(here));
+    }
+    let scheme = if state.config().tls.enabled {
+        "https"
+    } else {
+        "http"
+    };
+    let here = match crate::vhosts::request_host(uri, headers) {
+        Some(host) => format!("{scheme}://{host}{here}"),
+        // A request without a Host header is no browser's navigation;
+        // the local-path shape keeps the link working anyway.
+        None => here.to_owned(),
+    };
+    format!(
+        "{cms_origin}/login?redirect={}",
+        encode_uri_component(&here)
+    )
 }
 
 /// The `req` global (v0.9.0): an Express-shaped request object with a

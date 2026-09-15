@@ -88,6 +88,11 @@ referrer_policy = "no-referrer"
 # stylesheet lives at public/assets/wallermax.css) and forms may only post
 # back to this origin. SCRIPTS REMAIN BLOCKED: the whole site — CMS
 # included — works without a single line of JavaScript.
+# While the server serves several hosts (a [cms] hosts entry, a domains
+# row) or the shared session ([auth] cookie_domain) is on, a
+# `form-action 'self'` value is automatically widened with those
+# hosts' origins, so the login form's 303 can return to the page the
+# visitor signed in from.
 content_security_policy = "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 strict_transport_security = "max-age=31536000; includeSubDomains"
 

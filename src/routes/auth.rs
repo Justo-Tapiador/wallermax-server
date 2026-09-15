@@ -38,7 +38,7 @@ use std::net::{IpAddr, SocketAddr};
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, FromRequest, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -154,13 +154,15 @@ async fn register(
         .get::<RequestId>()
         .map(|id| id.0.clone());
     let headers = request.headers().clone();
+    let uri = request.uri().clone();
     let max_body = state.config().server.max_body_size_bytes;
     let is_form = content_type_is_form(&request);
 
     let (credentials, redirect) = if is_form {
         match read_form::<FormRegister>(request, max_body).await {
             Ok(form) => {
-                let redirect = safe_redirect(form.redirect.as_deref()).to_owned();
+                let redirect =
+                    safe_redirect(form.redirect.as_deref(), &state, &uri, &headers).to_owned();
                 (
                     Credentials {
                         username: form.username,
@@ -349,13 +351,15 @@ async fn login(
         .get::<RequestId>()
         .map(|id| id.0.clone());
     let headers = request.headers().clone();
+    let uri = request.uri().clone();
     let max_body = state.config().server.max_body_size_bytes;
     let is_form = content_type_is_form(&request);
 
     let (credentials, redirect) = if is_form {
         match read_form::<FormCredentials>(request, max_body).await {
             Ok(form) => {
-                let redirect = safe_redirect(form.redirect.as_deref()).to_owned();
+                let redirect =
+                    safe_redirect(form.redirect.as_deref(), &state, &uri, &headers).to_owned();
                 (
                     Credentials {
                         username: form.username,
@@ -645,10 +649,11 @@ async fn logout(State(state): State<AppState>, request: Request) -> Response {
 
     if content_type_is_form(&request) {
         let headers = request.headers().clone();
+        let uri = request.uri().clone();
         let (refresh_token, redirect) = match read_form::<FormLogout>(request, max_body).await {
             Ok(form) => (
                 form.refresh_token,
-                safe_redirect(form.redirect.as_deref()).to_owned(),
+                safe_redirect(form.redirect.as_deref(), &state, &uri, &headers).to_owned(),
             ),
             Err(message) => return AppError::bad_request(&message).into_response(),
         };
@@ -872,12 +877,80 @@ fn content_type_is_form(request: &Request) -> bool {
 }
 
 /// Where form logins land after the `303`: the posted `redirect` field
-/// when it is a local path, `/` otherwise.
+/// when it is a local path or a URL of one of the server's own
+/// origins, `/` otherwise.
 ///
-/// Only same-origin paths pass (see [`is_local_redirect`]) so a hostile
-/// `redirect` field cannot turn the login form into an open redirect.
-fn safe_redirect(target: Option<&str>) -> &str {
-    target.filter(|path| is_local_redirect(path)).unwrap_or("/")
+/// Only same-origin paths and absolute URLs the server itself serves
+/// pass, so a hostile `redirect` field cannot turn the login form into
+/// an open redirect:
+///
+/// - a local path (see [`is_local_redirect`]) — the shape of every
+///   phase before F19;
+/// - an absolute `http`/`https` URL whose host is one the server
+///   answers for (see [`own_url_allowed`]) — the F19 **round trip**:
+///   the sign-in link on the main host's `public/index.jhs` sends the
+///   page it came from as `?redirect=…`, and the `303` crosses the
+///   `Host` line back to it. The allowlist is exactly the family the
+///   shared session covers — the request's own host, every host the
+///   live vhost table maps, and every host under `[auth]
+///   cookie_domain` — because a redirect to a host the cookie cannot
+///   follow to would land the browser right back where it started:
+///   anonymous.
+fn safe_redirect<'a>(
+    target: Option<&'a str>,
+    state: &AppState,
+    uri: &Uri,
+    headers: &HeaderMap,
+) -> &'a str {
+    target
+        .filter(|target| is_local_redirect(target) || is_own_url(target, state, uri, headers))
+        .unwrap_or("/")
+}
+
+/// Whether `target` is one of the server's own absolute URLs: an
+/// `http`/`https` URL whose host the request itself arrived for, the
+/// live vhost table maps, or the shared session's `cookie_domain`
+/// covers. Everything else — foreign domains, `javascript:` and
+/// friends, anything unparsable — is not.
+fn is_own_url(target: &str, state: &AppState, uri: &Uri, headers: &HeaderMap) -> bool {
+    let own_host = crate::vhosts::request_host(uri, headers).map(crate::vhosts::host_name);
+    own_url_allowed(
+        target,
+        own_host,
+        state.config().auth.cookie_domain.as_str(),
+        &state.host_bindings(),
+    )
+}
+
+/// The pure core of [`is_own_url`]: `own_host` is the request's host
+/// name with the port stripped, `bindings` the live vhost table. Split
+/// out so the allowlist rules are testable without a booted state.
+fn own_url_allowed(
+    target: &str,
+    own_host: Option<&str>,
+    cookie_domain: &str,
+    bindings: &[crate::vhosts::HostBinding],
+) -> bool {
+    let Ok(url) = url::Url::parse(target) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = url.host_str().map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    // The `Domain`-attribute convention: a host is *under* the shared
+    // domain when it is the domain itself or a subdomain of it.
+    if !cookie_domain.is_empty()
+        && (host == cookie_domain || host.ends_with(&format!(".{cookie_domain}")))
+    {
+        return true;
+    }
+    own_host.is_some_and(|own| host == own.to_ascii_lowercase())
+        || bindings
+            .iter()
+            .any(|binding| binding.hostname.eq_ignore_ascii_case(&host))
 }
 
 /// A redirect target is local when it is site-rooted and cannot escape
@@ -993,11 +1066,99 @@ pub fn routes(refresh_enabled: bool) -> Router<AppState> {
 mod tests {
     use super::*;
 
+    /// A vhost-table row for the allowlist tests.
+    fn binding(hostname: &str, organization: &str) -> crate::vhosts::HostBinding {
+        crate::vhosts::HostBinding {
+            hostname: String::from(hostname),
+            organization: String::from(organization),
+            document_root: String::from("/tmp"),
+        }
+    }
+
     #[test]
     fn local_redirects_pass_validation() {
         for path in ["/", "/perfil", "/hello.jhs", "/blog/post?x=1", "/a%20b"] {
             assert!(is_local_redirect(path), "{path} should be a local redirect");
         }
+    }
+
+    #[test]
+    fn the_round_trip_accepts_the_own_family() {
+        // The F19 local-dev recipe: cookie_domain covers the main
+        // host, the CMS host and every tenant under it.
+        let bindings = [
+            binding("cms.app.localhost", "cms"),
+            binding("a.example.com", "main"),
+        ];
+        for target in [
+            "http://app.localhost/",
+            "https://CMS.app.localhost:8443/admin",
+            "http://cms.app.localhost/blog?page=2#frag",
+        ] {
+            assert!(
+                own_url_allowed(
+                    target,
+                    Some("cms.app.localhost"),
+                    "app.localhost",
+                    &bindings
+                ),
+                "{target} should round-trip"
+            );
+        }
+        // The request's own host, with no cookie_domain at all: the
+        // same-origin rule spelled absolute.
+        assert!(own_url_allowed(
+            "http://localhost:8080/after",
+            Some("localhost"),
+            "",
+            &[]
+        ));
+        // A host the vhost table maps — even outside the cookie's
+        // family, the server still serves it.
+        assert!(own_url_allowed(
+            "https://a.example.com/",
+            Some("cms.app.localhost"),
+            "app.localhost",
+            &bindings
+        ));
+        // Case and ports are identity-free: the host is the name.
+        assert!(own_url_allowed(
+            "HTTP://APP.localhost/",
+            Some("cms.app.localhost"),
+            "app.localhost",
+            &[]
+        ));
+    }
+
+    #[test]
+    fn the_round_trip_refuses_everyone_else() {
+        let bindings = [binding("cms.app.localhost", "cms")];
+        for target in [
+            // Foreign domains — the open-redirect guard.
+            "https://evil.example/",
+            "http://app.localhost.evil.example/",
+            "https://notapp.localhost/",
+            // Other schemes cannot ride a Location header.
+            "javascript:alert(1)",
+            "data:text/html,hello",
+            "file:///etc/passwd",
+            "ftp://app.localhost/",
+            // Unparsable shapes.
+            "http://",
+            "::not a url",
+        ] {
+            assert!(
+                !own_url_allowed(
+                    target,
+                    Some("cms.app.localhost"),
+                    "app.localhost",
+                    &bindings
+                ),
+                "{target} must be refused"
+            );
+        }
+        // No own host, no cookie_domain, no bindings: nothing is ours.
+        assert!(!own_url_allowed("http://app.localhost/", None, "", &[]));
     }
 
     #[test]
@@ -1017,10 +1178,25 @@ mod tests {
 
     #[test]
     fn unsafe_redirect_targets_fall_back_to_the_site_root() {
-        assert_eq!(safe_redirect(Some("/perfil")), "/perfil");
-        assert_eq!(safe_redirect(Some("https://evil.example")), "/");
-        assert_eq!(safe_redirect(Some("//evil.example")), "/");
-        assert_eq!(safe_redirect(None), "/");
+        // A single-host, host-only state: the request carries no Host
+        // header, nothing is mapped, no shared domain — the only shape
+        // that passes is the local path.
+        let state = AppState::new(crate::config::AppConfig::default());
+        let uri = Uri::from_static("/api/auth/login");
+        let headers = HeaderMap::new();
+        assert_eq!(
+            safe_redirect(Some("/perfil"), &state, &uri, &headers),
+            "/perfil"
+        );
+        assert_eq!(
+            safe_redirect(Some("https://evil.example"), &state, &uri, &headers),
+            "/"
+        );
+        assert_eq!(
+            safe_redirect(Some("//evil.example"), &state, &uri, &headers),
+            "/"
+        );
+        assert_eq!(safe_redirect(None, &state, &uri, &headers), "/");
     }
 
     #[test]

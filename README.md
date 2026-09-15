@@ -446,6 +446,20 @@ directive (anything not named inherits `default-src`):
 (`form-action`, `frame-ancestors` and `base-uri` never inherit from
 `default-src` — that is why the shipped value names them explicitly.)
 
+One automatic widening, and it exists because of a redirect you
+will otherwise chase for an afternoon: while the server runs a
+multi-host layout (a `[cms] hosts` entry, a domains-table row) or
+the shared session (`[auth] cookie_domain`), a `form-action 'self'`
+policy gains the family's origins — the `cookie_domain` with its
+subdomains and every mapped host, with the serving scheme and
+`[server]` port. Without it, a login form's `303` back to the
+page the visitor came from is silently swallowed by the browser
+(the POST succeeds, the cookie is stored, the navigation never
+happens). The additions mirror the auth forms' `redirect`
+allowlist exactly; a policy whose `form-action` names other sources
+ships as written, and this cookbook's manual widening is then the
+one to use.
+
 When something is blocked, the console says so:
 
 ```console
@@ -909,8 +923,14 @@ forms inside CSS-only modals (`#login` / `#registrar`, opened with the
 `:target` trick) plus the logout button. Form posts answer:
 
 - **login success** → `303 See Other` + the session cookie, landing on
-  the `redirect` field when it is a local path (`/…`, never `//host` or
-  an absolute URL — off-site values fall back to `/`);
+  the `redirect` field when it is a local path (`/…`, never `//host`) **or
+  an absolute URL of one of the server's own hosts** (F19's round trip:
+  the request's host, a host the vhost table maps, or one under
+  `[auth] cookie_domain` — anything else still falls back to `/`, the
+  open-redirect guard). The `login_url` template global writes the
+  sign-in link that carries the page it came from:
+  `<a href="<?= login_url ?>">Sign in</a>` on `public/index.jhs`
+  signs the visitor in and lands them back on the very page;
 - **login failure** → `303` back to the same page with
   `?login_error=credenciales#login`, which re-opens the modal and shows
   the message (server-rendered; the code is fixed, never reflected);

@@ -265,7 +265,7 @@ it on every build):
 
 | Capability | `backend = "boa"` | `backend = "sidecar"`/`"auto"` + Node |
 |---|---|---|
-| globals `query`, `user`, `path`, `pages`, `menus`, `cms_origin` | yes | yes |
+| globals `query`, `user`, `path`, `pages`, `menus`, `cms_origin`, `login_url` | yes | yes |
 | `echo(…)`, `<?= ?>`, `raw()` | yes | yes |
 | `require("./module")` from `modules/` | yes | yes |
 | `require("url")` (Node built-ins) | **no — 500 with an explanatory banner** | yes |
@@ -704,8 +704,9 @@ Both hosts resolve `/` through an explicit chain, and the main
 host's can be dynamic: drop an `index.jhs` beside the static
 `index.html` and it takes the homepage, rendered through the
 sandboxed engine with the usual globals (`user`, `path`, `query`,
-`pages`, `menus`, `req`, `cms_origin` — the main site can list the
-CMS's published pages and link the CMS host too). The order, most
+`pages`, `menus`, `req`, `cms_origin`, `login_url` — the main site
+can list the CMS's published pages, link the CMS host and send the
+visitor to sign in and come back). The order, most
 specific first:
 
 - **main host**: `public/index.jhs` (rendered) → `public/index_file`
@@ -738,21 +739,39 @@ the CMS host only, and the main host's 404s stay 404s by design. A
 
 ```jhs
 <nav>
-  <a href="<?= cms_origin ?>/login">Sign in</a>
+  <a href="<?= login_url ?>">Sign in</a>
   <a href="<?= cms_origin ?>/admin">CMS panel</a>
 </nav>
 ```
 
 The contract is one sentence: **the CMS surface's origin, or the
 empty string while every surface shares one host** — so
-`<?= cms_origin ?>/login` is the relative `/login` before the split
-and the absolute `https://cms.example.com/login` after it, from
+`<?= cms_origin ?>/admin` is the relative `/admin` before the split
+and the absolute `https://cms.example.com/admin` after it, from
 the same template, with zero new configuration. While `cms.hosts`
 is set the origin is the **first** entry (the canonical name) with
 the scheme from `[tls] enabled` and a non-default `[server] port`
 tagging along; `cms.site_url` overrides the derivation — the same
 key the sitemap and feeds already trust, so a reverse-proxy
 deployment fixes the links and the feeds with one value.
+
+The sign-in entry deserves the return half of the trip, so it has
+its own global: **`login_url`** is `cms_origin` +
+`/login?redirect=<this page's absolute URL>` — the login page on
+the CMS host, carrying the very page the visitor clicked from. The
+`redirect` field the login form posts back is validated against
+the family of hosts the server actually serves (the request's own
+host, every host the live vhost table maps, and everything under
+`[auth] cookie_domain`), so a hostile `redirect` cannot turn the
+form into an open redirect — and the `303` lands the signed-in
+visitor back on the page they came from, cookie and all: the
+`Content-Security-Policy`'s `form-action` is widened to the same
+family (see below). On the
+single-host server the global degrades to the relative
+`/login?redirect=<this page's path>`, the shape every phase before
+the split served. Behind a TLS-terminating proxy the derived scheme
+can lie about the protocol (never about the host — hosts are what
+the allowlist checks), the same caveat `cms_origin` documents.
 
 Two things deliberately do **not** need the origin:
 
@@ -767,14 +786,15 @@ Two things deliberately do **not** need the origin:
   </form>
   ```
 
-- **The session cookie is host-only** (`HttpOnly`, `SameSite=Strict`,
-  no `Domain`): signing in on the CMS host does not identify you on
-  the main host. A public site that greets signed-in users needs
-  its own no-JS login form on the main host — the login modal
-  pattern of `views/partials/header.jhs`, posting to the
-  same-origin `/api/auth/login`. Sharing one session across hosts
-  would mean a `Domain` cookie — a deliberate non-feature so far:
-  the editor session never leaks to the static site.
+- **The session cookie crosses the `Host` line while `[auth]
+  cookie_domain` names a parent domain** (F19) — otherwise it stays
+  host-only: signing in on the CMS host does not identify you on
+  the main host, and a public site that greets signed-in users
+  needs its own no-JS form (the login modal pattern of
+  `views/partials/header.jhs`, posting to the same-origin
+  `/api/auth/login`). With the shared session on, the same `user`
+  global personalises the main site, the CMS and every tenant
+  under the domain — one sign-in, every host.
 
 The origin is public information by construction — a name the
 server publishes anyway — so the global reaches every render
@@ -1258,6 +1278,56 @@ attribute.
   `cms.app.localhost` carry the cookie (verified against a real
   browser, not just the reqwest jar).
 
+### The round trip: `login_url` and the returning redirect
+
+Sharing the cookie solved only half of the sign-in flow the public
+site meets: the visitor on `http://app.localhost:8080/` who clicks
+**Sign in** still landed on the CMS host's `/profile` after the
+form, with no way back to the page they were reading. The round
+trip closes that with two halves that only work together:
+
+- **The `login_url` template global** — `cms_origin` +
+  `/login?redirect=<this page's absolute URL>` while the CMS has
+  its own host (the relative `/login?redirect=<this page's
+  path>` on the single-host server). The absolute URL is built
+  from the request's own `Host` header and the `[tls]` scheme,
+  the same derivation `cms_origin` uses; `public/index.jhs`
+  writes `<a href="<?= login_url ?>">Sign in</a>` and nothing
+  else.
+- **The returning `redirect`** — the login, register and logout
+  forms' `redirect` field now also accepts absolute `http`/`https`
+  URLs whose host is one the server itself serves: the request's
+  own host, every host the live vhost table maps, and everything
+  under `cookie_domain`. A redirect to a host the shared session
+  cannot follow to would land the visitor signed-out on the page
+  they came from, so the allowlist is exactly the family the
+  cookie covers — and foreign domains, `javascript:` and every
+  other scheme keep falling back to `/`, the open-redirect guard
+  of every phase before.
+
+The failure bounce (`?login_error=invalid#login`) composes with
+the absolute target's query string, so a wrong password returns
+to the same public page with the message, not to `/profile`.
+
+### The round trip's browser half: `form-action`
+
+There is a third piece, and it lives in the browser: a form's
+`303` may only cross the `Host` line when the page's
+`Content-Security-Policy` lets the redirect target through, and
+the shipped `form-action 'self'` pins forms to one origin — the
+sign-in POST succeeds, the cookie is stored, and the navigation is
+swallowed whole (not one follow-up request; Chrome only notes it
+in its console). The server therefore widens the
+**configured** policy automatically: while the family is
+non-empty, `form-action 'self'` gains the very origins the
+`redirect` allowlist trusts — the `cookie_domain` and its
+subdomains plus every host the live vhost table maps, with the
+scheme from `[tls]` and the `[server]` port — so the policy admits
+exactly the family the server sends forms back to, and never a
+foreign origin. A policy whose `form-action` names other sources
+(or carries none) is the operator's own and ships untouched; the
+CSP cookbook documents the manual widening for such setups.
+
 ### The local-dev recipe
 
 The shipped `wallermax.toml` leaves `cookie_domain` **empty** (the
@@ -1280,18 +1350,25 @@ table edit — the F18 panel's Tenants pages do it live, no restart.
 `tests/shared_session.rs` walks the operator's browser: the form
 login's `Set-Cookie` (with and without the `Domain`), the `/profile`
 render right after it, the main host's greeting, the tenant host's
-greeting, the register path, the refresh rotation and both logout
-shapes. What reqwest cannot model is the browser's per-domain
-cookie jar across virtual host names (its jar keys on the
-connection's URL host) — and, being lax where browsers are strict,
-it would have accepted the one-label `localhost` that killed the
-first attempt. The true cross-host behaviour — store, replay,
-clear — was therefore verified against a live server with a real
-browser (sign in on `http://cms.app.localhost:8080/login`, the
-profile greets, `http://app.localhost:8080/` greets, a cross-host
-link click carries the session, logout clears it everywhere)
-before the patch shipped. That manual walk is the acceptance bar
-for any future change to the cookie attributes.
+greeting, the register path, the refresh rotation, both logout
+shapes — and the round trip: the sign-in link carrying the return
+page, the `303` back to the main host (query string composed on
+the failure bounce included), the off-family targets (the
+one-label `localhost` split above all) falling back to `/`, and
+the `form-action` widening that lets the browser follow the
+cross-host redirect at all. What reqwest cannot model is the
+browser's per-domain cookie jar across virtual host names (its jar
+keys on the connection's URL host) — and, being lax where browsers
+are strict, it would have accepted the one-label `localhost` that
+killed the first attempt. The true cross-host behaviour — store,
+replay, clear — was therefore verified against a live server with
+a real browser (sign in from `http://app.localhost:8080/`'s link,
+the `303` returns to that very page, the profile greets,
+`http://app.localhost:8080/` greets, a cross-host link click
+carries the session, logout clears it everywhere) before the patch
+shipped. That manual walk is the acceptance bar for any future
+change to the cookie attributes — or to the redirect allowlist,
+or to the widened `form-action`.
 
 ## Configuration
 
@@ -1460,6 +1537,13 @@ the same discipline as the phases before it:
   a validated `Domain`, every set/clear/rotation carries it
   symmetrically, and `public/index.jhs` greets `user.username`
   with zero template changes — this document.
+- **F19 follow-up — the sign-in round trip** (done): the
+  `login_url` template global and the returning `redirect` — the
+  sign-in link on the main host carries the page it came from, the
+  login form posts it, and the `303` crosses the `Host` line back
+  to the very page, signed in (the allowlist: the request's own
+  host, the live vhost table's hosts, and everything under
+  `cookie_domain` — never a foreign domain) — this document.
 - **F20** (next candidate): per-tenant panels — a tenant
   administrator manages their organization's own content.
 

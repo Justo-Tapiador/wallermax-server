@@ -1330,8 +1330,8 @@ impl AppConfig {
         if let Err(problem) = validate_cookie_domain(&self.auth.cookie_domain) {
             return Err(ConfigError::Message(format!(
                 "`auth.cookie_domain` is not a bare parent domain: {problem}. Write it without \
-                 scheme, port, path or leading dot — e.g. \"localhost\" or \"example.com\" — or \
-                 leave it empty for the host-only cookie"
+                 scheme, port, path or leading dot — e.g. \"app.localhost\" or \"example.com\" — \
+                 or leave it empty for the host-only cookie"
             )));
         }
         Ok(())

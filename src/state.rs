@@ -663,6 +663,74 @@ impl AppState {
         self.vhost_snapshot().cms_origin
     }
 
+    /// The `Content-Security-Policy` value with `form-action` widened
+    /// to the round-trip family (F19's follow-up), or `None` while the
+    /// configured policy needs no widening — the precomputed pair from
+    /// [`Self::security_headers`] then stands.
+    ///
+    /// A form's `303` may only cross the `Host` line when the browser's
+    /// CSP lets the redirect target through; `form-action 'self'`
+    /// (the shipped default) pins it to one origin, which swallowed
+    /// the round trip's navigation whole — the sign-in succeeded, the
+    /// cookie was stored, and the browser never left the login page.
+    /// The widening adds exactly the family the `redirect` allowlist
+    /// trusts (see [`crate::routes::auth`]): every host the live vhost
+    /// table maps plus, while the shared session is on, the
+    /// `cookie_domain` and its subdomains — never a foreign origin.
+    /// A policy whose `form-action` names other sources, or carries
+    /// none, is the operator's own and is left as written.
+    pub fn form_action_csp(&self) -> Option<HeaderValue> {
+        let family = self.form_action_sources();
+        if family.is_empty() {
+            return None;
+        }
+        let policy = &self.config().security_headers.content_security_policy;
+        crate::middleware::security_headers::expand_form_action(policy, &family)
+            .and_then(|widened| HeaderValue::from_str(&widened).ok())
+    }
+
+    /// The origins the round trip may move forms between, as CSP
+    /// source expressions: the shared session's `cookie_domain` (the
+    /// domain itself and its subdomains) while set, plus every host
+    /// the live vhost table maps that the domain does not cover — a
+    /// tenant served under its own name still gets its returning
+    /// redirects. The scheme follows `[tls]`, the port `[server]`
+    /// (omitted on the scheme's default and on the ephemeral test
+    /// port, the same convention `cms_origin` derives by).
+    fn form_action_sources(&self) -> Vec<String> {
+        let config = self.config();
+        let domain = config.auth.cookie_domain.as_str();
+        let bindings = self.host_bindings();
+        if domain.is_empty() && bindings.is_empty() {
+            return Vec::new();
+        }
+        let scheme = if config.tls.enabled { "https" } else { "http" };
+        let default_port = if config.tls.enabled { 443 } else { 80 };
+        let port = config.server.port;
+        let port_suffix = if port != 0 && port != default_port {
+            format!(":{port}")
+        } else {
+            String::new()
+        };
+
+        let mut sources = Vec::new();
+        if !domain.is_empty() {
+            sources.push(format!("{scheme}://{domain}{port_suffix}"));
+            sources.push(format!("{scheme}://*.{domain}{port_suffix}"));
+        }
+        for binding in &bindings {
+            let host = binding.hostname.to_ascii_lowercase();
+            let under_domain =
+                !domain.is_empty() && (host == domain || host.ends_with(&format!(".{domain}")));
+            if !under_domain {
+                sources.push(format!("{scheme}://{host}{port_suffix}"));
+            }
+        }
+        sources.sort();
+        sources.dedup();
+        sources
+    }
+
     /// A clone of the live virtual-host snapshot (F18): the host
     /// resolution table, the derived origins, and one ready serving
     /// tree per tenant organization. What the dispatcher and the

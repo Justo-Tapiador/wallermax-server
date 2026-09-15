@@ -217,7 +217,8 @@ struct FixtureDir {
     path: PathBuf,
 }
 
-/// The main host's dynamic homepage: the F19 acceptance template.
+/// The main host's dynamic homepage: the F19 acceptance template,
+/// with the round trip's sign-in link beside the greeting.
 const MAIN_INDEX_JHS: &str = r#"<!DOCTYPE html>
 <html>
 <body>
@@ -225,6 +226,7 @@ const MAIN_INDEX_JHS: &str = r#"<!DOCTYPE html>
 <p id="saludo">Hola, <?= user.username ?> (<?= user.role ?>)</p>
 <?jhs } else { ?>
 <p id="saludo">Hola, anónimo</p>
+<a id="entrar" href="<?= login_url ?>">Sign in</a>
 <?jhs } ?>
 </body>
 </html>
@@ -463,6 +465,175 @@ async fn the_shared_session_personalises_the_tenant_host() {
     );
 
     let _ = std::fs::remove_dir_all(&tenant_root);
+}
+
+// ── The round trip: the sign-in link that returns ───────────────
+
+#[tokio::test]
+async fn the_sign_in_link_carries_the_return_page() {
+    let (config, _db, _fixture) = shared_config();
+    let server = TestServer::start_full(config).await;
+
+    // The anonymous homepage's sign-in link: the login page on the
+    // CMS host, carrying this very page back as the redirect target
+    // (the derived origin carries the configured port — 8080, the
+    // default — while the return URL takes the Host header as the
+    // browser addressed it).
+    let response = client()
+        .get(server.url("/"))
+        .header(HOST, host(MAIN_HOST))
+        .send()
+        .await
+        .expect("anonymous main home");
+    let body = response.text().await.expect("main home body");
+    assert!(
+        body.contains(
+            "href=\"http://cms.app.localhost:8080/login?redirect=http%3A%2F%2Fapp.localhost%2F\""
+        ),
+        "the sign-in link points at the login page carrying this page back: {body}"
+    );
+}
+
+#[tokio::test]
+async fn the_form_login_returns_to_the_main_host() {
+    let (config, _db, _fixture) = shared_config();
+    let server = TestServer::start_full(config).await;
+    register_admin(&server).await;
+
+    // The second half of the round trip: the login form posts the
+    // page it was opened from, and the 303 crosses the Host line
+    // back to it — verbatim, query string included.
+    let response = client()
+        .post(server.url("/api/auth/login"))
+        .header(HOST, host(CMS_HOST))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "username={}&password={}&redirect=http%3A%2F%2Fapp.localhost%2Fdocs%3Fpage%3D2",
+            ADMIN.0, ADMIN.1
+        ))
+        .send()
+        .await
+        .expect("form login request");
+    assert_eq!(response.status(), 303, "the form login redirects");
+    assert_eq!(
+        response
+            .headers()
+            .get("location")
+            .and_then(|value| value.to_str().ok()),
+        Some("http://app.localhost/docs?page=2"),
+        "the redirect crosses the Host line back to the main host"
+    );
+    assert!(
+        set_cookie(&response).contains("; Domain=app.localhost"),
+        "the session follows the redirect: {}",
+        set_cookie(&response)
+    );
+
+    // A failed sign-in bounces back to the same page with the error
+    // code composed into its query string.
+    let response = client()
+        .post(server.url("/api/auth/login"))
+        .header(HOST, host(CMS_HOST))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "username={}&password=wrong-pass&redirect=http%3A%2F%2Fapp.localhost%2Fdocs%3Fpage%3D2",
+            ADMIN.0
+        ))
+        .send()
+        .await
+        .expect("failed form login request");
+    assert_eq!(response.status(), 303, "the failed login redirects");
+    assert_eq!(
+        response.headers()["location"],
+        "http://app.localhost/docs?page=2&login_error=invalid#login",
+        "the bounce-back composes with the target's query string"
+    );
+}
+
+#[tokio::test]
+async fn the_csp_widens_form_action_to_the_family() {
+    let (config, _db, _fixture) = shared_config();
+    let server = TestServer::start_full(config).await;
+
+    // The browser side of the round trip: `form-action 'self'` pins a
+    // form's redirect to one origin, and the login form's `303` must
+    // cross the Host line back to the main host — so the policy the
+    // server ships has to admit the family. The configured port (8080,
+    // the default) tags along, the domain and its subdomains are the
+    // additions, and nothing foreign rides along with them.
+    let response = client()
+        .get(server.url("/login"))
+        .header(HOST, host(CMS_HOST))
+        .send()
+        .await
+        .expect("login page request");
+    let csp = response
+        .headers()
+        .get("content-security-policy")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        csp.contains("form-action 'self' http://*.app.localhost:8080 http://app.localhost:8080;"),
+        "the shipped policy, widened to the round-trip family: {csp}"
+    );
+    assert!(!csp.contains("evil"), "nothing beyond the family: {csp}");
+
+    // The control: the single-host server keeps the policy as
+    // configured — no family, no widening.
+    let (mut config, _db, _fixture) = host_only_config();
+    config.cms.hosts = Vec::new();
+    let server = TestServer::start_full(config).await;
+    let response = client()
+        .get(server.url("/"))
+        .header(HOST, host("localhost"))
+        .send()
+        .await
+        .expect("single-host home request");
+    let csp = response
+        .headers()
+        .get("content-security-policy")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        !csp.contains("app.localhost"),
+        "the single-host policy stays as written: {csp}"
+    );
+}
+
+#[tokio::test]
+async fn off_family_redirect_targets_fall_back_to_the_cms_home() {
+    let (config, _db, _fixture) = shared_config();
+    let server = TestServer::start_full(config).await;
+    register_admin(&server).await;
+
+    // The local-dev trap this battery pins: a main host the shared
+    // domain does not cover (the one-label `localhost` split —
+    // `cookie_domain` cannot name it) is NOT ours, so its round trip
+    // is refused and the fallback is the CMS host's root.
+    for target in [
+        "http%3A%2F%2Flocalhost%3A8080%2F",
+        "http%3A%2F%2Fevil.example%2Fphish",
+    ] {
+        let response = client()
+            .post(server.url("/api/auth/login"))
+            .header(HOST, host(CMS_HOST))
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(format!(
+                "username={}&password={}&redirect={target}",
+                ADMIN.0, ADMIN.1
+            ))
+            .send()
+            .await
+            .expect("form login request");
+        assert_eq!(response.status(), 303, "redirect target: {target}");
+        assert_eq!(
+            response.headers()["location"],
+            "/",
+            "off-family target {target} must fall back to /"
+        );
+    }
 }
 
 // ── The lifecycle: the same Domain everywhere ─────────────────────

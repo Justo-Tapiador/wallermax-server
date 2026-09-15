@@ -226,6 +226,31 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
+/// Percent-encodes a value for a URI query position with
+/// `encodeURIComponent` semantics (F19's round trip): every byte
+/// outside the unreserved set — `A-Z a-z 0-9 - _ . ! ~ * ' ( )` —
+/// becomes `%XX`, so the result splices into a query string and
+/// survives the form-post round trip unchanged.
+pub(crate) fn encode_uri_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for &byte in value.as_bytes() {
+        let unreserved = byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')'
+            );
+        if unreserved {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[usize::from(byte >> 4)] as char);
+            encoded.push(HEX[usize::from(byte & 0x0f)] as char);
+        }
+    }
+    encoded
+}
+
 /// Reads a bounded `application/x-www-form-urlencoded` body and decodes
 /// it as `T`, answering the human-readable failure (the caller renders
 /// it on the browser-facing error page: the sender is a form, and a
@@ -399,6 +424,25 @@ mod tests {
             let (year, month, day) = civil_from_days(days);
             assert_eq!(days_from_civil(year, month, day), days);
         }
+    }
+
+    #[test]
+    fn uri_component_encoding_matches_encodeuricomponent() {
+        // Unreserved characters ride along verbatim.
+        assert_eq!(encode_uri_component("aZ09-_.!~*'()"), "aZ09-_.!~*'()");
+        // The URL grammar the round trip splices into.
+        assert_eq!(
+            encode_uri_component("http://app.localhost:8080/blog?x=1"),
+            "http%3A%2F%2Fapp.localhost%3A8080%2Fblog%3Fx%3D1"
+        );
+        // Spaces, quotes, ampersands and pluses cannot smuggle extra
+        // query parameters.
+        assert_eq!(encode_uri_component("a b&c=d+e"), "a%20b%26c%3Dd%2Be");
+        assert_eq!(encode_uri_component("\"#%<>"), "%22%23%25%3C%3E");
+        // Non-ASCII encodes as its UTF-8 bytes, like the browser's.
+        assert_eq!(encode_uri_component("español"), "espa%C3%B1ol");
+        assert_eq!(encode_uri_component("/"), "%2F");
+        assert_eq!(encode_uri_component(""), "");
     }
 
     #[test]
