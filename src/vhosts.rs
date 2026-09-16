@@ -98,6 +98,19 @@ pub(crate) enum HostClass<'a> {
     Tenant(&'a HostBinding),
 }
 
+impl HostClass<'_> {
+    /// The organization the class serves (F20): the tenant's key, or
+    /// `None` for the two bootstrap classes (whose organizations the
+    /// callers resolve by name — the CMS organization for content
+    /// scope, the main organization for static roots).
+    pub(crate) fn organization(&self) -> Option<&str> {
+        match self {
+            HostClass::Tenant(binding) => Some(&binding.organization),
+            _ => None,
+        }
+    }
+}
+
 /// Resolves a request against the boot-time host bindings (F17).
 ///
 /// This is the single pure function the dispatcher and the templates
@@ -123,6 +136,24 @@ pub(crate) fn classify<'a>(
         CMS_ORGANIZATION_KEY => HostClass::Cms,
         MAIN_ORGANIZATION_KEY => HostClass::Main,
         _ => HostClass::Tenant(binding),
+    }
+}
+
+/// The organization a request's host resolves to, as a content scope
+/// (F20): the mapped organization on a tenant host; the CMS
+/// organization everywhere else — on the CMS host by definition, on
+/// the single-host server because its one tree is the CMS surface,
+/// and fail-safe on a main-host arrival, whose tree never mounts the
+/// CMS family at all.
+///
+/// This is the one place the content plane learns which tenant a
+/// request serves: the guards check the membership against it, the
+/// handlers pass it to the repositories, and `base_data` scopes the
+/// `pages`/`menus` template globals by it.
+pub(crate) fn organization_key(uri: &Uri, headers: &HeaderMap, bindings: &[HostBinding]) -> String {
+    match classify(uri, headers, bindings).organization() {
+        Some(organization) => organization.to_owned(),
+        None => CMS_ORGANIZATION_KEY.to_owned(),
     }
 }
 
@@ -333,6 +364,33 @@ mod tests {
             HostClass::Tenant(&shop),
             "the class carries the row that matched, root included"
         );
+    }
+
+    #[test]
+    fn the_content_scope_follows_the_host() {
+        // F20: the organization key a request's content belongs to —
+        // the tenant's on a tenant host, the CMS organization
+        // everywhere else (the CMS host, the single-host server, and
+        // fail-safe on the main host).
+        let bindings = bindings();
+        let scope = |host: Option<&str>| {
+            let (uri, headers) = request("/p", host);
+            organization_key(&uri, &headers, &bindings)
+        };
+        assert_eq!(scope(Some("cms.test")), "cms");
+        assert_eq!(scope(Some("cms.test:8443")), "cms");
+        assert_eq!(scope(Some("shop.example.com")), "shop");
+        assert_eq!(scope(Some("localhost")), "cms", "unknown hosts fail safe");
+        assert_eq!(scope(None), "cms", "no Host at all fails safe");
+    }
+
+    #[test]
+    fn the_single_host_server_scopes_to_the_cms_organization() {
+        // No bindings mapped: the one tree is the whole server, and
+        // its content is the CMS organization's — the pre-F20
+        // behaviour, unchanged.
+        let (uri, headers) = request("/p", Some("anything.test"));
+        assert_eq!(organization_key(&uri, &headers, &[]), "cms");
     }
 
     #[test]

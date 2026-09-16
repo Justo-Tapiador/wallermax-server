@@ -1,10 +1,13 @@
 <?jhs
-  // Shared admin sidebar (F12). Globals: user, path.
-  // The active link derives from the current path; the Users section
-  // is admin-only, the same gate the routes enforce. "View site" and
-  // the sign-out form live in SYSTEM so they survive the collapsed
-  // icon rail (the user-mini text does not).
+  // Shared admin sidebar (F12). Globals: user, path, organization.
+  // The active link derives from the current path; the Users and
+  // Tenants sections are the platform's — the CMS organization's
+  // admins, on the CMS organization's host (F20; a tenant's panel
+  // keeps to its own content, and those routes are not even mounted
+  // there). "View site" and the sign-out form live in SYSTEM so they
+  // survive the collapsed icon rail (the user-mini text does not).
   var esAdmin = user && user.role == "admin";
+  var esPlataforma = organization == "cms";
   var iniciales = user ? user.username.slice(0, 2).toUpperCase() : "";
 ?>
 <aside class="sidebar">
@@ -19,7 +22,7 @@
     <a href="/admin/pages"<?jhs if (path.indexOf("/admin/pages") === 0) { ?> class="active"<?jhs } ?>><span class="icon">&#9636;</span><span>Pages</span></a>
     <a href="/admin/media"<?jhs if (path.indexOf("/admin/media") === 0) { ?> class="active"<?jhs } ?>><span class="icon">&#9639;</span><span>Media</span></a>
     <a href="/admin/menus"<?jhs if (path.indexOf("/admin/menus") === 0) { ?> class="active"<?jhs } ?>><span class="icon">&#9776;</span><span>Menus</span></a>
-<?jhs if (esAdmin) { ?>
+<?jhs if (esAdmin && esPlataforma) { ?>
     <div class="nav-section">TEAM</div>
     <a href="/admin/users"<?jhs if (path.indexOf("/admin/users") === 0) { ?> class="active"<?jhs } ?>><span class="icon">&#9678;</span><span>Users</span></a>
     <div class="nav-section">TENANTS</div>

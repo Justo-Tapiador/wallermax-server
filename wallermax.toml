@@ -440,6 +440,15 @@ secure_cookies = "auto"
 #
 # cookie_domain = "app.localhost"
 
+# Per-tenant content (F20): pages, menus and media belong to the
+# organization the creating request served — a tenant's host mounts
+# the CMS visitor surface scoped to its own organization (public
+# pages, search, feeds, media and the panel's content pages), while
+# the platform panel (/admin/users, /admin/tenants, the import tool)
+# stays on the CMS hosts. Nothing to configure: the tenants were
+# already rows, and their content is data too. See README-CMS.md,
+# "Per-tenant panels (F20)".
+
 # Refresh tokens: long-lived opaque tokens returned by login and rotated
 # by POST /api/auth/refresh. Presenting a rotated token (a replay,
 # presumably theft) revokes the whole session family. Disable to get the

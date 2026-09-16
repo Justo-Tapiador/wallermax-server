@@ -591,6 +591,21 @@ async fn delete_tenant(
         return see_other(&format!("/admin/tenants/{key}?error=seeded"));
     }
 
+    // F20: a tenant that still owns content is not deletable — the
+    // operator moves or deletes the content first. Content is never
+    // silently destroyed with its tenant (the same doctrine that
+    // reparents children and keeps pages whose author was deleted).
+    match cms.organizations.content_counts(&key).await {
+        Ok(counts) if !counts.is_empty() => {
+            return see_other(&format!("/admin/tenants/{key}?error=content"));
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::error!(%error, "tenant content count failed");
+            return AppError::internal("storage failure").into_response();
+        }
+    }
+
     match cms.organizations.delete(&key).await {
         Ok(true) => {}
         Ok(false) => return see_other("/admin/tenants"),

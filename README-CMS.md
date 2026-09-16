@@ -1370,6 +1370,123 @@ shipped. That manual walk is the acceptance bar for any future
 change to the cookie attributes — or to the redirect allowlist,
 or to the widened `form-action`.
 
+## Per-tenant panels (F20): the organizations own their content
+
+F15 gave every surface an identity; F16–F18 made the serving and the
+management data-driven; F19 shared the session across the names. What
+none of it touched was the content itself: pages, menus and media
+lived in one global plane, served on the CMS organization's hosts —
+a tenant was a self-contained static tree, and nothing else. F20
+finishes the arc: **every organization is a full CMS tenant**.
+
+### The content plane learns its organization
+
+`pages`, `menus` and `media` carry an `organization_id` (migration
+0011), backfilled to the CMS organization — the only tenant with
+content before F20, so an upgrade changes nothing. The two natural
+keys stop being global: `UNIQUE(organization_id, slug)` and
+`UNIQUE(organization_id, name)` — the same slug is free on two
+names, the same menu key on both sides. `menu_items` and
+`page_revisions` reach their organization through their menu and
+their page, exactly like before. Media keeps its flat,
+server-generated names and the one shared directory: the names are
+UUID stems, so cross-organization collisions cannot happen by
+construction, and the on-disk layout is untouched.
+
+The migration is the careful one of the series (marked
+`-- no-transaction`): SQLite cannot drop a column constraint, so the
+tables are rebuilt — create the new shape, copy the rows preserving
+ids, drop the old, rename. Foreign key enforcement is relaxed around
+the rebuild (from `run_migrations`, on the migrator's own
+connection — sqlx wraps every migration in a transaction, and a
+`PRAGMA` inside one is a no-op), because dropping the old `pages`
+with enforcement on would cascade `page_revisions` away and take
+the history with it. The ids survive, so every child row keeps
+pointing at its page; the FTS5 triggers are recreated verbatim and
+the index rebuilt from the content table in one statement. The
+upgrade battery proves it end to end on a rewound, pre-F20-shaped
+database: ids, history, menu links and search all intact after the
+rebuild — and the same slug available to a second organization.
+
+### One request, one organization
+
+Every layer of a request agrees on its tenant by construction: the
+pure `vhosts::organization_key` resolves the `Host` header against
+the live bindings (the mapped organization on a tenant host; the CMS
+organization everywhere else — the single-host server's one tree
+included). The guards check the membership against **that**
+organization, the handlers pass it to the repositories, and
+`base_data` scopes the `pages` and `menus` template globals by it —
+a tenant's templates see the tenant's content and nothing else. A
+new `organization` global carries the key, for the panel chrome to
+condition on.
+
+The draft gate follows too: the right to preview a page is a
+membership of the request's organization, not the token's platform
+role — the platform admin does not see another tenant's drafts,
+signed in or not.
+
+### What serves where
+
+| On a tenant's host | Stays on the CMS organization's host |
+|---|---|
+| Its own static tree (its files win) | The platform panel: `/admin/users` |
+| `/p`, `/p/{slug}` — its pages | `/admin/tenants` |
+| `/search`, `/sitemap.xml`, `/feed.xml`, `/atom.xml` | `/admin/pages/import` |
+| `/media/...` — its library | `/api`, `/health`, `/metrics`, the proxy |
+| `/admin` — dashboard, pages, menus, media, history | The main tree's whole surface |
+| `/login`, `/register`, `/profile` (the shared views) | |
+
+The tenant tree mounts the CMS family scoped to its organization —
+the same handlers, the same guards, one pure resolution apart. The
+platform routes are **not mounted** on it, so a tenant host answers
+its standard 404 (or the POST-only page route's 405, where the paths
+collide) — by construction rather than by a check. The views
+auto-routing (the no-JS `/login`, `/register`, `/profile` pages)
+serves on every visitor host, but never `/admin/*`: panel views are
+rendered by their handlers with their data, never standalone.
+
+The panel chrome is shared: the sidebar shows the Team and Tenants
+sections only on the CMS organization's host, and the shared
+stylesheets (`/assets/*`) serve on a tenant host as a fallback —
+the tenant's own file wins first, and one that wants the default
+look gets it without copying anything. Feeds, sitemap and search on
+a tenant host build their absolute URLs from the request's own
+`Host`: a tenant's site is its own origin, and `[cms] site_url`
+speaks for the CMS organization only.
+
+### Authorization, zero surprises
+
+A membership of one organization is worth nothing on another's
+host: the tenant's editor runs the tenant's panel, and is a stranger
+on the CMS organization's — 403, not a redirect to fame. The mirror
+image holds for the platform admin (a member of the CMS organization
+only), which is the F20 rule the panel's own design chose: **the
+platform admin reaches into a tenant through an explicit membership,
+never by virtue of the platform role**. The Tenants page's grant form
+is that door, exactly as F18 built it.
+
+Deleting a tenant with content is refused (`error=content`): content
+is never silently destroyed with its organization — the same
+doctrine that reparents children and keeps pages whose author was
+deleted. Move or delete the content first; the guard counts pages,
+menus and media in one round trip.
+
+### What to know
+
+- The pre-F20 database upgrades in place: every row backfills to the
+  CMS organization, ids and history intact, the FTS index rebuilt —
+  the upgrade battery pins all of it on a rewound database.
+- The repositories take the organization key as their first
+  parameter (the F15 identifier, an indexed `organizations.key`
+  lookup inside each statement) — the trait surface is the same
+  plus one argument.
+- `GET /` on a tenant host is still its own static index; the CMS
+  `default_page` takeover stays a CMS-host feature.
+- `tenants.rs`'s create flow is unchanged: a new tenant is two rows
+  and a document root, and its panel is already mounted — the trees
+  are built from the live snapshot, F18's no-restart rule included.
+
 ## Configuration
 
 Two keys from F7, two from F9, two from F10, one from F11 (all
@@ -1544,8 +1661,20 @@ the same discipline as the phases before it:
   to the very page, signed in (the allowlist: the request's own
   host, the live vhost table's hosts, and everything under
   `cookie_domain` — never a foreign domain) — this document.
-- **F20** (next candidate): per-tenant panels — a tenant
-  administrator manages their organization's own content.
+- **F20 — per-tenant panels** (done): the organizations own their
+  content — pages, menus and media carry an `organization_id`, every
+  mapped host serves its own (the same slug is free on two names), and
+  a tenant's host mounts the visitor surface scoped to it: public
+  pages, search, feeds, sitemap, media, the auth forms and the panel's
+  content pages, with the platform surface (users, tenants, the import
+  tool) staying on the CMS organization's host by construction. The
+  authorization follows the request's organization — a membership of
+  one tenant is worth nothing on another's host, and the platform
+  admin reaches a tenant only through an explicit membership: zero
+  surprises — this document.
+- **F21** (next candidate): the template caches — the LRU layer the
+  `pages` and `menus` globals were promised (one query per render
+  today, one warm lookup tomorrow).
 
 Each phase ships as one patch with tests and this document updated;
 nothing lands half-featured.

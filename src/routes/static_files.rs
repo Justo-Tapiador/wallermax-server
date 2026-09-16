@@ -112,40 +112,70 @@ pub fn mount_shared_fallback(router: Router<AppState>, config: &StaticConfig) ->
     }))
 }
 
-/// A tenant organization's tree (F17): a self-contained static site
-/// from the organization's document root.
+/// A tenant organization's tree (F17): a self-contained site from
+/// the organization's document root — and, since F20, the bottom
+/// layer of a full CMS tenant: the panel above it serves from the
+/// shared views, so its stylesheets ride the fallback chain.
 ///
 /// `GET /` answers `root/index_file` (the server-wide directory
 /// index convention from `[static]` — the organization's row carries
 /// only the root), and every other otherwise-unmatched path resolves
-/// against `root` exactly like the main tree's fallback. The
-/// templates middleware renders the root's own `index.jhs` (for `/`
-/// and every directory) and its `*.jhs` files on the fly, the same
-/// main-host treatment; misses fall back to the standard JSON 404
-/// envelope, and non-`GET`/`HEAD` requests to file paths answer 405
-/// through it. [`ServeDir`] rejects `..` segments and encoded
-/// traversals, keeping requests inside the organization's root.
+/// against `root` exactly like the main tree's fallback. A miss on a
+/// **shared asset path** (`/assets/*`, `/favicon.ico`,
+/// `/robots.txt`) falls through to the static root's copy while
+/// `[static]` serves one — the panel chrome (`admin.css`) and the
+/// error stylesheet live there, and a tenant that wants its own look
+/// simply ships its own file (its root wins first). Everything else
+/// answers the standard JSON 404 envelope, and non-`GET`/`HEAD`
+/// requests to file paths answer 405 through it. [`ServeDir`] rejects
+/// `..` segments and encoded traversals, keeping requests inside the
+/// organization's root.
 ///
 /// Deliberately NOT on the tenant's host: the operator machinery
-/// (`/api`, `/health`, `/metrics`, the proxy), the panel, and the
-/// main root's borrowed `/assets/*` — a tenant tree is its own
-/// content, self-contained, the way F14 kept the two names' surfaces
-/// disjoint. A tenant that wants the wallermax look copies the
-/// stylesheets in; one that wants styled HTML error pages puts its
-/// own `assets/error.css` beside its content.
+/// (`/api`, `/health`, `/metrics`, the proxy) and the platform panel
+/// (`/admin/users`, `/admin/tenants`, the import tool) — those are the
+/// main and CMS organizations' own (F20).
 ///
 /// The tree mounts whatever the row says, with or without
 /// `[static] enabled` — that switch governs the **main**
 /// organization's static surface, and tying data-created tenants to
 /// it would re-couple them to `wallermax.toml`, the opposite of the
-/// phase's point.
-pub fn tenant_routes(root: &str, index_file: &str) -> Router<AppState> {
+/// phase's point (the shared-asset layer alone follows the switch,
+/// exactly like the CMS host's borrowed files do).
+pub fn tenant_routes(root: &str, index_file: &str, shared: &StaticConfig) -> Router<AppState> {
     // Nested router turning ServeDir misses into the standard JSON
     // 404 envelope (with the request's correlation id) — the same
     // shape `mount_fallback` uses.
     let json_not_found = Router::new()
         .fallback(super::not_found)
         .into_service::<Body>();
+
+    // The shared layer: the static root's stylesheets and root files
+    // while the static server is enabled (the CMS host borrows the
+    // same set through `mount_shared_fallback`).
+    let shared = if shared.enabled {
+        Some(ServeDir::new(&shared.root_dir).call_fallback_on_method_not_allowed(true))
+    } else {
+        None
+    };
+    let fallback = tower::service_fn(move |request: Request| {
+        let shared = shared.clone();
+        let mut not_found = json_not_found.clone();
+        async move {
+            match (is_shared_asset_path(request.uri().path()), shared) {
+                (true, Some(mut serve)) => {
+                    let served = serve.call(request).await.expect("ServeDir is infallible");
+                    // ServeDir answers with its own body type; axum's
+                    // `Body::new` adapts it (the parts and status stay).
+                    Ok::<_, std::convert::Infallible>(served.map(Body::new))
+                }
+                _ => Ok(not_found
+                    .call(request)
+                    .await
+                    .expect("the JSON 404 service is infallible")),
+            }
+        }
+    });
 
     Router::new()
         .route(
@@ -155,7 +185,7 @@ pub fn tenant_routes(root: &str, index_file: &str) -> Router<AppState> {
         .fallback_service(
             ServeDir::new(root)
                 .call_fallback_on_method_not_allowed(true)
-                .fallback(json_not_found),
+                .fallback(fallback),
         )
 }
 

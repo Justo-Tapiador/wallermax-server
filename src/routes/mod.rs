@@ -92,6 +92,7 @@ pub fn routes(
     if cms_enabled {
         router = router
             .merge(cms::routes())
+            .merge(cms::platform_routes())
             .merge(media::routes())
             .merge(search::routes())
             .merge(tenants::routes());
@@ -123,6 +124,15 @@ pub fn routes(
 /// fine: the boot already warned, and `ServeDir` simply answers 404s
 /// until the directory appears.
 ///
+/// F20 graduates the trees from static-only to full CMS tenants:
+/// the organization-scoped content surface (public pages, the panel's
+/// content pages, media, search, the auth forms) rides above the
+/// static tree, and the panel chrome — the shared views, the borrowed
+/// `/assets/*` — serves exactly like on the CMS host. What stays
+/// out: the platform surface (`/admin/users`, `/admin/tenants`, the
+/// import tool), mounted only on the CMS organization's tree, and
+/// the operator machinery, mounted only on the main tree.
+///
 /// Split out of [`vhost_routes`] when F18 made the snapshot
 /// reloadable: the boot's initial install and every panel refresh
 /// build the exact same trees through here, so a tenant's site is
@@ -130,8 +140,11 @@ pub fn routes(
 /// minute ago.
 fn tenant_trees(
     state: &AppState,
+    auth_enabled: bool,
+    refresh_enabled: bool,
+    cms_enabled: bool,
+    static_files: &StaticConfig,
     bindings: &[HostBinding],
-    index_file: &str,
 ) -> Vec<(String, Router)> {
     let mut tenants: Vec<(String, Router)> = Vec::new();
     for binding in bindings {
@@ -139,12 +152,27 @@ fn tenant_trees(
             && binding.organization != crate::db::CMS_ORGANIZATION_KEY
             && !tenants.iter().any(|(key, _)| key == &binding.organization)
         {
-            tenants.push((
-                binding.organization.clone(),
-                static_files::tenant_routes(&binding.document_root, index_file)
-                    .method_not_allowed_fallback(method_not_allowed)
-                    .with_state(state.clone()),
-            ));
+            let mut tree = Router::new();
+            if cms_enabled {
+                tree = tree
+                    .merge(cms::routes())
+                    .merge(media::routes())
+                    .merge(search::routes());
+            }
+            if auth_enabled {
+                tree = tree.merge(auth::routes(refresh_enabled));
+            }
+            let tree = tree
+                .merge(
+                    static_files::tenant_routes(
+                        &binding.document_root,
+                        &static_files.index_file,
+                        static_files,
+                    )
+                    .method_not_allowed_fallback(method_not_allowed),
+                )
+                .with_state(state.clone());
+            tenants.push((binding.organization.clone(), tree));
         }
     }
     tenants
@@ -178,8 +206,11 @@ pub(crate) async fn refresh_vhost_state(
     let cms_origin = data.cms_origin(state.config());
     let tenants = tenant_trees(
         state,
+        state.config().auth.enabled,
+        state.config().auth.refresh_tokens_enabled,
+        state.config().cms.enabled,
+        &state.config().static_files,
         data.bindings(),
-        &state.config().static_files.index_file,
     );
     let VhostData {
         main_root,
@@ -283,16 +314,17 @@ pub fn vhost_routes(
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(state.clone());
 
-    // The CMS host: the visitor surface. `/api/auth/*` rides along
-    // for the no-JS forms (the login modal's action is
-    // `/api/auth/login`); `/api`, `/health`, `/metrics` and the proxy
-    // deliberately do not — the CMS host exposes exactly what its
-    // pages need.
+    // The CMS host: the visitor surface **and the platform's**.
+    // `/api/auth/*` rides along for the no-JS forms (the login modal's
+    // action is `/api/auth/login`); `/api`, `/health`, `/metrics` and
+    // the proxy deliberately do not — the CMS host exposes exactly
+    // what its pages need.
     let mut cms_tree = Router::new();
 
     if cms_enabled {
         cms_tree = cms_tree
             .merge(cms::routes())
+            .merge(cms::platform_routes())
             .merge(media::routes())
             .merge(search::routes())
             .merge(tenants::routes());
@@ -323,7 +355,14 @@ pub fn vhost_routes(
     // never edits.
     let boot = state.vhost_snapshot();
     state.replace_vhosts(VhostSnapshot {
-        tenants: tenant_trees(state, &boot.bindings, &static_files.index_file),
+        tenants: tenant_trees(
+            state,
+            auth_enabled,
+            refresh_enabled,
+            cms_enabled,
+            static_files,
+            &boot.bindings,
+        ),
         ..boot
     });
 

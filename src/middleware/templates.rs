@@ -171,6 +171,13 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
     let vhosts = !bindings.is_empty();
     let class = crate::vhosts::classify(request.uri(), request.headers(), &bindings);
     let on_cms_host = matches!(class, crate::vhosts::HostClass::Cms);
+    // F20: a mapped tenant host is a visitor host too — it mounts the
+    // CMS family scoped to its organization, so the views
+    // auto-routing (the no-JS `/login`, `/register`, `/profile`
+    // pages) answers there exactly like on the CMS host. Only the
+    // main host stays out (its surface is the static site plus the
+    // operator machinery).
+    let on_visitor_host = on_cms_host || matches!(class, crate::vhosts::HostClass::Tenant(_));
 
     // The `.jhs` rendering root for this request (F17): the tenant's
     // document root on a tenant host, the static root on the main
@@ -263,9 +270,9 @@ pub async fn run(State(state): State<AppState>, request: Request, next: Next) ->
     // Normal pipeline (API routes, static files, JSON 404 fallback).
     let response = next.run(request).await;
 
-    // Auto-route views for otherwise-unmatched paths — the CMS
-    // host's surface (F14).
-    if response.status() == StatusCode::NOT_FOUND && (!vhosts || on_cms_host) {
+    // Auto-route views for otherwise-unmatched paths — the visitor
+    // hosts' surface (F14; F20: every tenant host included).
+    if response.status() == StatusCode::NOT_FOUND && (!vhosts || on_visitor_host) {
         if let Some(view) = view_candidate(templates.views_dir(), &decoded) {
             return render_response(
                 templates.engine(),
@@ -318,12 +325,26 @@ pub(crate) async fn base_data(
         })
         .unwrap_or(Value::Null);
 
+    // F20: the content this request's templates see belongs to the
+    // organization its host resolved to — the same pure resolution
+    // the dispatcher and the guards use, computed once here and
+    // threaded into the scoped globals (and exposed as the
+    // `organization` global so panel chrome like the sidebar can
+    // condition on it).
+    let organization = crate::vhosts::organization_key(uri, headers, &state.host_bindings());
+
     let mut data = Map::new();
     data.insert(String::from("user"), user);
     data.insert(String::from("path"), Value::String(uri.path().to_owned()));
     data.insert(String::from("query"), query_global(uri));
-    data.insert(String::from("pages"), pages_global(state).await);
-    data.insert(String::from("menus"), menus_global(state).await);
+    data.insert(
+        String::from("pages"),
+        pages_global(state, &organization).await,
+    );
+    data.insert(
+        String::from("menus"),
+        menus_global(state, &organization).await,
+    );
     data.insert(String::from("req"), req_global(headers, uri, method));
     data.insert(String::from("theme"), theme_global(headers));
     data.insert(String::from("cms_origin"), cms_origin_global(state));
@@ -331,6 +352,7 @@ pub(crate) async fn base_data(
         String::from("login_url"),
         Value::String(login_url_global(state, headers, uri)),
     );
+    data.insert(String::from("organization"), Value::String(organization));
     data
 }
 
@@ -405,6 +427,17 @@ fn login_url_global(state: &AppState, headers: &HeaderMap, uri: &Uri) -> String 
         .path_and_query()
         .map(|path_and_query| path_and_query.as_str())
         .unwrap_or("/");
+    // F20: a tenant host serves `/login` itself (its tree mounts the
+    // auth forms), so its sign-in link is the same-origin relative
+    // shape the single-host server uses — no detour through the CMS
+    // host, and the shared session carries the `303` straight back.
+    let bindings = state.host_bindings();
+    if matches!(
+        crate::vhosts::classify(uri, headers, &bindings),
+        crate::vhosts::HostClass::Tenant(_)
+    ) {
+        return format!("/login?redirect={}", encode_uri_component(here));
+    }
     let cms_origin = state.cms_origin();
     if cms_origin.is_empty() {
         return format!("/login?redirect={}", encode_uri_component(here));
@@ -474,14 +507,18 @@ fn query_global(uri: &Uri) -> Value {
     Value::Object(map)
 }
 
-/// The `pages` global: published CMS pages, newest first (empty while
-/// the CMS is disabled).
-async fn pages_global(state: &AppState) -> Value {
+/// The `pages` global: the request's organization's published CMS
+/// pages, newest first (empty while the CMS is disabled).
+async fn pages_global(state: &AppState, organization: &str) -> Value {
     let Some(cms) = state.cms() else {
         return Value::Array(Vec::new());
     };
 
-    match cms.pages.list(false, PAGES_GLOBAL_LIMIT).await {
+    match cms
+        .pages
+        .list(organization, false, PAGES_GLOBAL_LIMIT)
+        .await
+    {
         Ok(pages) => Value::Array(
             pages
                 .into_iter()
@@ -503,16 +540,17 @@ async fn pages_global(state: &AppState) -> Value {
     }
 }
 
-/// The `menus` global (F7): the named navigation menus, each an array
-/// of `{ label, href }` items resolved server-side — published pages
-/// and custom URLs only, so the public navigation never links a 404.
-/// `{}` while the CMS is disabled; templates read `menus.main`.
-async fn menus_global(state: &AppState) -> Value {
+/// The `menus` global (F7): the request's organization's named
+/// navigation menus, each an array of `{ label, href }` items resolved
+/// server-side — published pages and custom URLs only, so the public
+/// navigation never links a 404. `{}` while the CMS is disabled;
+/// templates read `menus.main`.
+async fn menus_global(state: &AppState, organization: &str) -> Value {
     let Some(cms) = state.cms() else {
         return Value::Object(Map::new());
     };
 
-    match cms.menus.resolved().await {
+    match cms.menus.resolved(organization).await {
         Ok(menus) => {
             let mut map = Map::new();
             for (menu, items) in menus {
@@ -645,7 +683,18 @@ fn trim_leading_slash(path: &str) -> &str {
 /// - `/x.jhs` → `views/x.jhs`;
 /// - `/contact` → `views/contact.jhs`, then `views/contact/index.jhs`;
 /// - `/blog/` → the same two shapes as `/blog`.
+///
+/// `/admin/*` never auto-routes (F20): those views are the panel's
+/// chrome, rendered by their handlers with their data — never
+/// standalone. On the CMS organization's host the routes take
+/// precedence anyway; on a tenant host the panel's platform surface
+/// is not mounted at all, and auto-routing its views there (with no
+/// handler data behind them) would render broken pages instead of
+/// the honest 404.
 fn view_candidate(views_dir: &Path, decoded: &str) -> Option<PathBuf> {
+    if decoded == "/admin" || decoded.starts_with("/admin/") {
+        return None;
+    }
     let relative = decoded.trim_matches('/');
     let candidates: Vec<PathBuf> = if relative.is_empty() {
         vec![views_dir.join("index.jhs")]
@@ -710,6 +759,16 @@ mod tests {
         assert_eq!(
             view_candidate(&dir, "/blog"),
             Some(dir.join("blog").join("index.jhs"))
+        );
+        assert_eq!(
+            view_candidate(&dir, "/admin/users"),
+            None,
+            "panel views never auto-route (F20)"
+        );
+        assert_eq!(
+            view_candidate(&dir, "/admin"),
+            None,
+            "the panel root neither"
         );
         assert_eq!(view_candidate(&dir, "/flat"), Some(dir.join("flat.jhs")));
         assert_eq!(

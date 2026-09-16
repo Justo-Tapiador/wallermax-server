@@ -158,14 +158,20 @@ const MAX_REVISION_NOTE: usize = 200;
 
 // ─── Browser-friendly guards ─────────────────────────────────────────
 
-/// Extractor: an authenticated member of the CMS organization allowed
-/// to manage its pages (the `admin` and `editor` memberships — F15).
+/// Extractor: an authenticated member of the request's organization
+/// allowed to manage its pages (the `admin` and `editor` memberships
+/// — F15; the organization itself follows the request's host since
+/// F20, so a tenant's editor is an editor **on the tenant's host**).
 ///
 /// The rejection is browser-facing, not a JSON envelope: anonymous
 /// visitors get a `303` to `/login?redirect=<this page>` and
 /// authenticated-but-underprivileged users get a small HTML 403 page.
 pub(crate) struct CmsEditor {
     pub(crate) user: AuthUser,
+    /// The organization whose content the request manages (F20) —
+    /// the handlers pass it to the repositories instead of
+    /// re-resolving it.
+    pub(crate) organization: String,
 }
 
 impl axum::extract::FromRequestParts<AppState> for CmsEditor {
@@ -185,12 +191,13 @@ impl axum::extract::FromRequestParts<AppState> for CmsEditor {
                 }
             })?;
 
-        if cms_membership(state, &user)
+        let organization = request_organization(&parts.uri, &parts.headers, state);
+        if cms_membership(state, &organization, &user)
             .await
             .map_err(AppError::into_response)?
             .is_some_and(|role| role.is_editor())
         {
-            Ok(Self { user })
+            Ok(Self { user, organization })
         } else {
             Err(AppError::forbidden(
                 "CMS membership required — this account is not part of the CMS organization.",
@@ -200,8 +207,17 @@ impl axum::extract::FromRequestParts<AppState> for CmsEditor {
     }
 }
 
-/// Extractor: an authenticated `admin` **of the CMS organization** (the
-/// user management and the full panel — F15).
+/// Extractor: an authenticated `admin` **of the request's organization**
+/// (the user management and the full panel — F15; the organization
+/// follows the request's host since F20 — the tenant's admin on the
+/// tenant's host, the platform admin on the CMS organization's).
+///
+/// The routes this guard protects are the **platform surface**
+/// (users, tenants, the import tool), mounted only on the CMS
+/// organization's tree — so the organization it checks is, by
+/// construction, always the CMS one (the single-host server's one
+/// tree included). A tenant host answers these URLs with its standard
+/// 404 instead, because the routes are not mounted there at all.
 pub(crate) struct CmsAdmin {
     pub(crate) user: AuthUser,
 }
@@ -223,7 +239,8 @@ impl axum::extract::FromRequestParts<AppState> for CmsAdmin {
                 }
             })?;
 
-        if cms_membership(state, &user)
+        let organization = request_organization(&parts.uri, &parts.headers, state);
+        if cms_membership(state, &organization, &user)
             .await
             .map_err(AppError::into_response)?
             == Some(UserRole::Admin)
@@ -238,25 +255,45 @@ impl axum::extract::FromRequestParts<AppState> for CmsAdmin {
     }
 }
 
-/// The user's role inside the CMS organization (F15): what the panel
-/// guards authorize against. The platform role still carried by the
-/// token no longer opens the panel by itself — membership does.
+/// The user's role inside the request's organization (F15, the
+/// organization itself per-request since F20): what the panel guards
+/// authorize against. The platform role still carried by the token
+/// opens no panel by itself — membership does, in the organization
+/// the request's host resolved to.
 ///
 /// One indexed SQLite read per protected request (the public pages
 /// never run it); keeping the organization out of the token is the
 /// point: a changed or removed membership takes effect immediately,
 /// without waiting for tokens to expire.
-async fn cms_membership(state: &AppState, user: &AuthUser) -> Result<Option<UserRole>, AppError> {
+async fn cms_membership(
+    state: &AppState,
+    organization: &str,
+    user: &AuthUser,
+) -> Result<Option<UserRole>, AppError> {
     let Some(auth) = state.auth_context() else {
         return Err(AppError::internal("authentication is not initialized"));
     };
     auth.repository
-        .membership_role(user.user_id, CMS_ORGANIZATION_KEY)
+        .membership_role(user.user_id, organization)
         .await
         .map_err(|error| {
             tracing::error!(%error, "membership lookup failed");
             AppError::internal("membership lookup failed")
         })
+}
+
+/// The organization whose content a request serves (F20): the mapped
+/// organization on a tenant host, the CMS organization everywhere else
+/// — the single-host server's one tree included, so an upgrade changes
+/// nothing there. Pure (the live vhost snapshot read, no queries), the
+/// same resolution the guards and the template globals use, so every
+/// layer of a request agrees on its tenant by construction.
+pub(crate) fn request_organization(
+    uri: &Uri,
+    headers: &axum::http::HeaderMap,
+    state: &AppState,
+) -> String {
+    crate::vhosts::organization_key(uri, headers, &state.host_bindings())
 }
 
 /// Whether the extractor rejection is an authentication failure (401)
@@ -327,6 +364,14 @@ impl PageParts {
     /// `?q=`/`?page=` parameters the same way the handlers here do.
     pub(crate) fn uri(&self) -> &Uri {
         &self.uri
+    }
+
+    /// The organization whose content this request serves (F20) —
+    /// crate-visible so the media and search routes resolve their
+    /// scope the exact same way the handlers here do, one pure
+    /// snapshot read, no queries.
+    pub(crate) fn organization(&self, state: &AppState) -> String {
+        request_organization(&self.uri, &self.headers, state)
     }
 }
 
@@ -446,23 +491,41 @@ pub(crate) async fn render_public_page(
         );
     };
 
-    let Some(page) = cms.pages.find_by_slug(slug).await.unwrap_or_else(|error| {
-        tracing::error!(%error, "page lookup failed");
-        None
-    }) else {
+    // F20: the page the request may see is the one its own host's
+    // organization owns — the same slug on another tenant's host is
+    // that tenant's page, not this one's.
+    let organization = parts.organization(state);
+    let Some(page) = cms
+        .pages
+        .find_by_slug(&organization, slug)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::error!(%error, "page lookup failed");
+            None
+        })
+    else {
         return PublicPageOutcome::Missing;
     };
 
     // Drafts are indistinguishable from missing pages unless the
     // caller may manage content. F11: "draft" means the flag is off
     // *and* the schedule (if any) has not elapsed yet — an elapsed
-    // schedule is public truth at read time.
-    let viewer_is_editor = data
+    // schedule is public truth at read time. F20: the right to
+    // preview is a membership of the request's organization — the
+    // token's platform role no longer opens another tenant's drafts.
+    let viewer_id = data
         .get("user")
-        .and_then(|user| user.get("role"))
-        .and_then(Value::as_str)
-        .and_then(UserRole::parse)
-        .is_some_and(|role| role.is_editor());
+        .and_then(|user| user.get("id"))
+        .and_then(Value::as_i64);
+    let viewer_is_editor = match (viewer_id, state.auth_context()) {
+        (Some(user_id), Some(auth)) => auth
+            .repository
+            .membership_role(user_id, &organization)
+            .await
+            .unwrap_or(None)
+            .is_some_and(|role| role.is_editor()),
+        _ => false,
+    };
 
     let now = unix_now();
     let visible_now = page.is_published || page.publish_at.is_some_and(|at| at <= now);
@@ -541,14 +604,18 @@ pub(crate) async fn render_public_page(
     // first, immediate parent last) feeds the breadcrumbs and the
     // `page.parent` link; the direct children (drafts only while the
     // viewer may manage content) feed `page.children`.
-    let ancestors = match cms.pages.ancestors(page.id).await {
+    let ancestors = match cms.pages.ancestors(&organization, page.id).await {
         Ok(chain) => chain,
         Err(error) => {
             tracing::error!(%error, "page hierarchy walk failed");
             Vec::new()
         }
     };
-    let children = match cms.pages.children(Some(page.id), viewer_is_editor).await {
+    let children = match cms
+        .pages
+        .children(&organization, Some(page.id), viewer_is_editor)
+        .await
+    {
         Ok(children) => children,
         Err(error) => {
             tracing::error!(%error, "page children lookup failed");
@@ -628,24 +695,23 @@ async fn public_page(
 /// `GET /admin`: counters, the recent-activity feed and what needs
 /// attention (F12 enriched the original counters card into a real
 /// dashboard — see the view for the layout).
-async fn dashboard(
-    State(state): State<AppState>,
-    _editor: CmsEditor,
-    request: Request,
-) -> Response {
+async fn dashboard(State(state): State<AppState>, editor: CmsEditor, request: Request) -> Response {
     let parts = PageParts::of(&request);
     let Ok(cms) = cms_context(&state) else {
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    let total = match cms.pages.count().await {
+    // F20: the dashboard counts the request's organization's content
+    // — a tenant's admin sees their tenant's numbers.
+    let organization = editor.organization;
+    let total = match cms.pages.count(&organization).await {
         Ok(total) => total,
         Err(error) => {
             tracing::error!(%error, "cms dashboard counters failed");
             return AppError::internal("storage failure").into_response();
         }
     };
-    let published = match cms.pages.count_published().await {
+    let published = match cms.pages.count_published(&organization).await {
         Ok(published) => published,
         Err(error) => {
             tracing::error!(%error, "cms dashboard counters failed");
@@ -662,21 +728,21 @@ async fn dashboard(
         },
         None => 0,
     };
-    let menus = match cms.menus.count().await {
+    let menus = match cms.menus.count(&organization).await {
         Ok(menus) => menus,
         Err(error) => {
             tracing::error!(%error, "cms dashboard counters failed");
             return AppError::internal("storage failure").into_response();
         }
     };
-    let media = match cms.media.count().await {
+    let media = match cms.media.count(&organization).await {
         Ok(media) => media,
         Err(error) => {
             tracing::error!(%error, "cms dashboard counters failed");
             return AppError::internal("storage failure").into_response();
         }
     };
-    let scheduled = match cms.pages.count_scheduled().await {
+    let scheduled = match cms.pages.count_scheduled(&organization).await {
         Ok(scheduled) => scheduled,
         Err(error) => {
             tracing::error!(%error, "cms dashboard counters failed");
@@ -686,7 +752,11 @@ async fn dashboard(
 
     // The "needs attention" card: drafts whose schedule has not
     // elapsed yet, the soonest first (F11 data, surfaced by F12).
-    let pending = match cms.pages.scheduled_pending(DASHBOARD_SCHEDULED_ROWS).await {
+    let pending = match cms
+        .pages
+        .scheduled_pending(&organization, DASHBOARD_SCHEDULED_ROWS)
+        .await
+    {
         Ok(pending) => pending,
         Err(error) => {
             tracing::error!(%error, "cms dashboard scheduled pages failed");
@@ -705,9 +775,14 @@ async fn dashboard(
         })
         .collect();
 
-    // The recent-activity feed: the newest saves across every page,
-    // the cross-page view of the F11 history (one row per revision).
-    let recent = match cms.pages.recent_revisions(DASHBOARD_ACTIVITY_ROWS).await {
+    // The recent-activity feed: the newest saves across the
+    // organization's pages, the cross-page view of the F11 history
+    // (one row per revision).
+    let recent = match cms
+        .pages
+        .recent_revisions(&organization, DASHBOARD_ACTIVITY_ROWS)
+        .await
+    {
         Ok(recent) => recent,
         Err(error) => {
             tracing::error!(%error, "cms dashboard activity failed");
@@ -946,7 +1021,7 @@ fn parse_position(raw: Option<&str>) -> Result<Option<i64>, &'static str> {
 /// as a flat ranked result list while `?q=` filters (F10).
 async fn list_pages(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     request: Request,
 ) -> Response {
     let parts = PageParts::of(&request);
@@ -960,7 +1035,11 @@ async fn list_pages(
     // hierarchy tree as always.
     let (filter, _) = listing_query(&parts.uri);
     if !filter.is_empty() {
-        let hits = match cms.pages.search(&filter, true, MAX_LISTED, 0).await {
+        let hits = match cms
+            .pages
+            .search(&editor.organization, &filter, true, MAX_LISTED, 0)
+            .await
+        {
             Ok(hits) => hits,
             Err(error) => {
                 tracing::error!(%error, "page search failed");
@@ -996,7 +1075,7 @@ async fn list_pages(
         .await;
     }
 
-    let pages = match cms.pages.list(true, MAX_LISTED).await {
+    let pages = match cms.pages.list(&editor.organization, true, MAX_LISTED).await {
         Ok(pages) => pages,
         Err(error) => {
             tracing::error!(%error, "page listing failed");
@@ -1074,7 +1153,7 @@ fn walk_page_tree(
 /// `GET /admin/pages/new`: the empty creation form.
 async fn new_page_form(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     request: Request,
 ) -> Response {
     let parts = PageParts::of(&request);
@@ -1083,7 +1162,7 @@ async fn new_page_form(
     };
 
     let form = PageForm::default();
-    let parents = parent_options(cms, None).await;
+    let parents = parent_options(cms, &editor.organization, None).await;
     let (form, error) = form.form_data(None, &parents, None);
     render_view(
         &state,
@@ -1119,23 +1198,35 @@ async fn create_page(
     let form = match read_form::<PageForm>(request, max_body).await {
         Ok(form) => form,
         Err(message) => {
-            return render_form_with_error(&state, &parts, None, PageForm::default(), &message)
-                .await;
+            return render_form_with_error(
+                &state,
+                &parts,
+                &editor.organization,
+                None,
+                PageForm::default(),
+                &message,
+            )
+            .await;
         }
     };
 
     if let Err(error) = validate_page_form(&form) {
-        return render_form_with_error(&state, &parts, None, form, error).await;
+        return render_form_with_error(&state, &parts, &editor.organization, None, form, error)
+            .await;
     }
 
     // F7: a stated parent must exist before the insert (the select
     // only offers real pages, but the form is just HTTP).
     let parent = form.parent();
     if let Some(parent_id) = parent {
-        if load_page(cms, parent_id).await.is_none() {
+        if load_page(cms, &editor.organization, parent_id)
+            .await
+            .is_none()
+        {
             return render_form_with_error(
                 &state,
                 &parts,
+                &editor.organization,
                 None,
                 form,
                 "The parent page does not exist.",
@@ -1165,12 +1256,13 @@ async fn create_page(
         revision_note: trimmed(&form.revision_note),
     };
 
-    match cms.pages.create(&new_page).await {
+    match cms.pages.create(&editor.organization, &new_page).await {
         Ok(page) => see_other(&format!("/admin/pages/{}/edit?ok=creada", page.id)),
         Err(RepositoryError::Duplicate) => {
             render_form_with_error(
                 &state,
                 &parts,
+                &editor.organization,
                 None,
                 form,
                 "That slug already exists: pick another URL identifier.",
@@ -1182,6 +1274,7 @@ async fn create_page(
             render_form_with_error(
                 &state,
                 &parts,
+                &editor.organization,
                 None,
                 form,
                 "Could not save (internal error).",
@@ -1194,7 +1287,7 @@ async fn create_page(
 /// `GET /admin/pages/{id}/edit`: the edit form.
 async fn edit_page_form(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     Path(id): Path<i64>,
     request: Request,
 ) -> Response {
@@ -1203,7 +1296,7 @@ async fn edit_page_form(
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    let Some(page) = load_page(cms, id).await else {
+    let Some(page) = load_page(cms, &editor.organization, id).await else {
         return see_other("/admin/pages");
     };
 
@@ -1228,7 +1321,7 @@ async fn edit_page_form(
         revision_note: None,
     };
     // The page itself and its whole branch are unavailable as parents.
-    let parents = parent_options(cms, Some(id)).await;
+    let parents = parent_options(cms, &editor.organization, Some(id)).await;
     let (form, error) = form.form_data(Some(id), &parents, None);
     render_view(
         &state,
@@ -1261,13 +1354,21 @@ async fn update_page(
     let form = match read_form::<PageForm>(request, max_body).await {
         Ok(form) => form,
         Err(message) => {
-            return render_form_with_error(&state, &parts, Some(id), PageForm::default(), &message)
-                .await;
+            return render_form_with_error(
+                &state,
+                &parts,
+                &editor.organization,
+                Some(id),
+                PageForm::default(),
+                &message,
+            )
+            .await;
         }
     };
 
     if let Err(error) = validate_page_form(&form) {
-        return render_form_with_error(&state, &parts, Some(id), form, error).await;
+        return render_form_with_error(&state, &parts, &editor.organization, Some(id), form, error)
+            .await;
     }
 
     // F7: the move guard. `None` (top level) is always legal; a
@@ -1279,23 +1380,28 @@ async fn update_page(
             return render_form_with_error(
                 &state,
                 &parts,
+                &editor.organization,
                 Some(id),
                 form,
                 "A page cannot be its own parent.",
             )
             .await;
         }
-        if load_page(cms, parent_id).await.is_none() {
+        if load_page(cms, &editor.organization, parent_id)
+            .await
+            .is_none()
+        {
             return render_form_with_error(
                 &state,
                 &parts,
+                &editor.organization,
                 Some(id),
                 form,
                 "The parent page does not exist.",
             )
             .await;
         }
-        let creates_cycle = match cms.pages.ancestors(parent_id).await {
+        let creates_cycle = match cms.pages.ancestors(&editor.organization, parent_id).await {
             Ok(chain) => chain.iter().any(|ancestor| ancestor.id == id),
             Err(error) => {
                 tracing::error!(%error, "page hierarchy walk failed");
@@ -1306,6 +1412,7 @@ async fn update_page(
             return render_form_with_error(
                 &state,
                 &parts,
+                &editor.organization,
                 Some(id),
                 form,
                 "That parent would create a cycle: a page cannot hang from its own \
@@ -1335,13 +1442,14 @@ async fn update_page(
         revision_note: trimmed(&form.revision_note),
     };
 
-    match cms.pages.update(id, &update).await {
+    match cms.pages.update(&editor.organization, id, &update).await {
         Ok(Some(_)) => see_other(&format!("/admin/pages/{id}/edit?ok=guardada")),
         Ok(None) => see_other("/admin/pages"),
         Err(RepositoryError::Duplicate) => {
             render_form_with_error(
                 &state,
                 &parts,
+                &editor.organization,
                 Some(id),
                 form,
                 "That slug already exists: pick another URL identifier.",
@@ -1353,6 +1461,7 @@ async fn update_page(
             render_form_with_error(
                 &state,
                 &parts,
+                &editor.organization,
                 Some(id),
                 form,
                 "Could not save (internal error).",
@@ -1377,7 +1486,7 @@ async fn update_page(
 /// action (new page vs. edit) — the preview itself never persists.
 async fn preview_page(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     request: Request,
 ) -> Response {
     let parts = PageParts::of(&request);
@@ -1389,13 +1498,28 @@ async fn preview_page(
     let form = match read_form::<PageForm>(request, max_body).await {
         Ok(form) => form,
         Err(message) => {
-            return render_form_with_error(&state, &parts, None, PageForm::default(), &message)
-                .await;
+            return render_form_with_error(
+                &state,
+                &parts,
+                &editor.organization,
+                None,
+                PageForm::default(),
+                &message,
+            )
+            .await;
         }
     };
 
     if let Err(error) = validate_page_form(&form) {
-        return render_form_with_error(&state, &parts, form.page_id(), form, error).await;
+        return render_form_with_error(
+            &state,
+            &parts,
+            &editor.organization,
+            form.page_id(),
+            form,
+            error,
+        )
+        .await;
     }
 
     let preview_html = match form.body_format() {
@@ -1427,6 +1551,7 @@ async fn preview_page(
                     return render_form_with_error(
                         &state,
                         &parts,
+                        &editor.organization,
                         form.page_id(),
                         form,
                         &error.to_string(),
@@ -1444,7 +1569,7 @@ async fn preview_page(
 
     // Same form, same parent options, preview above.
     let id = form.page_id();
-    let parents = parent_options(cms, id).await;
+    let parents = parent_options(cms, &editor.organization, id).await;
     let (form_json, form_error) = form.form_data(id, &parents, None);
     render_view(
         &state,
@@ -1463,7 +1588,7 @@ async fn preview_page(
 /// `POST /admin/pages/{id}/delete`: removes a page (idempotent).
 async fn delete_page(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     Path(id): Path<i64>,
     request: Request,
 ) -> Response {
@@ -1472,7 +1597,7 @@ async fn delete_page(
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    match cms.pages.delete(id).await {
+    match cms.pages.delete(&editor.organization, id).await {
         Ok(_) => see_other("/admin/pages?ok=eliminada"),
         Err(error) => {
             tracing::error!(%error, "page deletion failed");
@@ -1481,9 +1606,11 @@ async fn delete_page(
     }
 }
 
-/// Loads a page by id, logging storage failures as a missing page.
-async fn load_page(cms: &CmsContext, id: i64) -> Option<crate::db::PageRecord> {
-    match cms.pages.find_by_id(id).await {
+/// Loads a page by id within `organization`, logging storage failures
+/// as a missing page — a page of another organization is exactly that
+/// (F20's cross-tenant 404).
+async fn load_page(cms: &CmsContext, organization: &str, id: i64) -> Option<crate::db::PageRecord> {
+    match cms.pages.find_by_id(organization, id).await {
         Ok(page) => page,
         Err(error) => {
             tracing::error!(%error, "page lookup failed");
@@ -1499,7 +1626,7 @@ async fn load_page(cms: &CmsContext, id: i64) -> Option<crate::db::PageRecord> {
 /// current revision marked. Editors only, like the rest of the panel.
 async fn page_history(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     Path(id): Path<i64>,
     request: Request,
 ) -> Response {
@@ -1508,7 +1635,7 @@ async fn page_history(
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    let Some(page) = load_page(cms, id).await else {
+    let Some(page) = load_page(cms, &editor.organization, id).await else {
         return see_other("/admin/pages");
     };
 
@@ -1561,7 +1688,7 @@ async fn page_history(
 /// even by the editor previewing it), and the restore form.
 async fn page_revision(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     Path((id, revision)): Path<(i64, i64)>,
     request: Request,
 ) -> Response {
@@ -1570,7 +1697,7 @@ async fn page_revision(
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    let Some(page) = load_page(cms, id).await else {
+    let Some(page) = load_page(cms, &editor.organization, id).await else {
         return see_other("/admin/pages");
     };
     let Some(snapshot) = load_revision(cms, id, revision).await else {
@@ -1599,7 +1726,7 @@ async fn restore_revision(
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    let Some(page) = load_page(cms, id).await else {
+    let Some(page) = load_page(cms, &editor.organization, id).await else {
         return see_other("/admin/pages");
     };
     let Some(snapshot) = load_revision(cms, id, revision).await else {
@@ -1622,7 +1749,10 @@ async fn restore_revision(
             )
             .await;
         }
-        if load_page(cms, parent_id).await.is_none() {
+        if load_page(cms, &editor.organization, parent_id)
+            .await
+            .is_none()
+        {
             return render_revision_view(
                 &state,
                 &parts,
@@ -1635,7 +1765,7 @@ async fn restore_revision(
             )
             .await;
         }
-        let creates_cycle = match cms.pages.ancestors(parent_id).await {
+        let creates_cycle = match cms.pages.ancestors(&editor.organization, parent_id).await {
             Ok(chain) => chain.iter().any(|ancestor| ancestor.id == id),
             Err(error) => {
                 tracing::error!(%error, "page hierarchy walk failed");
@@ -1676,7 +1806,7 @@ async fn restore_revision(
         revision_note: Some(format!("Restored from revision {revision}.")),
     };
 
-    match cms.pages.update(id, &update).await {
+    match cms.pages.update(&editor.organization, id, &update).await {
         Ok(Some(_)) => see_other(&format!("/admin/pages/{id}/edit?ok=restored")),
         Ok(None) => see_other("/admin/pages"),
         Err(RepositoryError::Duplicate) => {
@@ -1850,12 +1980,13 @@ fn validate_slug(slug: &str) -> Result<(), &'static str> {
 async fn render_form_with_error(
     state: &AppState,
     parts: &PageParts,
+    organization: &str,
     id: Option<i64>,
     form: PageForm,
     error: &str,
 ) -> Response {
     let parents = match state.cms() {
-        Some(cms) => parent_options(cms, id).await,
+        Some(cms) => parent_options(cms, organization, id).await,
         None => Vec::new(),
     };
     let (form, error) = form.form_data(id, &parents, Some(error));
@@ -1878,9 +2009,10 @@ async fn render_form_with_error(
 /// and its whole branch — a page can never be moved under its own
 /// subtree. Indented with non-breaking spaces so the tree shape
 /// reads inside the dropdown, and ordered exactly like the admin
-/// tree (position, then id, depth-first).
-async fn parent_options(cms: &CmsContext, exclude: Option<i64>) -> Vec<Value> {
-    let mut pages = match cms.pages.list(true, MAX_LISTED).await {
+/// tree (position, then id, depth-first). The organization's own
+/// pages only (F20) — cross-organization parents do not exist.
+async fn parent_options(cms: &CmsContext, organization: &str, exclude: Option<i64>) -> Vec<Value> {
+    let mut pages = match cms.pages.list(organization, true, MAX_LISTED).await {
         Ok(pages) => pages,
         Err(error) => {
             tracing::error!(%error, "page listing failed");
@@ -2037,7 +2169,7 @@ async fn import_page(
         revision_note: Some(format!("Importada desde public/{}", form.file)),
     };
 
-    match cms.pages.create(&new_page).await {
+    match cms.pages.create(&editor.organization, &new_page).await {
         Ok(page) => see_other(&format!("/admin/pages/{}/edit?ok=importada", page.id)),
         Err(RepositoryError::Duplicate) => {
             render_import_error(
@@ -2237,19 +2369,24 @@ impl ItemForm {
 /// `GET /admin/menus`: the menus plus the creation form.
 async fn list_menus(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     request: Request,
 ) -> Response {
-    render_menus_view(&state, &PageParts::of(&request), None).await
+    render_menus_view(&state, &PageParts::of(&request), &editor.organization, None).await
 }
 
 /// Renders the admin menus listing (with an optional form error).
-async fn render_menus_view(state: &AppState, parts: &PageParts, error: Option<&str>) -> Response {
+async fn render_menus_view(
+    state: &AppState,
+    parts: &PageParts,
+    organization: &str,
+    error: Option<&str>,
+) -> Response {
     let Ok(cms) = cms_context(state) else {
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    let menus = match cms.menus.list().await {
+    let menus = match cms.menus.list(organization).await {
         Ok(menus) => menus,
         Err(error) => {
             tracing::error!(%error, "menu listing failed");
@@ -2290,7 +2427,7 @@ async fn render_menus_view(state: &AppState, parts: &PageParts, error: Option<&s
 /// `POST /admin/menus`: creates a menu.
 async fn create_menu(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     request: Request,
 ) -> Response {
     let parts = PageParts::of(&request);
@@ -2302,18 +2439,25 @@ async fn create_menu(
     let form = match read_form::<MenuForm>(request, max_body).await {
         Ok(form) => form,
         Err(message) => {
-            return render_menus_view(&state, &parts, Some(&message)).await;
+            return render_menus_view(&state, &parts, &editor.organization, Some(&message)).await;
         }
     };
 
     let title = form.title.trim();
     if title.is_empty() {
-        return render_menus_view(&state, &parts, Some("The menu title cannot be empty.")).await;
+        return render_menus_view(
+            &state,
+            &parts,
+            &editor.organization,
+            Some("The menu title cannot be empty."),
+        )
+        .await;
     }
     if form.title.len() > MAX_TITLE {
         return render_menus_view(
             &state,
             &parts,
+            &editor.organization,
             Some("The menu title is too long (200 characters at most)."),
         )
         .await;
@@ -2322,6 +2466,7 @@ async fn create_menu(
         return render_menus_view(
             &state,
             &parts,
+            &editor.organization,
             Some(
                 "The menu name must be 1-64 characters: lowercase, digits and hyphens \
                  (it is the key templates read: menus.<name>).",
@@ -2335,12 +2480,13 @@ async fn create_menu(
         title: form.title.trim().to_owned(),
     };
 
-    match cms.menus.create(&new_menu).await {
+    match cms.menus.create(&editor.organization, &new_menu).await {
         Ok(menu) => see_other(&format!("/admin/menus/{}?ok=created", menu.id)),
         Err(RepositoryError::Duplicate) => {
             render_menus_view(
                 &state,
                 &parts,
+                &editor.organization,
                 Some(
                     "That menu name already exists: it is the key the templates read \
                       (menus.<name>).",
@@ -2350,7 +2496,13 @@ async fn create_menu(
         }
         Err(RepositoryError::Internal(message)) => {
             tracing::error!(%message, "menu creation failed");
-            render_menus_view(&state, &parts, Some("Could not save (internal error).")).await
+            render_menus_view(
+                &state,
+                &parts,
+                &editor.organization,
+                Some("Could not save (internal error)."),
+            )
+            .await
         }
     }
 }
@@ -2359,17 +2511,25 @@ async fn create_menu(
 /// the add-item form.
 async fn menu_detail(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     Path(id): Path<i64>,
     request: Request,
 ) -> Response {
-    render_menu_detail(&state, &PageParts::of(&request), id, None).await
+    render_menu_detail(
+        &state,
+        &PageParts::of(&request),
+        &editor.organization,
+        id,
+        None,
+    )
+    .await
 }
 
 /// Renders the menu detail view (with an optional form error).
 async fn render_menu_detail(
     state: &AppState,
     parts: &PageParts,
+    organization: &str,
     id: i64,
     error: Option<&str>,
 ) -> Response {
@@ -2377,7 +2537,7 @@ async fn render_menu_detail(
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    let Some(menu) = load_menu(cms, id).await else {
+    let Some(menu) = load_menu(cms, organization, id).await else {
         return see_other("/admin/menus");
     };
 
@@ -2448,7 +2608,7 @@ async fn render_menu_detail(
 /// the template key and stays immutable).
 async fn rename_menu(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     Path(id): Path<i64>,
     request: Request,
 ) -> Response {
@@ -2461,34 +2621,60 @@ async fn rename_menu(
     let form = match read_form::<MenuTitleForm>(request, max_body).await {
         Ok(form) => form,
         Err(message) => {
-            return render_menu_detail(&state, &parts, id, Some(&message)).await;
+            return render_menu_detail(&state, &parts, &editor.organization, id, Some(&message))
+                .await;
         }
     };
 
     let title = form.title.trim();
     if title.is_empty() {
-        return render_menu_detail(&state, &parts, id, Some("The menu title cannot be empty."))
-            .await;
+        return render_menu_detail(
+            &state,
+            &parts,
+            &editor.organization,
+            id,
+            Some("The menu title cannot be empty."),
+        )
+        .await;
     }
     if form.title.len() > MAX_TITLE {
         return render_menu_detail(
             &state,
             &parts,
+            &editor.organization,
             id,
             Some("The menu title is too long (200 characters at most)."),
         )
         .await;
     }
 
-    match cms.menus.update_title(id, title).await {
+    match cms
+        .menus
+        .update_title(&editor.organization, id, title)
+        .await
+    {
         Ok(Some(_)) => see_other(&format!("/admin/menus/{id}?ok=saved")),
         Ok(None) => see_other("/admin/menus"),
         Err(RepositoryError::Internal(message)) => {
             tracing::error!(%message, "menu rename failed");
-            render_menu_detail(&state, &parts, id, Some("Could not save (internal error).")).await
+            render_menu_detail(
+                &state,
+                &parts,
+                &editor.organization,
+                id,
+                Some("Could not save (internal error)."),
+            )
+            .await
         }
         Err(RepositoryError::Duplicate) => {
-            render_menu_detail(&state, &parts, id, Some("Could not save (internal error).")).await
+            render_menu_detail(
+                &state,
+                &parts,
+                &editor.organization,
+                id,
+                Some("Could not save (internal error)."),
+            )
+            .await
         }
     }
 }
@@ -2496,7 +2682,7 @@ async fn rename_menu(
 /// `POST /admin/menus/{id}/delete`: removes a menu and its items.
 async fn delete_menu(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     Path(id): Path<i64>,
     request: Request,
 ) -> Response {
@@ -2505,7 +2691,7 @@ async fn delete_menu(
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    match cms.menus.delete(id).await {
+    match cms.menus.delete(&editor.organization, id).await {
         Ok(_) => see_other("/admin/menus?ok=deleted"),
         Err(error) => {
             tracing::error!(%error, "menu deletion failed");
@@ -2517,13 +2703,14 @@ async fn delete_menu(
 /// `GET /admin/menus/{id}/items/new`: the add-item form.
 async fn new_item_form(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     Path(id): Path<i64>,
     request: Request,
 ) -> Response {
     render_item_form_view(
         &state,
         &PageParts::of(&request),
+        &editor.organization,
         id,
         &ItemForm::default(),
         None,
@@ -2535,7 +2722,7 @@ async fn new_item_form(
 /// `POST /admin/menus/{id}/items`: adds an item to the menu.
 async fn create_item(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     Path(id): Path<i64>,
     request: Request,
 ) -> Response {
@@ -2545,12 +2732,19 @@ async fn create_item(
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
+    // F20: the menu belongs to the request's organization or the
+    // whole form is a foreign id.
+    if load_menu(cms, &editor.organization, id).await.is_none() {
+        return see_other("/admin/menus");
+    }
+
     let form = match read_form::<ItemForm>(request, max_body).await {
         Ok(form) => form,
         Err(message) => {
             return render_item_form_view(
                 &state,
                 &parts,
+                &editor.organization,
                 id,
                 &ItemForm::default(),
                 None,
@@ -2560,8 +2754,17 @@ async fn create_item(
         }
     };
 
-    if let Err(error) = validate_item_form(cms, &form).await {
-        return render_item_form_view(&state, &parts, id, &form, None, Some(error)).await;
+    if let Err(error) = validate_item_form(cms, &editor.organization, &form).await {
+        return render_item_form_view(
+            &state,
+            &parts,
+            &editor.organization,
+            id,
+            &form,
+            None,
+            Some(error),
+        )
+        .await;
     }
 
     let new_item = NewMenuItem {
@@ -2579,6 +2782,7 @@ async fn create_item(
             render_item_form_view(
                 &state,
                 &parts,
+                &editor.organization,
                 id,
                 &form,
                 None,
@@ -2590,6 +2794,7 @@ async fn create_item(
             render_item_form_view(
                 &state,
                 &parts,
+                &editor.organization,
                 id,
                 &form,
                 None,
@@ -2603,7 +2808,7 @@ async fn create_item(
 /// `GET /admin/menus/{id}/items/{item_id}/edit`: the edit-item form.
 async fn edit_item_form(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     Path((id, item_id)): Path<(i64, i64)>,
     request: Request,
 ) -> Response {
@@ -2612,7 +2817,7 @@ async fn edit_item_form(
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    let Some(item) = load_menu_item(cms, id, item_id).await else {
+    let Some(item) = load_menu_item(cms, &editor.organization, id, item_id).await else {
         return see_other(&format!("/admin/menus/{id}"));
     };
 
@@ -2623,13 +2828,22 @@ async fn edit_item_form(
         position: Some(item.position.to_string()),
     };
 
-    render_item_form_view(&state, &parts, id, &form, Some(item_id), None).await
+    render_item_form_view(
+        &state,
+        &parts,
+        &editor.organization,
+        id,
+        &form,
+        Some(item_id),
+        None,
+    )
+    .await
 }
 
 /// `POST /admin/menus/{id}/items/{item_id}`: applies an item edit.
 async fn update_item(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     Path((id, item_id)): Path<(i64, i64)>,
     request: Request,
 ) -> Response {
@@ -2645,6 +2859,7 @@ async fn update_item(
             return render_item_form_view(
                 &state,
                 &parts,
+                &editor.organization,
                 id,
                 &ItemForm::default(),
                 Some(item_id),
@@ -2654,11 +2869,27 @@ async fn update_item(
         }
     };
 
-    if cms.menus.find_item(item_id).await.ok().flatten().is_none() {
+    if cms
+        .menus
+        .find_item(&editor.organization, item_id)
+        .await
+        .ok()
+        .flatten()
+        .is_none()
+    {
         return see_other(&format!("/admin/menus/{id}"));
     }
-    if let Err(error) = validate_item_form(cms, &form).await {
-        return render_item_form_view(&state, &parts, id, &form, Some(item_id), Some(error)).await;
+    if let Err(error) = validate_item_form(cms, &editor.organization, &form).await {
+        return render_item_form_view(
+            &state,
+            &parts,
+            &editor.organization,
+            id,
+            &form,
+            Some(item_id),
+            Some(error),
+        )
+        .await;
     }
 
     let new_item = NewMenuItem {
@@ -2669,7 +2900,11 @@ async fn update_item(
         url: form.url(),
     };
 
-    match cms.menus.update_item(item_id, &new_item).await {
+    match cms
+        .menus
+        .update_item(&editor.organization, item_id, &new_item)
+        .await
+    {
         Ok(Some(_)) => see_other(&format!("/admin/menus/{id}?ok=item-saved")),
         Ok(None) => see_other(&format!("/admin/menus/{id}")),
         Err(RepositoryError::Internal(message)) => {
@@ -2677,6 +2912,7 @@ async fn update_item(
             render_item_form_view(
                 &state,
                 &parts,
+                &editor.organization,
                 id,
                 &form,
                 Some(item_id),
@@ -2688,6 +2924,7 @@ async fn update_item(
             render_item_form_view(
                 &state,
                 &parts,
+                &editor.organization,
                 id,
                 &form,
                 Some(item_id),
@@ -2701,7 +2938,7 @@ async fn update_item(
 /// `POST /admin/menus/{id}/items/{item_id}/delete`: removes one item.
 async fn delete_item(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     Path((id, item_id)): Path<(i64, i64)>,
     request: Request,
 ) -> Response {
@@ -2712,8 +2949,11 @@ async fn delete_item(
 
     // Only items that actually belong to this menu are touchable
     // through its URLs.
-    if load_menu_item(cms, id, item_id).await.is_some() {
-        if let Err(error) = cms.menus.delete_item(item_id).await {
+    if load_menu_item(cms, &editor.organization, id, item_id)
+        .await
+        .is_some()
+    {
+        if let Err(error) = cms.menus.delete_item(&editor.organization, item_id).await {
             tracing::error!(%error, "menu item deletion failed");
             return AppError::internal("storage failure").into_response();
         }
@@ -2727,6 +2967,7 @@ async fn delete_item(
 async fn render_item_form_view(
     state: &AppState,
     parts: &PageParts,
+    organization: &str,
     menu_id: i64,
     form: &ItemForm,
     item_id: Option<i64>,
@@ -2736,13 +2977,13 @@ async fn render_item_form_view(
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    let Some(menu) = load_menu(cms, menu_id).await else {
+    let Some(menu) = load_menu(cms, organization, menu_id).await else {
         return see_other("/admin/menus");
     };
 
     // Drafts are included on purpose: a menu may link a draft (the
     // public `menus` global skips it until the page is published).
-    let page_options: Vec<Value> = match cms.pages.list(true, MAX_LISTED).await {
+    let page_options: Vec<Value> = match cms.pages.list(organization, true, MAX_LISTED).await {
         Ok(pages) => pages
             .iter()
             .map(|page| {
@@ -2796,7 +3037,11 @@ async fn render_item_form_view(
 
 /// Validates the item form: exactly one destination (page or URL), a
 /// mandatory label for custom links, and the shared shape rules.
-async fn validate_item_form(cms: &CmsContext, form: &ItemForm) -> Result<(), &'static str> {
+async fn validate_item_form(
+    cms: &CmsContext,
+    organization: &str,
+    form: &ItemForm,
+) -> Result<(), &'static str> {
     parse_position(form.position.as_deref())?;
     let page = form.page();
     let url = form.url();
@@ -2813,7 +3058,7 @@ async fn validate_item_form(cms: &CmsContext, form: &ItemForm) -> Result<(), &'s
         (Some(_), Some(_)) => Err("Pick a page or write a URL — not both."),
         (None, None) => Err("The item needs a destination: a page or a URL."),
         (Some(page_id), None) => {
-            if load_page(cms, page_id).await.is_none() {
+            if load_page(cms, organization, page_id).await.is_none() {
                 return Err("The chosen page does not exist.");
             }
             Ok(())
@@ -2838,8 +3083,8 @@ async fn validate_item_form(cms: &CmsContext, form: &ItemForm) -> Result<(), &'s
 }
 
 /// Loads a menu by id, logging storage failures as a missing menu.
-async fn load_menu(cms: &CmsContext, id: i64) -> Option<crate::db::MenuRecord> {
-    match cms.menus.find_by_id(id).await {
+async fn load_menu(cms: &CmsContext, organization: &str, id: i64) -> Option<crate::db::MenuRecord> {
+    match cms.menus.find_by_id(organization, id).await {
         Ok(menu) => menu,
         Err(error) => {
             tracing::error!(%error, "menu lookup failed");
@@ -2852,10 +3097,11 @@ async fn load_menu(cms: &CmsContext, id: i64) -> Option<crate::db::MenuRecord> {
 /// missing items answer `None` (the URL named this menu).
 async fn load_menu_item(
     cms: &CmsContext,
+    organization: &str,
     menu_id: i64,
     item_id: i64,
 ) -> Option<crate::db::MenuItemRecord> {
-    match cms.menus.find_item(item_id).await {
+    match cms.menus.find_item(organization, item_id).await {
         Ok(Some(item)) if item.menu_id == menu_id => Some(item),
         Ok(_) => None,
         Err(error) => {
@@ -2947,7 +3193,9 @@ async fn page_index(State(state): State<AppState>, request: Request) -> Response
     };
     let page_size = i64::from(state.config().cms.index_page_size);
 
-    let total = match cms.pages.count_published().await {
+    // F20: the listing is the request's organization's.
+    let organization = parts.organization(&state);
+    let total = match cms.pages.count_published(&organization).await {
         Ok(total) => total,
         Err(error) => {
             tracing::error!(%error, "page count failed");
@@ -2959,7 +3207,7 @@ async fn page_index(State(state): State<AppState>, request: Request) -> Response
 
     let pages = match cms
         .pages
-        .list_paged(false, page_size, (page - 1) * page_size)
+        .list_paged(&organization, false, page_size, (page - 1) * page_size)
         .await
     {
         Ok(pages) => pages,
@@ -2999,16 +3247,29 @@ async fn page_index(State(state): State<AppState>, request: Request) -> Response
 /// URLs from: `[cms] site_url` when configured (validated absolute
 /// http(s) at load), the request's `Host` header with `http://`
 /// otherwise — correct for plain-HTTP setups, wrong behind TLS or a
-/// reverse proxy (the docs say so on the key).
-fn absolute_origin(state: &AppState, request: &Request) -> String {
-    state.config().cms.site_url.clone().unwrap_or_else(|| {
+/// reverse proxy (the docs say so on the key). F20: `site_url`
+/// speaks for the **CMS organization** only — a tenant organization's
+/// feeds and sitemap always use the request's own host, the only
+/// origin that is genuinely theirs.
+fn absolute_origin(state: &AppState, organization: &str, request: &Request) -> String {
+    let request_origin = || {
         let host = request
             .headers()
             .get(header::HOST)
             .and_then(|value| value.to_str().ok())
             .unwrap_or("127.0.0.1");
         format!("http://{host}")
-    })
+    };
+    if organization == CMS_ORGANIZATION_KEY {
+        state
+            .config()
+            .cms
+            .site_url
+            .clone()
+            .unwrap_or_else(request_origin)
+    } else {
+        request_origin()
+    }
 }
 
 /// `GET /feed.xml`: the published pages as RSS 2.0 (F10), newest
@@ -3019,10 +3280,12 @@ async fn rss_feed(State(state): State<AppState>, request: Request) -> Response {
     if !state.config().cms.feed {
         return AppError::not_found("GET", "/feed.xml").into_response();
     }
+    let parts = PageParts::of(&request);
+    let organization = parts.organization(&state);
     let Ok(cms) = cms_context(&state) else {
         return AppError::internal("the CMS is not initialized").into_response();
     };
-    let entries = match cms.pages.feed_entries(FEED_MAX_ITEMS).await {
+    let entries = match cms.pages.feed_entries(&organization, FEED_MAX_ITEMS).await {
         Ok(entries) => entries,
         Err(error) => {
             tracing::error!(%error, "feed page listing failed");
@@ -3030,7 +3293,7 @@ async fn rss_feed(State(state): State<AppState>, request: Request) -> Response {
         }
     };
 
-    let base = absolute_origin(&state, &request);
+    let base = absolute_origin(&state, &organization, &request);
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <rss version=\"2.0\" xmlns:atom=\"http://www.w3.org/2005/Atom\">\n  <channel>\n",
@@ -3078,10 +3341,12 @@ async fn atom_feed(State(state): State<AppState>, request: Request) -> Response 
     if !state.config().cms.feed {
         return AppError::not_found("GET", "/atom.xml").into_response();
     }
+    let parts = PageParts::of(&request);
+    let organization = parts.organization(&state);
     let Ok(cms) = cms_context(&state) else {
         return AppError::internal("the CMS is not initialized").into_response();
     };
-    let entries = match cms.pages.feed_entries(FEED_MAX_ITEMS).await {
+    let entries = match cms.pages.feed_entries(&organization, FEED_MAX_ITEMS).await {
         Ok(entries) => entries,
         Err(error) => {
             tracing::error!(%error, "feed page listing failed");
@@ -3089,7 +3354,7 @@ async fn atom_feed(State(state): State<AppState>, request: Request) -> Response 
         }
     };
 
-    let base = absolute_origin(&state, &request);
+    let base = absolute_origin(&state, &organization, &request);
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <feed xmlns=\"http://www.w3.org/2005/Atom\">\n",
@@ -3161,11 +3426,13 @@ async fn sitemap(State(state): State<AppState>, request: Request) -> Response {
     if !state.config().cms.sitemap {
         return AppError::not_found("GET", "/sitemap.xml").into_response();
     }
+    let parts = PageParts::of(&request);
+    let organization = parts.organization(&state);
     let Ok(cms) = cms_context(&state) else {
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    let pages = match cms.pages.list(false, SITEMAP_LIMIT).await {
+    let pages = match cms.pages.list(&organization, false, SITEMAP_LIMIT).await {
         Ok(pages) => pages,
         Err(error) => {
             tracing::error!(%error, "sitemap page listing failed");
@@ -3173,7 +3440,7 @@ async fn sitemap(State(state): State<AppState>, request: Request) -> Response {
         }
     };
 
-    let base = absolute_origin(&state, &request);
+    let base = absolute_origin(&state, &organization, &request);
 
     let mut xml =
         String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
@@ -3181,7 +3448,12 @@ async fn sitemap(State(state): State<AppState>, request: Request) -> Response {
     // The canonical homepage: only while the configured default page
     // is a published one (otherwise GET / is not CMS content).
     if let Some(slug) = state.config().cms.default_page.as_deref() {
-        if let Some(home) = cms.pages.find_by_slug(slug).await.unwrap_or(None) {
+        if let Some(home) = cms
+            .pages
+            .find_by_slug(&organization, slug)
+            .await
+            .unwrap_or(None)
+        {
             // F11: the same read-time visibility rule — the flag, or
             // an elapsed schedule.
             if home.is_published || home.publish_at.is_some_and(|at| at <= unix_now()) {
@@ -3755,6 +4027,12 @@ async fn legacy_password_redirect() -> Response {
 // ─── Route fragment ──────────────────────────────────────────────────
 
 /// Route fragment for this module (merged while the CMS is enabled).
+///
+/// F20 splits the panel by who owns it: this fragment is the
+/// **content surface** — everything an organization's own members
+/// manage, scoped to the request's organization by the guards and the
+/// repositories. It mounts on every tree that serves the CMS family:
+/// the CMS host's, and every mapped tenant organization's.
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/p", get(page_index))
@@ -3771,7 +4049,6 @@ pub fn routes() -> Router<AppState> {
         .route("/admin/theme", get(admin_theme))
         .route("/admin/pages", get(list_pages).post(create_page))
         .route("/admin/pages/new", get(new_page_form))
-        .route("/admin/pages/import", get(import_form).post(import_page))
         // Static segment first: axum's matcher prefers it over `{id}`,
         // so the preview never shadows an edit URL.
         .route("/admin/pages/preview", post(preview_page))
@@ -3799,6 +4076,16 @@ pub fn routes() -> Router<AppState> {
             "/admin/menus/{id}/items/{item_id}/delete",
             post(delete_item),
         )
+}
+
+/// The **platform surface** (F20): account management and the
+/// import-from-`public/` tool — the CMS organization's own, merged only
+/// into the CMS host's tree. A tenant host never mounts it, so the
+/// routes answer its standard 404 there, by construction rather than
+/// by a guard.
+pub fn platform_routes() -> Router<AppState> {
+    Router::new()
+        .route("/admin/pages/import", get(import_form).post(import_page))
         .route("/admin/users", get(list_users).post(create_user))
         .route("/admin/users/new", get(new_user_form))
         .route("/admin/users/{id}/edit", get(edit_user_form))

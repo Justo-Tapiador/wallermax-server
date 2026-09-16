@@ -8,7 +8,7 @@
 
 > A modular, secure and high-performance web server written in Rust.
 
-**Status: v0.18.0 — the roadmap phases done, a dynamic template engine with require() running on the original node-jhs2 engine, 
+**Status: v0.19.0 — the roadmap phases done, a dynamic template engine with require() running on the original node-jhs2 engine, 
 browser sessions, and a small built-in CMS that owns the homepage, and a server-side proxy for external APIs.** Phase 4 added rotating
 refresh tokens with family revocation, a Prometheus `/metrics` endpoint, HTTPS via
 rustls (plus an HTTP-to-HTTPS redirect listener), trusted-proxy `X-Forwarded-For`

@@ -1073,21 +1073,37 @@ impl<'r> FromRow<'r, SqliteRow> for PageRevision {
 /// on SQLite, so the storage can be swapped in tests or future phases.
 #[async_trait]
 pub trait PageRepository: Send + Sync + 'static {
-    /// Inserts a new page. Fails with [`RepositoryError::Duplicate`] when
-    /// the slug is already taken.
-    async fn create(&self, page: &NewPage) -> Result<PageRecord, RepositoryError>;
+    /// Inserts a new page **into `organization`**. Fails with
+    /// [`RepositoryError::Duplicate`] when the slug is already taken
+    /// in that organization.
+    async fn create(
+        &self,
+        organization: &str,
+        page: &NewPage,
+    ) -> Result<PageRecord, RepositoryError>;
 
-    /// Looks up a page by id.
-    async fn find_by_id(&self, id: i64) -> Result<Option<PageRecord>, RepositoryError>;
+    /// Looks up a page by id — `None` when it belongs to another
+    /// organization (the cross-tenant 404).
+    async fn find_by_id(
+        &self,
+        organization: &str,
+        id: i64,
+    ) -> Result<Option<PageRecord>, RepositoryError>;
 
-    /// Looks up a page by slug.
-    async fn find_by_slug(&self, slug: &str) -> Result<Option<PageRecord>, RepositoryError>;
+    /// Looks up a page by slug within `organization`.
+    async fn find_by_slug(
+        &self,
+        organization: &str,
+        slug: &str,
+    ) -> Result<Option<PageRecord>, RepositoryError>;
 
-    /// Lists pages, newest first, up to `limit` rows. Drafts are only
-    /// included while `include_drafts` (the admin listing); the public
-    /// listing and the `pages` template global see published pages only.
+    /// Lists the organization's pages, newest first, up to `limit`
+    /// rows. Drafts are only included while `include_drafts` (the
+    /// admin listing); the public listing and the `pages` template
+    /// global see published pages only.
     async fn list(
         &self,
+        organization: &str,
         include_drafts: bool,
         limit: i64,
     ) -> Result<Vec<PageSummary>, RepositoryError>;
@@ -1096,20 +1112,23 @@ pub trait PageRepository: Send + Sync + 'static {
     /// `offset`, newest first — the paginated `GET /p` index.
     async fn list_paged(
         &self,
+        organization: &str,
         include_drafts: bool,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<PageSummary>, RepositoryError>;
 
-    /// Full-text search over title + content (F10). `terms` is the raw
-    /// visitor query — the implementation sanitizes it into
-    /// `MATCH`-safe quoted phrases ([`fts_match_query`]) before it
-    /// reaches FTS5, and results are ranked by `bm25` with a snippet
-    /// fragment of the body (hits wrapped in `⟦ ⟧` markers). Drafts
-    /// ride along only while `include_drafts` (the admin filter); the
-    /// public search page always passes `false`.
+    /// Full-text search over the organization's title + content
+    /// (F10). `terms` is the raw visitor query — the implementation
+    /// sanitizes it into `MATCH`-safe quoted phrases
+    /// ([`fts_match_query`]) before it reaches FTS5, and results are
+    /// ranked by `bm25` with a snippet fragment of the body (hits
+    /// wrapped in `⟦ ⟧` markers). Drafts ride along only while
+    /// `include_drafts` (the admin filter); the public search page
+    /// always passes `false`.
     async fn search(
         &self,
+        organization: &str,
         terms: &str,
         include_drafts: bool,
         limit: i64,
@@ -1118,47 +1137,63 @@ pub trait PageRepository: Send + Sync + 'static {
 
     /// How many rows [`PageRepository::search`] can return — the count
     /// the results pagination needs.
-    async fn search_count(&self, terms: &str, include_drafts: bool)
-        -> Result<i64, RepositoryError>;
+    async fn search_count(
+        &self,
+        organization: &str,
+        terms: &str,
+        include_drafts: bool,
+    ) -> Result<i64, RepositoryError>;
 
-    /// The published pages as feed entries (F10): newest first, up to
-    /// `limit`, with the SEO description riders.
-    async fn feed_entries(&self, limit: i64) -> Result<Vec<FeedEntry>, RepositoryError>;
+    /// The organization's published pages as feed entries (F10):
+    /// newest first, up to `limit`, with the SEO description riders.
+    async fn feed_entries(
+        &self,
+        organization: &str,
+        limit: i64,
+    ) -> Result<Vec<FeedEntry>, RepositoryError>;
 
-    /// Applies `update` to the page with `id`. Returns `None` when the
-    /// page does not exist, and fails with
+    /// Applies `update` to the organization's page with `id`. Returns
+    /// `None` when the page does not exist **or belongs to another
+    /// organization**, and fails with
     /// [`RepositoryError::Duplicate`] when the new slug is taken.
     async fn update(
         &self,
+        organization: &str,
         id: i64,
         update: &PageUpdate,
     ) -> Result<Option<PageRecord>, RepositoryError>;
 
-    /// Deletes the page with `id`. Returns whether a row was removed.
+    /// Deletes the organization's page with `id`. Returns whether a
+    /// row was removed.
     ///
     /// Children survive: the schema reparents them to the top level
     /// (`ON DELETE SET NULL`), and menu items pointing at the page are
     /// removed (`ON DELETE CASCADE`) — the navigation never keeps dead
     /// links by construction (F7).
-    async fn delete(&self, id: i64) -> Result<bool, RepositoryError>;
+    async fn delete(&self, organization: &str, id: i64) -> Result<bool, RepositoryError>;
 
-    /// Counts all pages.
-    async fn count(&self) -> Result<i64, RepositoryError>;
+    /// Counts the organization's pages.
+    async fn count(&self, organization: &str) -> Result<i64, RepositoryError>;
 
-    /// Counts published pages.
-    async fn count_published(&self) -> Result<i64, RepositoryError>;
+    /// Counts the organization's published pages.
+    async fn count_published(&self, organization: &str) -> Result<i64, RepositoryError>;
 
-    /// The ancestor chain of the page with `id`: root first, immediate
-    /// parent last, the page itself excluded. The walk is bounded so a
-    /// corrupted cycle can never hang it (F7).
-    async fn ancestors(&self, id: i64) -> Result<Vec<PageSummary>, RepositoryError>;
+    /// The ancestor chain of the organization's page with `id`: root
+    /// first, immediate parent last, the page itself excluded. The
+    /// walk is bounded so a corrupted cycle can never hang it (F7).
+    async fn ancestors(
+        &self,
+        organization: &str,
+        id: i64,
+    ) -> Result<Vec<PageSummary>, RepositoryError>;
 
-    /// The direct children of a page (`None` = top level), ordered by
-    /// `position` then id. Drafts are only included while
-    /// `include_drafts` (the admin tree); the public subpage listings
-    /// see published children only (F7).
+    /// The direct children of a page (`None` = top level) within the
+    /// organization, ordered by `position` then id. Drafts are only
+    /// included while `include_drafts` (the admin tree); the public
+    /// subpage listings see published children only (F7).
     async fn children(
         &self,
+        organization: &str,
         parent_id: Option<i64>,
         include_drafts: bool,
     ) -> Result<Vec<PageSummary>, RepositoryError>;
@@ -1182,15 +1217,46 @@ pub trait PageRepository: Send + Sync + 'static {
     /// Drafts whose `publish_at` is still in the future (F11): the
     /// dashboard's "needs attention" card (F12). Ordered by the
     /// schedule, the soonest first.
-    async fn scheduled_pending(&self, limit: i64) -> Result<Vec<PageSummary>, RepositoryError>;
+    async fn scheduled_pending(
+        &self,
+        organization: &str,
+        limit: i64,
+    ) -> Result<Vec<PageSummary>, RepositoryError>;
 
-    /// How many drafts have a pending schedule (F12) — the
-    /// dashboard's counter, independent of the card's cap.
-    async fn count_scheduled(&self) -> Result<i64, RepositoryError>;
+    /// How many of the organization's drafts have a pending schedule
+    /// (F12) — the dashboard's counter, independent of the card's cap.
+    async fn count_scheduled(&self, organization: &str) -> Result<i64, RepositoryError>;
 
-    /// The newest revisions across every page (F12): the dashboard's
-    /// recent-activity feed, one row per save, newest first.
-    async fn recent_revisions(&self, limit: i64) -> Result<Vec<RecentRevision>, RepositoryError>;
+    /// The newest revisions across the organization's pages (F12):
+    /// the dashboard's recent-activity feed, one row per save, newest
+    /// first.
+    async fn recent_revisions(
+        &self,
+        organization: &str,
+        limit: i64,
+    ) -> Result<Vec<RecentRevision>, RepositoryError>;
+}
+
+/// The organization scope of every content query (F20): content
+/// rows belong to the organization the creating request served, and
+/// every read carries the same scope — by the stable key, the
+/// identifier the membership guards already read. The subselect is
+/// an `organizations.key` UNIQUE lookup; every call site states the
+/// fragment's bind slot explicitly (`?N`), because SQLite numbers a
+/// bare `?` by occurrence order — a shared fragment with one would
+/// collide with the payload's own slots.
+fn org_scope(bind: usize) -> String {
+    format!("organization_id = (SELECT id FROM organizations WHERE key = ?{bind})")
+}
+
+/// The organization scope for the `menu_items` table (F20): an item
+/// belongs to the organization its menu belongs to — the reach-through
+/// its own table lacks an `organization_id` column on purpose.
+fn item_org_scope(bind: usize) -> String {
+    format!(
+        "menu_id IN (SELECT id FROM menus WHERE organization_id = \
+         (SELECT id FROM organizations WHERE key = ?{bind}))"
+    )
 }
 
 /// Column list shared by every `SELECT` on the `pages` table.
@@ -1339,7 +1405,11 @@ impl SqlitePageRepository {
 
 #[async_trait]
 impl PageRepository for SqlitePageRepository {
-    async fn create(&self, page: &NewPage) -> Result<PageRecord, RepositoryError> {
+    async fn create(
+        &self,
+        organization: &str,
+        page: &NewPage,
+    ) -> Result<PageRecord, RepositoryError> {
         let created_at = unix_now();
         let updated_at = created_at;
 
@@ -1355,8 +1425,9 @@ impl PageRepository for SqlitePageRepository {
         let result = sqlx::query(
             "INSERT INTO pages (slug, title, content, is_published, created_by, \
              created_at, updated_at, parent_id, position, meta_title, meta_description, \
-             og_image, body_format, publish_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
-             ?10, ?11, ?12, ?13, ?14)",
+             og_image, body_format, publish_at, organization_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, \
+             (SELECT id FROM organizations WHERE key = ?15))",
         )
         .bind(&page.slug)
         .bind(&page.title)
@@ -1372,6 +1443,7 @@ impl PageRepository for SqlitePageRepository {
         .bind(&page.og_image)
         .bind(page.body_format.as_str())
         .bind(page.publish_at)
+        .bind(organization)
         .execute(&mut *transaction)
         .await;
 
@@ -1423,40 +1495,60 @@ impl PageRepository for SqlitePageRepository {
         })
     }
 
-    async fn find_by_id(&self, id: i64) -> Result<Option<PageRecord>, RepositoryError> {
-        sqlx::query_as(&format!("SELECT {PAGE_COLUMNS} FROM pages WHERE id = ?1"))
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(RepositoryError::from_sqlx)
+    async fn find_by_id(
+        &self,
+        organization: &str,
+        id: i64,
+    ) -> Result<Option<PageRecord>, RepositoryError> {
+        sqlx::query_as(&format!(
+            "SELECT {PAGE_COLUMNS} FROM pages WHERE id = ?1 AND {ORG_SCOPE}",
+            ORG_SCOPE = org_scope(2)
+        ))
+        .bind(id)
+        .bind(organization)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
     }
 
-    async fn find_by_slug(&self, slug: &str) -> Result<Option<PageRecord>, RepositoryError> {
-        sqlx::query_as(&format!("SELECT {PAGE_COLUMNS} FROM pages WHERE slug = ?1"))
-            .bind(slug)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(RepositoryError::from_sqlx)
+    async fn find_by_slug(
+        &self,
+        organization: &str,
+        slug: &str,
+    ) -> Result<Option<PageRecord>, RepositoryError> {
+        sqlx::query_as(&format!(
+            "SELECT {PAGE_COLUMNS} FROM pages WHERE slug = ?1 AND {ORG_SCOPE}",
+            ORG_SCOPE = org_scope(2)
+        ))
+        .bind(slug)
+        .bind(organization)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
     }
 
     async fn list(
         &self,
+        organization: &str,
         include_drafts: bool,
         limit: i64,
     ) -> Result<Vec<PageSummary>, RepositoryError> {
         let sql = if include_drafts {
             format!(
-                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages \
-                 ORDER BY updated_at DESC, id DESC LIMIT ?1"
+                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE {ORG_SCOPE} \
+                 ORDER BY updated_at DESC, id DESC LIMIT ?2",
+                ORG_SCOPE = org_scope(1)
             )
         } else {
             format!(
-                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE {PUBLIC_VISIBLE} \
-                 ORDER BY updated_at DESC, id DESC LIMIT ?1"
+                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE {ORG_SCOPE} \
+                 AND {PUBLIC_VISIBLE} ORDER BY updated_at DESC, id DESC LIMIT ?2",
+                ORG_SCOPE = org_scope(1)
             )
         };
 
         sqlx::query_as(&sql)
+            .bind(organization)
             .bind(limit)
             .fetch_all(&self.pool)
             .await
@@ -1465,23 +1557,27 @@ impl PageRepository for SqlitePageRepository {
 
     async fn list_paged(
         &self,
+        organization: &str,
         include_drafts: bool,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<PageSummary>, RepositoryError> {
         let sql = if include_drafts {
             format!(
-                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages \
-                 ORDER BY updated_at DESC, id DESC LIMIT ?1 OFFSET ?2"
+                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE {ORG_SCOPE} \
+                 ORDER BY updated_at DESC, id DESC LIMIT ?2 OFFSET ?3",
+                ORG_SCOPE = org_scope(1)
             )
         } else {
             format!(
-                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE {PUBLIC_VISIBLE} \
-                 ORDER BY updated_at DESC, id DESC LIMIT ?1 OFFSET ?2"
+                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE {ORG_SCOPE} \
+                 AND {PUBLIC_VISIBLE} ORDER BY updated_at DESC, id DESC LIMIT ?2 OFFSET ?3",
+                ORG_SCOPE = org_scope(1)
             )
         };
 
         sqlx::query_as(&sql)
+            .bind(organization)
             .bind(limit)
             .bind(offset)
             .fetch_all(&self.pool)
@@ -1491,6 +1587,7 @@ impl PageRepository for SqlitePageRepository {
 
     async fn search(
         &self,
+        organization: &str,
         terms: &str,
         include_drafts: bool,
         limit: i64,
@@ -1510,12 +1607,15 @@ impl PageRepository for SqlitePageRepository {
              snippet(pages_fts, 1, '⟦', '⟧', '…', 12) AS fragment \
              FROM pages_fts JOIN pages p ON p.id = pages_fts.rowid \
              WHERE pages_fts MATCH ?1 AND ({PUBLIC_VISIBLE_P} OR ?2) \
+             AND p.{ORG_SCOPE} \
              ORDER BY bm25(pages_fts), p.id LIMIT ?3 OFFSET ?4",
+            ORG_SCOPE = org_scope(5)
         ))
         .bind(match_query)
         .bind(include_drafts)
         .bind(limit)
         .bind(offset)
+        .bind(organization)
         .fetch_all(&self.pool)
         .await
         .map_err(RepositoryError::from_sqlx)
@@ -1523,6 +1623,7 @@ impl PageRepository for SqlitePageRepository {
 
     async fn search_count(
         &self,
+        organization: &str,
         terms: &str,
         include_drafts: bool,
     ) -> Result<i64, RepositoryError> {
@@ -1531,20 +1632,30 @@ impl PageRepository for SqlitePageRepository {
         };
         sqlx::query_scalar(&format!(
             "SELECT count(*) FROM pages_fts JOIN pages p ON p.id = pages_fts.rowid \
-             WHERE pages_fts MATCH ?1 AND ({PUBLIC_VISIBLE_P} OR ?2)",
+             WHERE pages_fts MATCH ?1 AND ({PUBLIC_VISIBLE_P} OR ?2) \
+             AND p.{ORG_SCOPE}",
+            ORG_SCOPE = org_scope(3)
         ))
         .bind(match_query)
         .bind(include_drafts)
+        .bind(organization)
         .fetch_one(&self.pool)
         .await
         .map_err(RepositoryError::from_sqlx)
     }
 
-    async fn feed_entries(&self, limit: i64) -> Result<Vec<FeedEntry>, RepositoryError> {
+    async fn feed_entries(
+        &self,
+        organization: &str,
+        limit: i64,
+    ) -> Result<Vec<FeedEntry>, RepositoryError> {
         sqlx::query_as(&format!(
             "SELECT id, slug, title, updated_at, meta_description FROM pages \
-             WHERE {PUBLIC_VISIBLE} ORDER BY updated_at DESC, id DESC LIMIT ?1",
+             WHERE {ORG_SCOPE} AND {PUBLIC_VISIBLE} \
+             ORDER BY updated_at DESC, id DESC LIMIT ?2",
+            ORG_SCOPE = org_scope(1)
         ))
+        .bind(organization)
         .bind(limit)
         .fetch_all(&self.pool)
         .await
@@ -1553,12 +1664,13 @@ impl PageRepository for SqlitePageRepository {
 
     async fn update(
         &self,
+        organization: &str,
         id: i64,
         update: &PageUpdate,
     ) -> Result<Option<PageRecord>, RepositoryError> {
         // The current row feeds the snapshot's slug (a `None` update
         // keeps it) and the early exit for missing pages.
-        let Some(current) = self.find_by_id(id).await? else {
+        let Some(current) = self.find_by_id(organization, id).await? else {
             return Ok(None);
         };
         let updated_at = unix_now();
@@ -1574,12 +1686,13 @@ impl PageRepository for SqlitePageRepository {
         // (a `None` binding is SQL `NULL`). `parent_id` binds plainly:
         // the form always states the intended parent, and `NULL` means
         // top level (see `PageUpdate`).
-        let result = sqlx::query(
+        let result = sqlx::query(&format!(
             "UPDATE pages SET slug = COALESCE(?2, slug), title = ?3, content = ?4, \
              is_published = ?5, updated_at = ?6, parent_id = ?7, position = ?8, \
              meta_title = ?9, meta_description = ?10, og_image = ?11, body_format = ?12, \
-             publish_at = ?13 WHERE id = ?1",
-        )
+             publish_at = ?13 WHERE id = ?1 AND {ORG_SCOPE}",
+            ORG_SCOPE = org_scope(14)
+        ))
         .bind(id)
         .bind(update.slug.as_deref())
         .bind(&update.title)
@@ -1593,6 +1706,7 @@ impl PageRepository for SqlitePageRepository {
         .bind(&update.og_image)
         .bind(update.body_format.as_str())
         .bind(update.publish_at)
+        .bind(organization)
         .execute(&mut *transaction)
         .await
         .map_err(RepositoryError::from_sqlx)?;
@@ -1628,49 +1742,68 @@ impl PageRepository for SqlitePageRepository {
             .await
             .map_err(RepositoryError::from_sqlx)?;
 
-        self.find_by_id(id).await
+        self.find_by_id(organization, id).await
     }
 
-    async fn delete(&self, id: i64) -> Result<bool, RepositoryError> {
-        let result = sqlx::query("DELETE FROM pages WHERE id = ?1")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(RepositoryError::from_sqlx)?;
+    async fn delete(&self, organization: &str, id: i64) -> Result<bool, RepositoryError> {
+        let result = sqlx::query(&format!(
+            "DELETE FROM pages WHERE id = ?1 AND {ORG_SCOPE}",
+            ORG_SCOPE = org_scope(2)
+        ))
+        .bind(id)
+        .bind(organization)
+        .execute(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)?;
 
         Ok(result.rows_affected() > 0)
     }
 
-    async fn count(&self) -> Result<i64, RepositoryError> {
-        sqlx::query_scalar("SELECT COUNT(*) FROM pages")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(RepositoryError::from_sqlx)
-    }
-
-    async fn count_published(&self) -> Result<i64, RepositoryError> {
+    async fn count(&self, organization: &str) -> Result<i64, RepositoryError> {
         sqlx::query_scalar(&format!(
-            "SELECT COUNT(*) FROM pages WHERE {PUBLIC_VISIBLE}"
+            "SELECT COUNT(*) FROM pages WHERE {ORG_SCOPE}",
+            ORG_SCOPE = org_scope(1)
         ))
+        .bind(organization)
         .fetch_one(&self.pool)
         .await
         .map_err(RepositoryError::from_sqlx)
     }
 
-    async fn ancestors(&self, id: i64) -> Result<Vec<PageSummary>, RepositoryError> {
+    async fn count_published(&self, organization: &str) -> Result<i64, RepositoryError> {
+        sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM pages WHERE {ORG_SCOPE} AND {PUBLIC_VISIBLE}",
+            ORG_SCOPE = org_scope(1)
+        ))
+        .bind(organization)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
+    }
+
+    async fn ancestors(
+        &self,
+        organization: &str,
+        id: i64,
+    ) -> Result<Vec<PageSummary>, RepositoryError> {
         let mut chain = Vec::new();
         let mut current = id;
         for _ in 0..MAX_ANCESTOR_HOPS {
             let parent = sqlx::query_as::<_, PageSummary>(&format!(
-                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE id = ?1"
+                "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE id = ?1 AND {ORG_SCOPE}",
+                ORG_SCOPE = org_scope(2)
             ))
             .bind(current)
+            .bind(organization)
             .fetch_optional(&self.pool)
             .await
             .map_err(RepositoryError::from_sqlx)?;
 
             let Some(page) = parent else {
                 // A parent disappeared mid-walk: the chain simply stops.
+                // (F20: a parent outside the organization stops it too —
+                // cross-organization parents cannot be created through
+                // the panel, which offers only the organization's pages.)
                 break;
             };
             // The walk starts at the page itself, which is NOT its own
@@ -1690,6 +1823,7 @@ impl PageRepository for SqlitePageRepository {
 
     async fn children(
         &self,
+        organization: &str,
         parent_id: Option<i64>,
         include_drafts: bool,
     ) -> Result<Vec<PageSummary>, RepositoryError> {
@@ -1697,11 +1831,13 @@ impl PageRepository for SqlitePageRepository {
         // (top level) without string-building the condition.
         let sql = format!(
             "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages WHERE parent_id IS ?1 \
-             AND ({PUBLIC_VISIBLE} OR ?2) ORDER BY position, id"
+             AND ({PUBLIC_VISIBLE} OR ?2) AND {ORG_SCOPE} ORDER BY position, id",
+            ORG_SCOPE = org_scope(3)
         );
         sqlx::query_as(&sql)
             .bind(parent_id)
             .bind(include_drafts)
+            .bind(organization)
             .fetch_all(&self.pool)
             .await
             .map_err(RepositoryError::from_sqlx)
@@ -1744,44 +1880,60 @@ impl PageRepository for SqlitePageRepository {
         .map_err(RepositoryError::from_sqlx)
     }
 
-    async fn scheduled_pending(&self, limit: i64) -> Result<Vec<PageSummary>, RepositoryError> {
+    async fn scheduled_pending(
+        &self,
+        organization: &str,
+        limit: i64,
+    ) -> Result<Vec<PageSummary>, RepositoryError> {
         // The mirror image of the shared visibility predicate: a
         // draft whose schedule has NOT elapsed yet. The clock is
         // evaluated by SQLite at query time, exactly like
         // `PUBLIC_VISIBLE`.
         let sql = format!(
             "SELECT {PAGE_SUMMARY_COLUMNS} FROM pages \
-             WHERE is_published = 0 AND publish_at IS NOT NULL \
+             WHERE {ORG_SCOPE} AND is_published = 0 AND publish_at IS NOT NULL \
              AND publish_at > strftime('%s', 'now') \
-             ORDER BY publish_at ASC, id ASC LIMIT ?1"
+             ORDER BY publish_at ASC, id ASC LIMIT ?2",
+            ORG_SCOPE = org_scope(1)
         );
         sqlx::query_as(&sql)
+            .bind(organization)
             .bind(limit)
             .fetch_all(&self.pool)
             .await
             .map_err(RepositoryError::from_sqlx)
     }
 
-    async fn count_scheduled(&self) -> Result<i64, RepositoryError> {
-        sqlx::query_scalar(
-            "SELECT COUNT(*) FROM pages WHERE is_published = 0 \
+    async fn count_scheduled(&self, organization: &str) -> Result<i64, RepositoryError> {
+        sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM pages WHERE {ORG_SCOPE} AND is_published = 0 \
              AND publish_at IS NOT NULL AND publish_at > strftime('%s', 'now')",
-        )
+            ORG_SCOPE = org_scope(1)
+        ))
+        .bind(organization)
         .fetch_one(&self.pool)
         .await
         .map_err(RepositoryError::from_sqlx)
     }
 
-    async fn recent_revisions(&self, limit: i64) -> Result<Vec<RecentRevision>, RepositoryError> {
+    async fn recent_revisions(
+        &self,
+        organization: &str,
+        limit: i64,
+    ) -> Result<Vec<RecentRevision>, RepositoryError> {
         // `r.id DESC` is insertion order: the feed shows the newest
-        // saves regardless of which page they belong to.
-        sqlx::query_as(
+        // saves regardless of which page they belong to. The JOIN
+        // narrows the feed to the organization's own pages (F20).
+        sqlx::query_as(&format!(
             "SELECT r.page_id AS page_id, r.title AS title, r.slug AS slug, \
              r.revision AS revision, r.note AS note, r.created_at AS created_at, \
              u.username AS edited_by_name \
-             FROM page_revisions r LEFT JOIN users u ON u.id = r.edited_by \
-             ORDER BY r.id DESC LIMIT ?1",
-        )
+             FROM page_revisions r JOIN pages p ON p.id = r.page_id \
+             LEFT JOIN users u ON u.id = r.edited_by \
+             WHERE p.{ORG_SCOPE} ORDER BY r.id DESC LIMIT ?2",
+            ORG_SCOPE = org_scope(1)
+        ))
+        .bind(organization)
         .bind(limit)
         .fetch_all(&self.pool)
         .await
@@ -1900,32 +2052,45 @@ pub struct ResolvedMenuItem {
 /// depend on the trait, not on SQLite.
 #[async_trait]
 pub trait MenuRepository: Send + Sync + 'static {
-    /// Inserts a menu. Fails with [`RepositoryError::Duplicate`] when
-    /// the name is already taken.
-    async fn create(&self, menu: &NewMenu) -> Result<MenuRecord, RepositoryError>;
+    /// Inserts a menu **into `organization`**. Fails with
+    /// [`RepositoryError::Duplicate`] when the name is already taken
+    /// in that organization.
+    async fn create(
+        &self,
+        organization: &str,
+        menu: &NewMenu,
+    ) -> Result<MenuRecord, RepositoryError>;
 
-    /// Looks up a menu by id.
-    async fn find_by_id(&self, id: i64) -> Result<Option<MenuRecord>, RepositoryError>;
+    /// Looks up a menu by id — `None` when it belongs to another
+    /// organization.
+    async fn find_by_id(
+        &self,
+        organization: &str,
+        id: i64,
+    ) -> Result<Option<MenuRecord>, RepositoryError>;
 
-    /// Every menu ordered by name (the admin listing).
-    async fn list(&self) -> Result<Vec<MenuRecord>, RepositoryError>;
+    /// Every menu of `organization`, ordered by name (the admin
+    /// listing).
+    async fn list(&self, organization: &str) -> Result<Vec<MenuRecord>, RepositoryError>;
 
-    /// Counts menus.
-    async fn count(&self) -> Result<i64, RepositoryError>;
+    /// Counts the organization's menus.
+    async fn count(&self, organization: &str) -> Result<i64, RepositoryError>;
 
     /// Counts the items of one menu (the admin listing badge).
     async fn count_items(&self, menu_id: i64) -> Result<i64, RepositoryError>;
 
     /// Renames a menu's **title**; the name is the template key and
-    /// stays immutable. Returns `None` when the menu does not exist.
+    /// stays immutable. Returns `None` when the menu does not exist
+    /// or belongs to another organization.
     async fn update_title(
         &self,
+        organization: &str,
         id: i64,
         title: &str,
     ) -> Result<Option<MenuRecord>, RepositoryError>;
 
-    /// Deletes the menu and (by the schema) its items.
-    async fn delete(&self, id: i64) -> Result<bool, RepositoryError>;
+    /// Deletes the organization's menu and (by the schema) its items.
+    async fn delete(&self, organization: &str, id: i64) -> Result<bool, RepositoryError>;
 
     /// The items of one menu with their page projection, ordered by
     /// `position` then id — the admin detail view (drafts included).
@@ -1934,28 +2099,39 @@ pub trait MenuRepository: Send + Sync + 'static {
         menu_id: i64,
     ) -> Result<Vec<MenuItemWithPage>, RepositoryError>;
 
-    /// Looks up one item by id.
-    async fn find_item(&self, item_id: i64) -> Result<Option<MenuItemRecord>, RepositoryError>;
+    /// Looks up one item by id — `None` when it belongs to another
+    /// organization's menu.
+    async fn find_item(
+        &self,
+        organization: &str,
+        item_id: i64,
+    ) -> Result<Option<MenuItemRecord>, RepositoryError>;
 
     /// Adds an item to its menu. The caller validates the
     /// page-xor-url shape first; the schema `CHECK` is the backstop.
     async fn add_item(&self, item: &NewMenuItem) -> Result<MenuItemRecord, RepositoryError>;
 
-    /// Replaces an item. Returns `None` when it does not exist.
+    /// Replaces an item. Returns `None` when it does not exist or
+    /// belongs to another organization's menu.
     async fn update_item(
         &self,
+        organization: &str,
         item_id: i64,
         item: &NewMenuItem,
     ) -> Result<Option<MenuItemRecord>, RepositoryError>;
 
-    /// Deletes one item.
-    async fn delete_item(&self, item_id: i64) -> Result<bool, RepositoryError>;
+    /// Deletes one item (of the organization's menus).
+    async fn delete_item(&self, organization: &str, item_id: i64) -> Result<bool, RepositoryError>;
 
-    /// Every menu with its items resolved to label + href — **published
-    /// pages only**: draft and deleted-page links are skipped, so the
-    /// public navigation never 404s by construction. Menus ordered by
-    /// name (the `menus` template global).
-    async fn resolved(&self) -> Result<Vec<(MenuRecord, Vec<ResolvedMenuItem>)>, RepositoryError>;
+    /// Every menu of `organization` with its items resolved to label
+    /// + href — **published pages only**: draft and deleted-page links
+    /// are skipped, so the public navigation never 404s by
+    /// construction. Menus ordered by name (the `menus` template
+    /// global).
+    async fn resolved(
+        &self,
+        organization: &str,
+    ) -> Result<Vec<(MenuRecord, Vec<ResolvedMenuItem>)>, RepositoryError>;
 }
 
 /// SQLite-backed [`MenuRepository`] over a shared pool.
@@ -1973,13 +2149,19 @@ impl SqliteMenuRepository {
 
 #[async_trait]
 impl MenuRepository for SqliteMenuRepository {
-    async fn create(&self, menu: &NewMenu) -> Result<MenuRecord, RepositoryError> {
+    async fn create(
+        &self,
+        organization: &str,
+        menu: &NewMenu,
+    ) -> Result<MenuRecord, RepositoryError> {
         let now = unix_now();
         let result = sqlx::query(
-            "INSERT INTO menus (name, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO menus (name, title, organization_id, created_at, updated_at) \
+             VALUES (?1, ?2, (SELECT id FROM organizations WHERE key = ?3), ?4, ?5)",
         )
         .bind(&menu.name)
         .bind(&menu.title)
+        .bind(organization)
         .bind(now)
         .bind(now)
         .execute(&self.pool)
@@ -1997,26 +2179,44 @@ impl MenuRepository for SqliteMenuRepository {
         }
     }
 
-    async fn find_by_id(&self, id: i64) -> Result<Option<MenuRecord>, RepositoryError> {
-        sqlx::query_as("SELECT id, name, title, created_at, updated_at FROM menus WHERE id = ?1")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(RepositoryError::from_sqlx)
+    async fn find_by_id(
+        &self,
+        organization: &str,
+        id: i64,
+    ) -> Result<Option<MenuRecord>, RepositoryError> {
+        sqlx::query_as(&format!(
+            "SELECT id, name, title, created_at, updated_at FROM menus \
+             WHERE id = ?1 AND {ORG_SCOPE}",
+            ORG_SCOPE = org_scope(2)
+        ))
+        .bind(id)
+        .bind(organization)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
     }
 
-    async fn list(&self) -> Result<Vec<MenuRecord>, RepositoryError> {
-        sqlx::query_as("SELECT id, name, title, created_at, updated_at FROM menus ORDER BY name")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(RepositoryError::from_sqlx)
+    async fn list(&self, organization: &str) -> Result<Vec<MenuRecord>, RepositoryError> {
+        sqlx::query_as(&format!(
+            "SELECT id, name, title, created_at, updated_at FROM menus \
+             WHERE {ORG_SCOPE} ORDER BY name",
+            ORG_SCOPE = org_scope(1)
+        ))
+        .bind(organization)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
     }
 
-    async fn count(&self) -> Result<i64, RepositoryError> {
-        sqlx::query_scalar("SELECT COUNT(*) FROM menus")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(RepositoryError::from_sqlx)
+    async fn count(&self, organization: &str) -> Result<i64, RepositoryError> {
+        sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM menus WHERE {ORG_SCOPE}",
+            ORG_SCOPE = org_scope(1)
+        ))
+        .bind(organization)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
     }
 
     async fn count_items(&self, menu_id: i64) -> Result<i64, RepositoryError> {
@@ -2029,30 +2229,39 @@ impl MenuRepository for SqliteMenuRepository {
 
     async fn update_title(
         &self,
+        organization: &str,
         id: i64,
         title: &str,
     ) -> Result<Option<MenuRecord>, RepositoryError> {
-        let result = sqlx::query("UPDATE menus SET title = ?2, updated_at = ?3 WHERE id = ?1")
-            .bind(id)
-            .bind(title)
-            .bind(unix_now())
-            .execute(&self.pool)
-            .await
-            .map_err(RepositoryError::from_sqlx)?;
+        let result = sqlx::query(&format!(
+            "UPDATE menus SET title = ?2, updated_at = ?3 WHERE id = ?1 AND {ORG_SCOPE}",
+            ORG_SCOPE = org_scope(4)
+        ))
+        .bind(id)
+        .bind(title)
+        .bind(unix_now())
+        .bind(organization)
+        .execute(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)?;
 
         if result.rows_affected() == 0 {
             return Ok(None);
         }
 
-        self.find_by_id(id).await
+        self.find_by_id(organization, id).await
     }
 
-    async fn delete(&self, id: i64) -> Result<bool, RepositoryError> {
-        let result = sqlx::query("DELETE FROM menus WHERE id = ?1")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(RepositoryError::from_sqlx)?;
+    async fn delete(&self, organization: &str, id: i64) -> Result<bool, RepositoryError> {
+        let result = sqlx::query(&format!(
+            "DELETE FROM menus WHERE id = ?1 AND {ORG_SCOPE}",
+            ORG_SCOPE = org_scope(2)
+        ))
+        .bind(id)
+        .bind(organization)
+        .execute(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -2101,11 +2310,18 @@ impl MenuRepository for SqliteMenuRepository {
         .map_err(RepositoryError::from_sqlx)
     }
 
-    async fn find_item(&self, item_id: i64) -> Result<Option<MenuItemRecord>, RepositoryError> {
-        sqlx::query_as(
-            "SELECT id, menu_id, position, label, page_id, url FROM menu_items WHERE id = ?1",
-        )
+    async fn find_item(
+        &self,
+        organization: &str,
+        item_id: i64,
+    ) -> Result<Option<MenuItemRecord>, RepositoryError> {
+        sqlx::query_as(&format!(
+            "SELECT id, menu_id, position, label, page_id, url FROM menu_items \
+             WHERE id = ?1 AND {ITEM_ORG_SCOPE}",
+            ITEM_ORG_SCOPE = item_org_scope(2)
+        ))
         .bind(item_id)
+        .bind(organization)
         .fetch_optional(&self.pool)
         .await
         .map_err(RepositoryError::from_sqlx)
@@ -2139,19 +2355,22 @@ impl MenuRepository for SqliteMenuRepository {
 
     async fn update_item(
         &self,
+        organization: &str,
         item_id: i64,
         item: &NewMenuItem,
     ) -> Result<Option<MenuItemRecord>, RepositoryError> {
-        let result = sqlx::query(
+        let result = sqlx::query(&format!(
             "UPDATE menu_items SET menu_id = ?2, position = ?3, label = ?4, page_id = ?5, \
-             url = ?6 WHERE id = ?1",
-        )
+             url = ?6 WHERE id = ?1 AND {ITEM_ORG_SCOPE}",
+            ITEM_ORG_SCOPE = item_org_scope(7)
+        ))
         .bind(item_id)
         .bind(item.menu_id)
         .bind(item.position)
         .bind(&item.label)
         .bind(item.page_id)
         .bind(&item.url)
+        .bind(organization)
         .execute(&self.pool)
         .await
         .map_err(RepositoryError::from_sqlx)?;
@@ -2160,24 +2379,31 @@ impl MenuRepository for SqliteMenuRepository {
             return Ok(None);
         }
 
-        self.find_item(item_id).await
+        self.find_item(organization, item_id).await
     }
 
-    async fn delete_item(&self, item_id: i64) -> Result<bool, RepositoryError> {
-        let result = sqlx::query("DELETE FROM menu_items WHERE id = ?1")
-            .bind(item_id)
-            .execute(&self.pool)
-            .await
-            .map_err(RepositoryError::from_sqlx)?;
+    async fn delete_item(&self, organization: &str, item_id: i64) -> Result<bool, RepositoryError> {
+        let result = sqlx::query(&format!(
+            "DELETE FROM menu_items WHERE id = ?1 AND {ITEM_ORG_SCOPE}",
+            ITEM_ORG_SCOPE = item_org_scope(2)
+        ))
+        .bind(item_id)
+        .bind(organization)
+        .execute(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)?;
 
         Ok(result.rows_affected() > 0)
     }
 
-    async fn resolved(&self) -> Result<Vec<(MenuRecord, Vec<ResolvedMenuItem>)>, RepositoryError> {
+    async fn resolved(
+        &self,
+        organization: &str,
+    ) -> Result<Vec<(MenuRecord, Vec<ResolvedMenuItem>)>, RepositoryError> {
         // One joined pass: menus LEFT JOIN items LEFT JOIN pages. Items
         // pointing at draft or missing pages are filtered in Rust so
         // the public navigation never links a 404.
-        let rows = sqlx::query(
+        let rows = sqlx::query(&format!(
             "SELECT m.id, m.name, m.title, m.created_at, m.updated_at, \
              mi.id AS item_id, mi.position, mi.label, mi.page_id, mi.url, \
              p.slug AS page_slug, p.title AS page_title, p.is_published AS page_is_published, \
@@ -2185,8 +2411,11 @@ impl MenuRepository for SqliteMenuRepository {
              FROM menus m \
              LEFT JOIN menu_items mi ON mi.menu_id = m.id \
              LEFT JOIN pages p ON p.id = mi.page_id \
+             WHERE m.{ORG_SCOPE} \
              ORDER BY m.name, mi.position, mi.id",
-        )
+            ORG_SCOPE = org_scope(1)
+        ))
+        .bind(organization)
         .fetch_all(&self.pool)
         .await
         .map_err(RepositoryError::from_sqlx)?;
@@ -2335,37 +2564,49 @@ const MEDIA_COLUMNS: &str = "id, stored_name, thumb_name, original_name, mime_ty
 /// around the row insert; this layer only owns the metadata.
 #[async_trait]
 pub trait MediaRepository: Send + Sync + 'static {
-    /// Inserts a media row. The caller has already written the files;
-    /// on failure it removes them again (the row and the disk never
-    /// disagree for long).
-    async fn create(&self, media: &NewMedia) -> Result<MediaRecord, RepositoryError>;
+    /// Inserts a media row **into `organization`**. The caller has
+    /// already written the files; on failure it removes them again
+    /// (the row and the disk never disagree for long).
+    async fn create(
+        &self,
+        organization: &str,
+        media: &NewMedia,
+    ) -> Result<MediaRecord, RepositoryError>;
 
-    /// Looks up a media row by id (the serving and detail routes).
-    async fn find_by_id(&self, id: i64) -> Result<Option<MediaRecord>, RepositoryError>;
+    /// Looks up a media row by id (the serving and detail routes) —
+    /// `None` when it belongs to another organization.
+    async fn find_by_id(
+        &self,
+        organization: &str,
+        id: i64,
+    ) -> Result<Option<MediaRecord>, RepositoryError>;
 
-    /// The listing window (F10): `limit` newest rows from `offset` —
-    /// the paginated admin grid. `count` reports the total.
+    /// The organization's listing window (F10): `limit` newest rows
+    /// from `offset` — the paginated admin grid. `count` reports the
+    /// total.
     async fn list_paged(
         &self,
+        organization: &str,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<MediaRecord>, RepositoryError>;
 
-    /// How many media rows exist in total (the pagination's other
-    /// half).
-    async fn count(&self) -> Result<i64, RepositoryError>;
+    /// How many media rows the organization owns in total (the
+    /// pagination's other half).
+    async fn count(&self, organization: &str) -> Result<i64, RepositoryError>;
 
     /// Replaces the alt text. Returns the updated row, or `None` when
-    /// the id does not exist.
+    /// the id does not exist or belongs to another organization.
     async fn update_alt(
         &self,
+        organization: &str,
         id: i64,
         alt_text: &str,
     ) -> Result<Option<MediaRecord>, RepositoryError>;
 
-    /// Deletes the row. The caller removes the files afterwards.
-    /// Returns whether a row was removed.
-    async fn delete(&self, id: i64) -> Result<bool, RepositoryError>;
+    /// Deletes the organization's row. The caller removes the files
+    /// afterwards. Returns whether a row was removed.
+    async fn delete(&self, organization: &str, id: i64) -> Result<bool, RepositoryError>;
 }
 
 /// SQLite-backed [`MediaRepository`] over a shared pool.
@@ -2383,12 +2624,17 @@ impl SqliteMediaRepository {
 
 #[async_trait]
 impl MediaRepository for SqliteMediaRepository {
-    async fn create(&self, media: &NewMedia) -> Result<MediaRecord, RepositoryError> {
+    async fn create(
+        &self,
+        organization: &str,
+        media: &NewMedia,
+    ) -> Result<MediaRecord, RepositoryError> {
         let now = unix_now();
         let result = sqlx::query(
             "INSERT INTO media (stored_name, thumb_name, original_name, mime_type, \
-             bytes, width, height, alt_text, created_at, created_by) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             bytes, width, height, alt_text, organization_id, created_at, created_by) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
+             (SELECT id FROM organizations WHERE key = ?9), ?10, ?11)",
         )
         .bind(&media.stored_name)
         .bind(&media.thumb_name)
@@ -2398,6 +2644,7 @@ impl MediaRepository for SqliteMediaRepository {
         .bind(media.width)
         .bind(media.height)
         .bind(&media.alt_text)
+        .bind(organization)
         .bind(now)
         .bind(media.created_by)
         .execute(&self.pool)
@@ -2421,22 +2668,34 @@ impl MediaRepository for SqliteMediaRepository {
         }
     }
 
-    async fn find_by_id(&self, id: i64) -> Result<Option<MediaRecord>, RepositoryError> {
-        sqlx::query_as(&format!("SELECT {MEDIA_COLUMNS} FROM media WHERE id = ?1"))
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(RepositoryError::from_sqlx)
+    async fn find_by_id(
+        &self,
+        organization: &str,
+        id: i64,
+    ) -> Result<Option<MediaRecord>, RepositoryError> {
+        sqlx::query_as(&format!(
+            "SELECT {MEDIA_COLUMNS} FROM media WHERE id = ?1 AND {ORG_SCOPE}",
+            ORG_SCOPE = org_scope(2)
+        ))
+        .bind(id)
+        .bind(organization)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
     }
 
     async fn list_paged(
         &self,
+        organization: &str,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<MediaRecord>, RepositoryError> {
         sqlx::query_as(&format!(
-            "SELECT {MEDIA_COLUMNS} FROM media ORDER BY id DESC LIMIT ?1 OFFSET ?2"
+            "SELECT {MEDIA_COLUMNS} FROM media WHERE {ORG_SCOPE} \
+             ORDER BY id DESC LIMIT ?2 OFFSET ?3",
+            ORG_SCOPE = org_scope(1)
         ))
+        .bind(organization)
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)
@@ -2444,37 +2703,50 @@ impl MediaRepository for SqliteMediaRepository {
         .map_err(RepositoryError::from_sqlx)
     }
 
-    async fn count(&self) -> Result<i64, RepositoryError> {
-        sqlx::query_scalar("SELECT count(*) FROM media")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(RepositoryError::from_sqlx)
+    async fn count(&self, organization: &str) -> Result<i64, RepositoryError> {
+        sqlx::query_scalar(&format!(
+            "SELECT count(*) FROM media WHERE {ORG_SCOPE}",
+            ORG_SCOPE = org_scope(1)
+        ))
+        .bind(organization)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
     }
 
     async fn update_alt(
         &self,
+        organization: &str,
         id: i64,
         alt_text: &str,
     ) -> Result<Option<MediaRecord>, RepositoryError> {
-        let updated = sqlx::query("UPDATE media SET alt_text = ?2 WHERE id = ?1")
-            .bind(id)
-            .bind(alt_text)
-            .execute(&self.pool)
-            .await
-            .map_err(RepositoryError::from_sqlx)?;
+        let updated = sqlx::query(&format!(
+            "UPDATE media SET alt_text = ?2 WHERE id = ?1 AND {ORG_SCOPE}",
+            ORG_SCOPE = org_scope(3)
+        ))
+        .bind(id)
+        .bind(alt_text)
+        .bind(organization)
+        .execute(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)?;
 
         if updated.rows_affected() == 0 {
             return Ok(None);
         }
-        self.find_by_id(id).await
+        self.find_by_id(organization, id).await
     }
 
-    async fn delete(&self, id: i64) -> Result<bool, RepositoryError> {
-        let removed = sqlx::query("DELETE FROM media WHERE id = ?1")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .map_err(RepositoryError::from_sqlx)?;
+    async fn delete(&self, organization: &str, id: i64) -> Result<bool, RepositoryError> {
+        let removed = sqlx::query(&format!(
+            "DELETE FROM media WHERE id = ?1 AND {ORG_SCOPE}",
+            ORG_SCOPE = org_scope(2)
+        ))
+        .bind(id)
+        .bind(organization)
+        .execute(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)?;
 
         Ok(removed.rows_affected() > 0)
     }
@@ -2511,6 +2783,23 @@ pub struct OrganizationListing {
     pub domain_count: i64,
     /// Rows in `memberships` pointing at the organization.
     pub member_count: i64,
+}
+
+/// How much content an organization still owns (F20): the delete
+/// guard behind the Tenants page — a tenant with content is not
+/// deletable until the content moves or goes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContentCounts {
+    pub pages: i64,
+    pub menus: i64,
+    pub media: i64,
+}
+
+impl ContentCounts {
+    /// Whether there is nothing left to move — the tenant may go.
+    pub fn is_empty(&self) -> bool {
+        self.pages == 0 && self.menus == 0 && self.media == 0
+    }
 }
 
 /// One `domains` row (F16): a mapped host name. `source` carries the
@@ -2597,7 +2886,16 @@ pub trait OrganizationRepository: Send + Sync + 'static {
     /// the schema's no-foreign-key style (the users and menus deletes
     /// work the same way). Returns `false` when no such organization
     /// exists.
+    ///
+    /// Callers guard with [`OrganizationRepository::content_counts`]
+    /// first (F20): a tenant that still owns content is refused, not
+    /// silently relieved of it.
     async fn delete(&self, key: &str) -> Result<bool, RepositoryError>;
+
+    /// How much content the organization still owns (F20): pages,
+    /// menus and media rows. The Tenants page's delete guard —
+    /// content is never silently destroyed with its tenant.
+    async fn content_counts(&self, key: &str) -> Result<ContentCounts, RepositoryError>;
 
     /// The organization's host names, in insertion order (the order
     /// the `cms_origin` derivation treats as canonical).
@@ -2776,6 +3074,27 @@ impl OrganizationRepository for SqliteOrganizationRepository {
                 .map_err(RepositoryError::from_sqlx)?;
         }
         Ok(true)
+    }
+
+    async fn content_counts(&self, key: &str) -> Result<ContentCounts, RepositoryError> {
+        // Three subcounted lookups in one pass — the guard only runs on
+        // the Tenants delete route, so one round trip is all it gets.
+        let (pages, menus, media) = sqlx::query_as::<_, (i64, i64, i64)>(&format!(
+            "SELECT \
+             (SELECT COUNT(*) FROM pages WHERE {ORG_SCOPE}), \
+             (SELECT COUNT(*) FROM menus WHERE {ORG_SCOPE}), \
+             (SELECT COUNT(*) FROM media WHERE {ORG_SCOPE})",
+            ORG_SCOPE = org_scope(1)
+        ))
+        .bind(key)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)?;
+        Ok(ContentCounts {
+            pages,
+            menus,
+            media,
+        })
     }
 
     async fn domains(&self, organization_id: i64) -> Result<Vec<DomainRecord>, RepositoryError> {
@@ -2998,10 +3317,39 @@ pub async fn connect(config: &DatabaseConfig) -> Result<SqlitePool, SqlxError> {
 /// Returns the migration failure as a displayable message (startup-only
 /// path, reported straight to the operator).
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), String> {
-    sqlx::migrate!("./migrations")
-        .run(pool)
+    // sqlx wraps every migration in a transaction, and SQLite's
+    // `PRAGMA foreign_keys` is a no-op inside one — so the 0011
+    // content rebuild (which drops tables other tables still
+    // reference, exactly as its header explains) gets its enforcement
+    // off HERE, on the very connection the migrator will use, before
+    // it begins anything. Every other migration is plain DDL that
+    // never depended on enforcement, so one connection-wide toggle is
+    // all it takes; the pragma is restored before the connection goes
+    // back to the pool. (The migration file carries its own
+    // `-- no-transaction` marker and PRAGMAs too — for the day sqlx's
+    // SQLite backend honors the marker, the belt to these braces.)
+    let mut connection = pool
+        .acquire()
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| format!("failed to acquire a connection for the migrations: {error}"))?;
+    if let Err(error) = sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+    {
+        drop(connection);
+        return Err(format!(
+            "failed to relax the foreign key enforcement for the migrations: {error}"
+        ));
+    }
+    let migrated = sqlx::migrate!("./migrations").run(&mut *connection).await;
+    let restored = sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *connection)
+        .await;
+    drop(connection);
+
+    migrated.map_err(|error| format!("failed to apply the migrations: {error}"))?;
+    restored.map_err(|error| format!("failed to restore the foreign key enforcement: {error}"))?;
+    Ok(())
 }
 
 /// Seeds the F15 organizations from the configuration (idempotent).
@@ -4027,6 +4375,233 @@ mod tests {
             .expect("query ok")
             .expect("data survived");
         assert_eq!(still_there.username, "persisted");
+    }
+
+    #[tokio::test]
+    async fn the_f20_upgrade_preserves_ids_history_and_search() {
+        let db = TempDb::new();
+        let pool = connect(&config_for(&db)).await.expect("pool connects");
+        run_migrations(&pool).await.expect("migrations apply");
+        seed_organizations(&pool, "public", "views")
+            .await
+            .expect("organizations seed");
+
+        // Rewind the content tables to their pre-F20 shape, with data
+        // in them exactly as a v0.18.0 database would sit before the
+        // upgrade: a globally-unique slug, one page that carries
+        // history, a menu whose item points at it, and a media row.
+        // (Children first: with foreign keys enforced, a dropped
+        // parent would leave a dangling clause that breaks the next
+        // drop's schema validation. The rows are recreated below with
+        // their ids, so the cascades cost nothing.)
+        for statement in [
+            "DROP TABLE page_revisions",
+            "DROP TABLE menu_items",
+            "DROP TABLE pages",
+            "DROP TABLE menus",
+            "DROP TABLE media",
+            "DROP TABLE pages_fts",
+        ] {
+            sqlx::query(statement).execute(&pool).await.expect("drop");
+        }
+        sqlx::query(
+            "CREATE TABLE pages (\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, \
+               slug TEXT NOT NULL UNIQUE, \
+               title TEXT NOT NULL, \
+               content TEXT NOT NULL DEFAULT '', \
+               is_published INTEGER NOT NULL DEFAULT 0, \
+               created_by INTEGER REFERENCES users(id) ON DELETE SET NULL, \
+               created_at INTEGER NOT NULL, \
+               updated_at INTEGER NOT NULL, \
+               parent_id INTEGER REFERENCES pages(id) ON DELETE SET NULL, \
+               position INTEGER NOT NULL DEFAULT 0, \
+               meta_title TEXT, meta_description TEXT, og_image TEXT, \
+               body_format TEXT NOT NULL DEFAULT 'jhs' \
+                 CHECK (body_format IN ('jhs', 'markdown')), \
+               publish_at INTEGER)",
+        )
+        .execute(&pool)
+        .await
+        .expect("old pages shape");
+        sqlx::query(
+            "CREATE TABLE menus (\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, \
+               name TEXT NOT NULL UNIQUE, title TEXT NOT NULL, \
+               created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("old menus shape");
+        sqlx::query(
+            "CREATE TABLE media (\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, \
+               stored_name TEXT NOT NULL UNIQUE, thumb_name TEXT NOT NULL, \
+               original_name TEXT NOT NULL, mime_type TEXT NOT NULL, \
+               bytes INTEGER NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL, \
+               alt_text TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, created_by INTEGER)",
+        )
+        .execute(&pool)
+        .await
+        .expect("old media shape");
+        sqlx::query(
+            "CREATE VIRTUAL TABLE pages_fts USING fts5(\
+             title, content, content='pages', content_rowid='id')",
+        )
+        .execute(&pool)
+        .await
+        .expect("old fts shape");
+        sqlx::query(
+            "CREATE TABLE menu_items (\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, \
+               menu_id INTEGER NOT NULL REFERENCES menus(id) ON DELETE CASCADE, \
+               position INTEGER NOT NULL DEFAULT 0, label TEXT, \
+               page_id INTEGER REFERENCES pages(id) ON DELETE CASCADE, url TEXT, \
+               CHECK ((page_id IS NULL) <> (url IS NULL)))",
+        )
+        .execute(&pool)
+        .await
+        .expect("old menu items shape");
+        sqlx::query(
+            "CREATE TABLE page_revisions (\
+               id INTEGER PRIMARY KEY AUTOINCREMENT, \
+               page_id INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE, \
+               revision INTEGER NOT NULL, slug TEXT NOT NULL, title TEXT NOT NULL, \
+               content TEXT NOT NULL DEFAULT '', \
+               body_format TEXT NOT NULL DEFAULT 'jhs', parent_id INTEGER, \
+               position INTEGER NOT NULL DEFAULT 0, meta_title TEXT, \
+               meta_description TEXT, og_image TEXT, \
+               is_published INTEGER NOT NULL DEFAULT 0, publish_at INTEGER, \
+               edited_by INTEGER REFERENCES users(id) ON DELETE SET NULL, \
+               note TEXT, created_at INTEGER NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("old revisions shape");
+
+        sqlx::query(
+            "INSERT INTO pages (id, slug, title, content, is_published, created_at, updated_at) \
+             VALUES (7, 'the-slug', 'The Old Page', 'the needle hides here', 1, 10, 20)",
+        )
+        .execute(&pool)
+        .await
+        .expect("old page row");
+        sqlx::query(
+            "INSERT INTO page_revisions (page_id, revision, slug, title, content, \
+             body_format, position, is_published, created_at) \
+             VALUES (7, 1, 'the-slug', 'The Old Page', 'the needle hides here', 'jhs', 0, 1, 10)",
+        )
+        .execute(&pool)
+        .await
+        .expect("old revision row");
+        sqlx::query(
+            "INSERT INTO menus (id, name, title, created_at, updated_at) \
+             VALUES (3, 'main', 'Main', 10, 20)",
+        )
+        .execute(&pool)
+        .await
+        .expect("old menu row");
+        sqlx::query(
+            "INSERT INTO menu_items (id, menu_id, position, label, page_id, url) \
+             VALUES (11, 3, 0, NULL, 7, NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("old menu item row");
+        sqlx::query(
+            "INSERT INTO media (id, stored_name, thumb_name, original_name, mime_type, \
+             bytes, width, height, alt_text, created_at) \
+             VALUES (5, 'a.png', 'a_t.png', 'a.png', 'image/png', 10, 1, 1, '', 10)",
+        )
+        .execute(&pool)
+        .await
+        .expect("old media row");
+
+        // The upgrade itself: forget 0011 ran, let the migrator apply
+        // it over the pre-F20 state.
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 11")
+            .execute(&pool)
+            .await
+            .expect("rewind the bookkeeping");
+        run_migrations(&pool)
+            .await
+            .expect("the F20 upgrade applies");
+
+        // The ids survive; the backfill attributed everything to the
+        // CMS organization; the history did NOT cascade away; the FTS
+        // index still answers; the menu item still points at its page.
+        let (slug, organization_id): (String, i64) =
+            sqlx::query_as("SELECT slug, organization_id FROM pages WHERE id = 7")
+                .fetch_one(&pool)
+                .await
+                .expect("page 7 survived the rebuild");
+        assert_eq!(slug, "the-slug");
+        let cms_id: i64 = sqlx::query_scalar("SELECT id FROM organizations WHERE key = 'cms'")
+            .fetch_one(&pool)
+            .await
+            .expect("cms organization exists");
+        assert_eq!(
+            organization_id, cms_id,
+            "backfilled to the cms organization"
+        );
+
+        let revisions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM page_revisions WHERE page_id = 7")
+                .fetch_one(&pool)
+                .await
+                .expect("history query");
+        assert_eq!(revisions, 1, "the rebuild never cascaded the history");
+
+        let item_still_linked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM menu_items mi JOIN menus m ON m.id = mi.menu_id \
+             WHERE mi.page_id = 7 AND m.name = 'main'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("menu join");
+        assert_eq!(item_still_linked, 1, "the menu and its item survived");
+
+        let media_org: i64 = sqlx::query_scalar("SELECT organization_id FROM media WHERE id = 5")
+            .fetch_one(&pool)
+            .await
+            .expect("media 5 survived");
+        assert_eq!(media_org, cms_id);
+
+        let pages = SqlitePageRepository::new(pool.clone(), 0);
+        let search = pages
+            .search(CMS_ORGANIZATION_KEY, "needle", false, 10, 0)
+            .await
+            .expect("search after the rebuild");
+        assert_eq!(search.len(), 1, "the FTS index was rebuilt from content");
+        assert_eq!(search[0].id, 7);
+
+        // The new uniqueness is per organization: a second organization
+        // may take the very slug that used to be globally unique...
+        sqlx::query(
+            "INSERT INTO organizations (key, name, document_root, created_at) \
+             VALUES ('other', 'Other', 'sites/other', 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("second organization");
+        sqlx::query(
+            "INSERT INTO pages (slug, title, content, is_published, created_at, updated_at, \
+             organization_id) \
+             VALUES ('the-slug', 'Other Page', '', 0, 30, 30, \
+             (SELECT id FROM organizations WHERE key = 'other'))",
+        )
+        .execute(&pool)
+        .await
+        .expect("the same slug in another organization");
+
+        // ...and the guard answers for the right tenant.
+        let counts = SqliteOrganizationRepository::new(pool.clone())
+            .content_counts(CMS_ORGANIZATION_KEY)
+            .await
+            .expect("content counts");
+        assert_eq!(counts.pages, 1, "the cms organization sees only its own");
+        assert_eq!(counts.menus, 1);
+        assert_eq!(counts.media, 1);
     }
 
     #[tokio::test]

@@ -47,6 +47,9 @@
 <?jhs if (query.error == "seeded") { ?>
     <p class="notice notice-error">This is a bootstrap organization: its name and document root follow wallermax.toml (the seed would restore them on the next boot). Edit them there.</p>
 <?jhs } ?>
+<?jhs if (query.error == "content") { ?>
+    <p class="notice notice-error">This organization still owns content (pages, menus or media): delete or move it first — a tenant is never deleted with its content inside.</p>
+<?jhs } ?>
 <?jhs if (query.error == "mirror") { ?>
     <p class="notice notice-error">The CMS organization's memberships mirror the platform roles — manage them as accounts in the Users section, not here.</p>
 <?jhs } ?>

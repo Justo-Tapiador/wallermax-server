@@ -76,6 +76,8 @@ async fn search_page(State(state): State<AppState>, request: Request) -> Respons
     };
     let page_size = i64::from(state.config().cms.index_page_size);
     let (mut terms, requested) = listing_query(parts.uri());
+    // F20: the visitor searches the organization their host serves.
+    let organization = parts.organization(&state);
 
     let searched = fts_match_query(&terms).is_some();
     // Quotes-only input sanitizes to no query at all: the view then
@@ -85,7 +87,7 @@ async fn search_page(State(state): State<AppState>, request: Request) -> Respons
         terms = String::new();
     }
     let total = if searched {
-        match cms.pages.search_count(&terms, false).await {
+        match cms.pages.search_count(&organization, &terms, false).await {
             Ok(total) => total,
             Err(error) => {
                 tracing::error!(%error, "page search count failed");
@@ -101,7 +103,13 @@ async fn search_page(State(state): State<AppState>, request: Request) -> Respons
     let results = if searched {
         match cms
             .pages
-            .search(&terms, false, page_size, (page - 1) * page_size)
+            .search(
+                &organization,
+                &terms,
+                false,
+                page_size,
+                (page - 1) * page_size,
+            )
             .await
         {
             Ok(hits) => hits,

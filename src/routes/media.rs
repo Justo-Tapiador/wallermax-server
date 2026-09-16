@@ -95,7 +95,9 @@ async fn render_media_list(
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    let total = match cms.media.count().await {
+    // F20: the grid is the request's organization's library.
+    let organization = parts.organization(state);
+    let total = match cms.media.count(&organization).await {
         Ok(total) => total,
         Err(message) => {
             tracing::error!(%message, "media count failed");
@@ -106,7 +108,7 @@ async fn render_media_list(
 
     let items = match cms
         .media
-        .list_paged(MEDIA_PAGE_SIZE, (page - 1) * MEDIA_PAGE_SIZE)
+        .list_paged(&organization, MEDIA_PAGE_SIZE, (page - 1) * MEDIA_PAGE_SIZE)
         .await
     {
         Ok(items) => items,
@@ -348,7 +350,7 @@ async fn upload_media(
         created_by: Some(editor.user.user_id),
     };
 
-    match cms.media.create(&new_media).await {
+    match cms.media.create(&editor.organization, &new_media).await {
         Ok(record) => see_other(&format!("/admin/media/{}", record.id)),
         Err(message) => {
             // Row insert failed: remove both files again.
@@ -380,7 +382,7 @@ async fn media_detail(
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    let record = match cms.media.find_by_id(id).await {
+    let record = match cms.media.find_by_id(&parts.organization(&state), id).await {
         Ok(Some(record)) => record,
         Ok(None) => return media_not_found(),
         Err(message) => {
@@ -434,7 +436,11 @@ async fn update_alt(
         .await;
     }
 
-    match cms.media.update_alt(id, alt_text).await {
+    match cms
+        .media
+        .update_alt(&parts.organization(&state), id, alt_text)
+        .await
+    {
         Ok(Some(_)) => see_other(&format!("/admin/media/{id}?ok=alt")),
         Ok(None) => media_not_found(),
         Err(message) => {
@@ -453,14 +459,14 @@ async fn update_alt(
 /// business.
 async fn delete_media(
     State(state): State<AppState>,
-    _editor: CmsEditor,
+    editor: CmsEditor,
     Path(id): Path<i64>,
 ) -> Response {
     let Ok(cms) = cms_context(&state) else {
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    let record = match cms.media.find_by_id(id).await {
+    let record = match cms.media.find_by_id(&editor.organization, id).await {
         Ok(Some(record)) => record,
         Ok(None) => return media_not_found(),
         Err(message) => {
@@ -469,7 +475,7 @@ async fn delete_media(
         }
     };
 
-    match cms.media.delete(id).await {
+    match cms.media.delete(&editor.organization, id).await {
         Ok(true) => {
             for name in [record.stored_name, record.thumb_name] {
                 let path = cms.media_root.join(name);
@@ -500,7 +506,13 @@ async fn render_detail_with_error(
     let Ok(cms) = cms_context(state) else {
         return AppError::internal("the CMS is not initialized").into_response();
     };
-    let Some(record) = cms.media.find_by_id(id).await.ok().flatten() else {
+    let Some(record) = cms
+        .media
+        .find_by_id(&parts.organization(state), id)
+        .await
+        .ok()
+        .flatten()
+    else {
         return media_not_found();
     };
 
@@ -524,12 +536,16 @@ async fn render_detail_with_error(
 async fn serve_media(
     State(state): State<AppState>,
     Path((id, filename)): Path<(i64, String)>,
+    request: Request,
 ) -> Response {
+    let parts = PageParts::of(&request);
     let Ok(cms) = cms_context(&state) else {
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    let record = match cms.media.find_by_id(id).await {
+    // F20: an id is only reachable on its own organization's host —
+    // cross-tenant media is a 404 like every other foreign id.
+    let record = match cms.media.find_by_id(&parts.organization(&state), id).await {
         Ok(Some(record)) => record,
         Ok(None) => return media_not_found(),
         Err(message) => {
@@ -554,12 +570,17 @@ async fn serve_media(
 
 /// Serves the thumbnail (PNG). A missing thumbnail falls back to the
 /// full file rather than 404-ing the listing.
-async fn serve_thumb(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
+async fn serve_thumb(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    request: Request,
+) -> Response {
+    let parts = PageParts::of(&request);
     let Ok(cms) = cms_context(&state) else {
         return AppError::internal("the CMS is not initialized").into_response();
     };
 
-    let record = match cms.media.find_by_id(id).await {
+    let record = match cms.media.find_by_id(&parts.organization(&state), id).await {
         Ok(Some(record)) => record,
         Ok(None) => return media_not_found(),
         Err(message) => {

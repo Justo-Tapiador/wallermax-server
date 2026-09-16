@@ -285,25 +285,47 @@ async fn tenant_trees_are_self_contained() {
     let config = tenant_config(db.url(), &[]);
     let server = boot_with_tenant(config, "solo", &site.root_string(), &["solo.third.test"]).await;
 
-    // No borrowed assets: the main root's /assets/* stays on the main
-    // host (and the CMS host, which needs it) — a tenant brings its
-    // own styles.
+    // F20: the shared panel chrome serves on the tenant host as a
+    // fallback — a tenant that ships its own file wins (its root is
+    // the first serve), and one that does not still gets the default
+    // look instead of a bare 404.
+    site.write("assets/wallermax.css", "/* the tenant's own look */");
     let response = get(&server, "/assets/wallermax.css", Some("solo.third.test")).await;
+    assert_eq!(response.status(), 200, "the tenant's own asset wins first");
+    let body = response.text().await.expect("body");
+    assert_eq!(
+        body, "/* the tenant's own look */",
+        "served from the tenant root: {body}"
+    );
+    let response = get(&server, "/assets/admin.css", Some("solo.third.test")).await;
     assert_eq!(
         response.status(),
-        404,
-        "no asset borrowing from the main root"
+        200,
+        "the shared panel chrome falls through (F20)"
     );
     let response = get(&server, "/assets/wallermax.css", None).await;
     assert_eq!(response.status(), 200, "the main host keeps its own assets");
 
     // No operator machinery: /api, /health and /metrics are the main
-    // tree's (and the CMS tree's auth forms are not the tenant's
-    // either).
-    for path in ["/api", "/health", "/metrics", "/api/auth/me"] {
+    // tree's. The auth family is the exception F20 sanctions — the
+    // tenant's pages need the same-origin login form and its POST
+    // target, exactly like the CMS host's.
+    for path in ["/api", "/health", "/metrics"] {
         let response = get(&server, path, Some("solo.third.test")).await;
         assert_eq!(response.status(), 404, "{path} stays off the tenant host");
     }
+    let response = get(&server, "/api/auth/me", Some("solo.third.test")).await;
+    assert_eq!(
+        response.status(),
+        401,
+        "the auth family rides along (F20) — anonymous, but mounted"
+    );
+    let response = get(&server, "/login", Some("solo.third.test")).await;
+    assert_eq!(
+        response.status(),
+        200,
+        "the no-JS login page serves on the tenant host (F20)"
+    );
     let response = get(&server, "/health", None).await;
     assert_eq!(response.status(), 200, "the main host keeps its machinery");
 
@@ -389,7 +411,7 @@ async fn tenants_do_not_need_the_static_switch() {
 }
 
 #[tokio::test]
-async fn a_missing_tenant_root_boots_and_answers_404() {
+async fn a_missing_tenant_root_boots_with_the_visitor_surface() {
     let (_, db) = auth_config();
     let site = TenantSite::missing("ghost");
 
@@ -398,14 +420,18 @@ async fn a_missing_tenant_root_boots_and_answers_404() {
     // (the row is data; the tree fills in when the directory appears).
     let server = boot_with_tenant(config, "ghost", &site.root_string(), &["x.ghost.test"]).await;
 
-    for path in ["/", "/anything.txt"] {
-        let response = get(&server, path, Some("x.ghost.test")).await;
-        assert_eq!(
-            response.status(),
-            404,
-            "{path} answers 404 from the empty tree"
-        );
-    }
+    // F20: a tenant host carries the CMS visitor surface even with no
+    // files of its own — `/` renders the shared homepage view (the
+    // same one the CMS host serves), scoped to the tenant's (empty)
+    // content, and plain file misses still answer the JSON 404.
+    let response = get(&server, "/", Some("x.ghost.test")).await;
+    assert_eq!(response.status(), 200, "the shared homepage view answers");
+    let response = get(&server, "/anything.txt", Some("x.ghost.test")).await;
+    assert_eq!(
+        response.status(),
+        404,
+        "file misses answer 404 from the empty tree"
+    );
     // And the rest of the server is unaffected.
     assert_static_home(&server, None).await;
 }
