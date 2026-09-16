@@ -1487,6 +1487,83 @@ menus and media in one round trip.
   and a document root, and its panel is already mounted — the trees
   are built from the live snapshot, F18's no-restart rule included.
 
+## The tenant team page (F21): the organizations own their people
+
+F20's per-tenant panels closed the content loop; the people loop
+still ran through the platform. Granting, moving or removing a
+membership was the CMS organization's Tenants page, on the CMS
+organization's host — workable for a handful of tenants, wrong for
+the model itself: **the team is the tenant's, and the tenant should
+run it from its own panel**. F21 hands it over.
+
+`GET /admin/team` on a tenant's host lists the organization's
+members (account, role, since) and offers the same add-or-move form
+the platform's Tenants page has: a username plus a role, where
+re-adding an existing member with another role moves them, and each
+row has its remove button. The accounts themselves are still created
+on the platform (the Users page, the F15 posture: an operator's
+decision, never self-service) — the team page only decides who of
+them can touch this organization.
+
+### The guard, the law, the mirror
+
+- **The page answers an `admin` membership of the request's
+  organization** — the same extractor the platform surface uses
+  (`CmsAdmin`), which since F20 authorizes against the request's own
+  host. The tenant's editors manage content, not people; the platform
+  administrator reaches the page only through an explicit membership,
+  exactly like the panel's content pages. A membership of one tenant
+  opens nothing on another's host.
+- **An organization never loses its last administrator** — the final
+  demotion and the final removal are refused with an explanation, on
+  both sides of the `Host` line: the tenant's own Team page and the
+  platform's Tenants page answer the same refusal (`error=last-admin`
+  and the re-rendered form), and deleting the account itself is
+  refused in the Users page until the team has another administrator
+  (`error=solo-tenant-admin`, the flash naming the organization).
+  The invariant matches the F15 platform rule ("the last admin is
+  never demoted or deleted") at the organization level, with the
+  platform as the eternal recovery path.
+- **The CMS organization is not managed here** — its memberships
+  mirror the platform roles (F15), so the Team page is not mounted
+  on the CMS hosts at all: `GET /admin/team` there answers the
+  standard 404, the same construction that keeps the platform surface
+  off a tenant's host. The platform's Users page remains that team's
+  page, exactly as before. A single-host server is the CMS
+  organization by construction — same 404, same Users page.
+
+### What changed where
+
+- `routes/team.rs` (new): the page, the add-or-move form and the
+  removal, guarded by `CmsAdmin` (which now carries the request's
+  organization, like `CmsEditor` always did).
+- `routes/mod.rs`: the tenant trees mount `team::routes()` — the
+  platform trees never do.
+- `routes/tenants.rs`: the platform's member forms gained the
+  last-administrator refusal.
+- `routes/cms.rs`: `solo_administrator` (the shared fact behind the
+  law) and the Users page's deletion guard
+  (`OrganizationRepository::solo_administrated_orgs` — the
+  organizations whose only administrator the account is, in one
+  query).
+- `middleware/templates.rs`: the `member_role` global — the signed-in
+  user's role inside the request's organization, resolved only for
+  the panel's own paths (`/admin/*`): the sidebar's TEAM section and
+  the identity chip show the organization's truth on a tenant's
+  panel, where the token's platform role says nothing. A tenant's
+  editor sees "editor", not their platform role; an administrator's
+  sidebar gains the Team link, a platform admin's keeps Users.
+- `views/admin/team.jhs` (new), the sidebar and the Users page
+  flashes.
+
+Nothing to configure, nothing to migrate: the memberships were
+already rows, and the upgrade changes nothing about them. The
+11-test battery (`tests/tenant_team.rs`) pins the door (editors,
+platform admins without a membership, other tenants' members), the
+grant/move/removal round trip with the immediate lockout, the
+last-administrator law on all three surfaces, and the page staying
+off the platform's hosts.
+
 ## Configuration
 
 Two keys from F7, two from F9, two from F10, one from F11 (all
@@ -1672,7 +1749,16 @@ the same discipline as the phases before it:
   one tenant is worth nothing on another's host, and the platform
   admin reaches a tenant only through an explicit membership: zero
   surprises — this document.
-- **F21** (next candidate): the template caches — the LRU layer the
+- **F21 — the tenant team page** (done): the organizations own
+  their people — `/admin/team` on a tenant's host, the same
+  add-or-move / remove vocabulary the platform's Tenants page has,
+  answering an `admin` membership of the request's organization.
+  One law on both sides of the `Host` line: an organization never
+  loses its last administrator (the final demotion and removal are
+  refused, and so is deleting an account that solo-administrates a
+  tenant), and the CMS organization's team stays with the platform's
+  Users page, behind the F15 mirror — this document.
+- **F22** (next candidate): the template caches — the LRU layer the
   `pages` and `menus` globals were promised (one query per render
   today, one warm lookup tomorrow).
 

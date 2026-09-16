@@ -1,0 +1,88 @@
+<?jhs var titulo = "Team (" + tenant.name + ")"; ?>
+<?jhs include("partials/admin/head") ?>
+<?jhs include("partials/admin/sidebar") ?>
+<main class="main">
+<?jhs include("partials/admin/topbar") ?>
+  <section class="page">
+    <div class="breadcrumbs">Team</div>
+    <div class="page-head">
+      <div>
+        <h1>Team <span class="table-sub">(<?= tenant.name ?>)</span></h1>
+        <p>The people who can manage this site's content: administrators run the team, editors run the pages.</p>
+      </div>
+    </div>
+
+<?jhs if (query.ok == "member-added") { ?>
+    <p class="notice notice-ok">Membership saved.</p>
+<?jhs } ?>
+<?jhs if (query.ok == "member-removed") { ?>
+    <p class="notice notice-ok">Membership removed — their access to this panel closes on the next request.</p>
+<?jhs } ?>
+<?jhs if (query.error == "last-admin") { ?>
+    <p class="notice notice-error">This is the organization's last administrator: the membership cannot be removed — grant another administrator first.</p>
+<?jhs } ?>
+<?jhs if (form_error) { ?>
+    <p class="notice notice-error"><?= form_error ?></p>
+<?jhs } ?>
+
+    <section class="card" aria-labelledby="equipo-titulo">
+      <div class="card-head"><h2 id="equipo-titulo">Members (<?= members.length ?>)</h2></div>
+<?jhs if (members && members.length) { ?>
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr><th>Account</th><th>Role</th><th>Since</th><th></th></tr>
+          </thead>
+          <tbody>
+<?jhs members.forEach(function (miembro) { ?>
+            <tr>
+              <td>
+                <span class="table-title"><?= miembro.username ?><?jhs if (user && miembro.user_id == user.id) { ?> <span class="table-sub">(you)</span><?jhs } ?></span>
+              </td>
+              <td><span class="status <?= miembro.role == "admin" ? "scheduled" : "published" ?>"><?= miembro.role ?></span></td>
+              <td><span class="table-sub"><?= miembro.created_at_h ?></span></td>
+              <td>
+                <div class="row-actions">
+                  <form method="post" action="/admin/team/<?= miembro.user_id ?>/delete">
+                    <button class="btn danger" type="submit">Remove</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+<?jhs }); ?>
+          </tbody>
+        </table>
+      </div>
+<?jhs } else { ?>
+      <div class="empty">
+        <div class="empty-icon">&#9678;</div>
+        <h2>No members</h2>
+        <p>This team's list is empty.</p>
+      </div>
+<?jhs } ?>
+      <div class="card-body">
+        <form method="post" action="/admin/team">
+          <div class="field">
+            <label for="usuario">Add or move a member</label>
+            <input class="input" id="usuario" type="text" name="username" required
+                   maxlength="32" value="<?= member_form.username ?>" autocomplete="off"
+                   placeholder="username">
+            <small>Re-adding an existing member with another role moves them. The account itself is created on the platform (the Users page), never here.</small>
+          </div>
+          <div class="field">
+            <label for="rol">Role</label>
+            <select class="select" id="rol" name="role">
+              <option value="editor"<?= member_form.role == "admin" ? "" : " selected" ?>>Editor</option>
+              <option value="admin"<?= member_form.role == "admin" ? " selected" : "" ?>>Administrator</option>
+            </select>
+            <small>An administrator runs this team and the content; an editor runs the content only. The last administrator never steps down alone.</small>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" type="submit">Save membership</button>
+          </div>
+        </form>
+      </div>
+    </section>
+  </section>
+</main>
+<?jhs include("partials/admin/foot") ?>

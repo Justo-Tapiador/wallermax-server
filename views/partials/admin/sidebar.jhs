@@ -1,13 +1,17 @@
 <?jhs
-  // Shared admin sidebar (F12). Globals: user, path, organization.
+  // Shared admin sidebar (F12). Globals: user, path, organization,
+  // member_role.
   // The active link derives from the current path; the Users and
   // Tenants sections are the platform's — the CMS organization's
   // admins, on the CMS organization's host (F20; a tenant's panel
   // keeps to its own content, and those routes are not even mounted
-  // there). "View site" and the sign-out form live in SYSTEM so they
+  // there). F21: a tenant's own administrators get the Team page —
+  // the organization's memberships, managed from the organization's
+  // own panel. "View site" and the sign-out form live in SYSTEM so they
   // survive the collapsed icon rail (the user-mini text does not).
   var esAdmin = user && user.role == "admin";
   var esPlataforma = organization == "cms";
+  var esEquipo = member_role == "admin";
   var iniciales = user ? user.username.slice(0, 2).toUpperCase() : "";
 ?>
 <aside class="sidebar">
@@ -27,6 +31,9 @@
     <a href="/admin/users"<?jhs if (path.indexOf("/admin/users") === 0) { ?> class="active"<?jhs } ?>><span class="icon">&#9678;</span><span>Users</span></a>
     <div class="nav-section">TENANTS</div>
     <a href="/admin/tenants"<?jhs if (path.indexOf("/admin/tenants") === 0) { ?> class="active"<?jhs } ?>><span class="icon">&#9672;</span><span>Tenants</span></a>
+<?jhs } else if (esEquipo) { ?>
+    <div class="nav-section">TEAM</div>
+    <a href="/admin/team"<?jhs if (path.indexOf("/admin/team") === 0) { ?> class="active"<?jhs } ?>><span class="icon">&#9678;</span><span>Team</span></a>
 <?jhs } ?>
     <div class="nav-section">SYSTEM</div>
     <a href="/"><span class="icon">&#8599;</span><span>View site</span></a>
@@ -38,7 +45,7 @@
   <div class="sidebar-bottom">
     <div class="user-mini">
       <div class="avatar"><?= iniciales ?></div>
-      <div><strong><?= user ? user.username : "" ?></strong><span><?= user ? user.role : "" ?></span></div>
+      <div><strong><?= user ? user.username : "" ?></strong><span><?= user ? (member_role || user.role) : "" ?></span></div>
     </div>
   </div>
 </aside>

@@ -307,15 +307,18 @@ pub(crate) async fn base_data(
     uri: &Uri,
     method: &Method,
 ) -> Map<String, Value> {
-    let user = state
+    let auth = state
         .auth_context()
-        .filter(|_| state.config().templates.expose_user)
+        .filter(|_| state.config().templates.expose_user);
+    let auth_user = auth
         .and_then(|auth| {
             bearer_token(headers)
                 .or_else(|| session::session_token(headers))
                 .and_then(|token| auth.jwt.verify_token(token).ok())
         })
-        .and_then(|claims| AuthUser::from_claims(&claims).ok())
+        .and_then(|claims| AuthUser::from_claims(&claims).ok());
+    let user = auth_user
+        .as_ref()
         .map(|user| {
             json!({
                 "id": user.user_id,
@@ -352,6 +355,32 @@ pub(crate) async fn base_data(
         String::from("login_url"),
         Value::String(login_url_global(state, headers, uri)),
     );
+    // F21: the signed-in user's role inside the request's
+    // organization — what the panel's chrome needs to tell a
+    // tenant's own administrators from its editors (the token's
+    // platform role says nothing about a tenant, by design). Only
+    // the panel's own paths pay the indexed read: the public
+    // surface never does, anonymous requests included, and a
+    // storage failure degrades to "no role shown" — the guards
+    // still authorize per request against the table.
+    let member_role = match (auth, auth_user.as_ref()) {
+        (Some(auth), Some(user)) if uri.path().starts_with("/admin") => {
+            match auth
+                .repository
+                .membership_role(user.user_id, &organization)
+                .await
+            {
+                Ok(Some(role)) => Value::String(role.as_str().to_owned()),
+                Ok(None) => Value::Null,
+                Err(error) => {
+                    tracing::warn!(%error, "member role lookup failed");
+                    Value::Null
+                }
+            }
+        }
+        _ => Value::Null,
+    };
+    data.insert(String::from("member_role"), member_role);
     data.insert(String::from("organization"), Value::String(organization));
     data
 }

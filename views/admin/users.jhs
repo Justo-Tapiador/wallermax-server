@@ -30,6 +30,9 @@
 <?jhs if (query.error == "ultimo-admin") { ?>
     <p class="notice notice-error">This is the last administrator account and cannot be deleted.</p>
 <?jhs } ?>
+<?jhs if (query.error == "solo-tenant-admin") { ?>
+    <p class="notice notice-error">This account is the last administrator of the <?= query.tenant ?> organization — grant another administrator there (or remove the membership) before deleting it.</p>
+<?jhs } ?>
 
     <section class="card">
 <?jhs if (admin_users && admin_users.length) { ?>

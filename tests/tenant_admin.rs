@@ -19,7 +19,10 @@
 //! - the membership mirror's boundary holds: the CMS organization's
 //!   members are refused (they follow the platform roles), a
 //!   tenant's members are data — the first sanctioned divergence,
-//!   and one that opens nothing by itself.
+//!   and one that opens nothing by itself;
+//! - an organization never loses its last administrator: the
+//!   removal waits until a second one joins — F21's law, walked
+//!   from the platform's own page.
 //!
 //! The main tree these tests lean on is the battery's own fixture:
 //! `[static] root_dir` points at a per-test directory holding the
@@ -746,6 +749,57 @@ async fn memberships_stop_at_the_cms_mirror() {
     assert_eq!(response.status(), 200);
     let body = response.text().await.expect("body");
     assert!(body.contains("penelope"), "the member is listed: {body}");
+
+    // The removal is refused while penelope is the organization's
+    // only administrator — F21's law holds on the platform's page
+    // too, and the flash names it.
+    let response = post_form(
+        &admin,
+        &server,
+        panel,
+        &format!("/admin/tenants/acme/members/{penelope}/delete"),
+        "",
+    )
+    .await;
+    assert_eq!(response.status(), 303, "the refusal redirects");
+    let location = response
+        .headers()
+        .get("location")
+        .and_then(|value| value.to_str().ok())
+        .expect("redirect target");
+    assert_eq!(location, "/admin/tenants/acme?error=last-admin");
+    let side = side_db(db.url()).await;
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM memberships m JOIN organizations o ON o.id = m.organization_id \
+         WHERE m.user_id = ?1 AND o.key = 'acme'",
+    )
+    .bind(penelope)
+    .fetch_one(&side)
+    .await
+    .expect("memberships counted");
+    side.close().await;
+    assert_eq!(rows, 1, "the last administrator stays");
+
+    // A second administrator joins through the same form, and only
+    // then can this one's removal land.
+    let response = post_form(
+        &admin,
+        &server,
+        panel,
+        "/admin/users",
+        "username=beatriz&password=password-123&role=user",
+    )
+    .await;
+    assert_eq!(response.status(), 303, "user creation redirects");
+    let response = post_form(
+        &admin,
+        &server,
+        panel,
+        "/admin/tenants/acme/members",
+        "username=beatriz&role=admin",
+    )
+    .await;
+    assert_eq!(response.status(), 303, "the second administrator lands");
 
     // And the removal.
     let response = post_form(

@@ -23,6 +23,7 @@ pub mod metrics;
 pub mod search;
 pub mod static_files;
 pub mod stats;
+pub mod team;
 pub mod tenants;
 
 use axum::extract::Request;
@@ -128,10 +129,12 @@ pub fn routes(
 /// the organization-scoped content surface (public pages, the panel's
 /// content pages, media, search, the auth forms) rides above the
 /// static tree, and the panel chrome — the shared views, the borrowed
-/// `/assets/*` — serves exactly like on the CMS host. What stays
-/// out: the platform surface (`/admin/users`, `/admin/tenants`, the
-/// import tool), mounted only on the CMS organization's tree, and
-/// the operator machinery, mounted only on the main tree.
+/// `/assets/*` — serves exactly like on the CMS host. F21 adds the
+/// Team page: the tenant's own member management, scoped to its
+/// organization like everything else. What stays out: the platform
+/// surface (`/admin/users`, `/admin/tenants`, the import tool),
+/// mounted only on the CMS organization's tree, and the operator
+/// machinery, mounted only on the main tree.
 ///
 /// Split out of [`vhost_routes`] when F18 made the snapshot
 /// reloadable: the boot's initial install and every panel refresh
@@ -157,7 +160,8 @@ fn tenant_trees(
                 tree = tree
                     .merge(cms::routes())
                     .merge(media::routes())
-                    .merge(search::routes());
+                    .merge(search::routes())
+                    .merge(team::routes());
             }
             if auth_enabled {
                 tree = tree.merge(auth::routes(refresh_enabled));

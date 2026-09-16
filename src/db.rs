@@ -2943,6 +2943,13 @@ pub trait OrganizationRepository: Send + Sync + 'static {
         user_id: i64,
     ) -> Result<bool, RepositoryError>;
 
+    /// The organizations whose **only** administrator `user_id` is
+    /// (F21): the user-deletion guard — an organization never loses
+    /// its last administrator while it exists, so an account on this
+    /// list is refused until its team has another administrator.
+    /// Ordered by key (the flash names the first).
+    async fn solo_administrated_orgs(&self, user_id: i64) -> Result<Vec<String>, RepositoryError>;
+
     /// The boot-resolution inputs (F17): every organization's document
     /// root keyed by its stable key, and every mapped host name with
     /// the organization it routes to. What [`AppState`] reloads its
@@ -3250,6 +3257,27 @@ impl OrganizationRepository for SqliteOrganizationRepository {
                 .await
                 .map_err(RepositoryError::from_sqlx)?;
         Ok(removed.rows_affected() > 0)
+    }
+
+    async fn solo_administrated_orgs(&self, user_id: i64) -> Result<Vec<String>, RepositoryError> {
+        // The organizations where this account holds the only admin
+        // membership — the same fact [`solo_administrator`] derives
+        // for one organization, asked across all of them at once
+        // (the account deletion guard). The CMS organization mirrors
+        // the platform roles, so its last administrator was already
+        // refused by the platform's own guard before this runs.
+        sqlx::query_scalar(
+            "SELECT o.key FROM organizations o \
+             JOIN memberships m \
+               ON m.organization_id = o.id AND m.user_id = ?1 AND m.role = 'admin' \
+             WHERE (SELECT COUNT(*) FROM memberships \
+                    WHERE organization_id = o.id AND role = 'admin') = 1 \
+             ORDER BY o.key",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(RepositoryError::from_sqlx)
     }
 
     async fn vhost_inputs(
@@ -4249,6 +4277,87 @@ mod tests {
                 .remove_member(acme.id, user.id)
                 .await
                 .expect("second removal"),
+            "gone is gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn solo_administrated_orgs_name_the_last_ones_only() {
+        let db = TempDb::new();
+        let repo = organizations(&db).await;
+        seed_organizations(&repo.pool, "sites/main", "sites/cms")
+            .await
+            .expect("organizations seed");
+        let acme = repo
+            .create("acme", "Acme Corp", "sites/acme")
+            .await
+            .expect("tenant created");
+        let other = repo
+            .create("other", "Other Corp", "sites/other")
+            .await
+            .expect("tenant created");
+
+        let user_repo = repository(&db).await;
+        let penelope = seed(&user_repo, "penelope").await;
+        let quentin = seed(&user_repo, "quentin").await;
+
+        // An editor holds no administrator seat: no organization
+        // counts them.
+        repo.upsert_member(acme.id, penelope.id, UserRole::Editor)
+            .await
+            .expect("editor granted");
+        assert!(
+            repo.solo_administrated_orgs(penelope.id)
+                .await
+                .expect("solo list")
+                .is_empty(),
+            "an editor administrates nothing"
+        );
+
+        // The promotion makes them acme's only administrator.
+        repo.upsert_member(acme.id, penelope.id, UserRole::Admin)
+            .await
+            .expect("administrator granted");
+        assert_eq!(
+            repo.solo_administrated_orgs(penelope.id)
+                .await
+                .expect("solo list"),
+            vec!["acme".to_owned()],
+            "the solo seat is named"
+        );
+
+        // A second administrator in the same organization relieves the
+        // hold; a seat in another organization adds its own name.
+        repo.upsert_member(acme.id, quentin.id, UserRole::Admin)
+            .await
+            .expect("second administrator");
+        assert!(
+            repo.solo_administrated_orgs(penelope.id)
+                .await
+                .expect("solo list")
+                .is_empty(),
+            "no longer solo"
+        );
+        repo.upsert_member(other.id, penelope.id, UserRole::Admin)
+            .await
+            .expect("other administrator");
+        assert_eq!(
+            repo.solo_administrated_orgs(penelope.id)
+                .await
+                .expect("solo list"),
+            vec!["other".to_owned()],
+            "the other seat is named"
+        );
+
+        // The membership's removal releases the hold as well.
+        repo.remove_member(other.id, penelope.id)
+            .await
+            .expect("membership removed");
+        assert!(
+            repo.solo_administrated_orgs(penelope.id)
+                .await
+                .expect("solo list")
+                .is_empty(),
             "gone is gone"
         );
     }

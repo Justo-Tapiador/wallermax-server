@@ -449,6 +449,17 @@ secure_cookies = "auto"
 # already rows, and their content is data too. See README-CMS.md,
 # "Per-tenant panels (F20)".
 
+# The tenant team page (F21): a tenant's own administrators manage
+# the organization's memberships from the tenant's own panel
+# (/admin/team on the tenant's host). The same law both sides of the
+# Host line: the page answers an admin membership of the request's
+# organization (the platform administrator reaches it only through
+# one), and an organization never loses its last administrator — the
+# final demotion and removal are refused, and so is deleting an
+# account that solo-administrates a tenant. Nothing to configure:
+# the platform's Tenants page and the Users page answer the same law.
+# See README-CMS.md, "The tenant team page (F21)".
+
 # Refresh tokens: long-lived opaque tokens returned by login and rotated
 # by POST /api/auth/refresh. Presenting a rotated token (a replay,
 # presumably theft) revokes the whole session family. Disable to get the

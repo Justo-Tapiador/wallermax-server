@@ -212,14 +212,21 @@ impl axum::extract::FromRequestParts<AppState> for CmsEditor {
 /// follows the request's host since F20 — the tenant's admin on the
 /// tenant's host, the platform admin on the CMS organization's).
 ///
-/// The routes this guard protects are the **platform surface**
-/// (users, tenants, the import tool), mounted only on the CMS
-/// organization's tree — so the organization it checks is, by
-/// construction, always the CMS one (the single-host server's one
-/// tree included). A tenant host answers these URLs with its standard
-/// 404 instead, because the routes are not mounted there at all.
+/// The routes this guard protects split by construction (F20): the
+/// **platform surface** (users, tenants, the import tool) mounts
+/// only on the CMS organization's tree — so the organization it
+/// checks there is, by construction, always the CMS one (the
+/// single-host server's one tree included) — while the **tenant
+/// surface** (F21's Team page) mounts only on the tenant trees,
+/// where the organization is the tenant's. A host never meant to
+/// serve a route answers it with the standard 404 instead, because
+/// the routes are not mounted there at all.
 pub(crate) struct CmsAdmin {
     pub(crate) user: AuthUser,
+    /// The organization the request's host resolved to (F21): the
+    /// handlers pass it to the repositories instead of re-resolving
+    /// it.
+    pub(crate) organization: String,
 }
 
 impl axum::extract::FromRequestParts<AppState> for CmsAdmin {
@@ -245,7 +252,7 @@ impl axum::extract::FromRequestParts<AppState> for CmsAdmin {
             .map_err(AppError::into_response)?
             == Some(UserRole::Admin)
         {
-            Ok(Self { user })
+            Ok(Self { user, organization })
         } else {
             Err(AppError::forbidden(
                 "Administrator membership required — only administrators of the CMS organization can manage its accounts.",
@@ -280,6 +287,33 @@ async fn cms_membership(
             tracing::error!(%error, "membership lookup failed");
             AppError::internal("membership lookup failed")
         })
+}
+
+/// Whether `user_id` is the organization's only administrator (F21)
+/// — the fact behind the last-administrator law: an organization
+/// never loses its last administrator while it exists, so both the
+/// demotion to editor and the removal are refused for that one
+/// account, whichever side of the `Host` line asks (the tenant's own
+/// Team page and the platform's Tenants page answer the same
+/// refusal).
+///
+/// One indexed read over the member list (the panels are
+/// single-operator surfaces; the count-then-write window matches
+/// the last-platform-administrator guard F15 ships).
+pub(crate) async fn solo_administrator(
+    organizations: &dyn crate::db::OrganizationRepository,
+    organization_id: i64,
+    user_id: i64,
+) -> Result<bool, crate::db::RepositoryError> {
+    let members = organizations.members(organization_id).await?;
+    Ok(members
+        .iter()
+        .any(|member| member.user_id == user_id && member.role == UserRole::Admin)
+        && members
+            .iter()
+            .filter(|member| member.role == UserRole::Admin)
+            .count()
+            == 1)
 }
 
 /// The organization whose content a request serves (F20): the mapped
@@ -3865,6 +3899,29 @@ async fn delete_user(
                 return AppError::internal("storage failure").into_response();
             }
         }
+    }
+
+    // F21: an organization never loses its last administrator — an
+    // account that solo-administers a tenant is refused until that
+    // team has another administrator (the flash names the
+    // organization). The CMS organization never reaches this guard:
+    // its memberships mirror the platform roles, so the last one
+    // was already refused above.
+    match cms_context(&state) {
+        Ok(cms) => match cms.organizations.solo_administrated_orgs(id).await {
+            Ok(orgs) if !orgs.is_empty() => {
+                return see_other(&format!(
+                    "/admin/users?error=solo-tenant-admin&tenant={}",
+                    orgs[0]
+                ));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(%error, "solo administrator lookup failed");
+                return AppError::internal("storage failure").into_response();
+            }
+        },
+        Err(response) => return response,
     }
 
     match auth.repository.delete(id).await {

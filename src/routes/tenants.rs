@@ -47,7 +47,9 @@ use crate::db::{
     RepositoryError, UserRole, CMS_ORGANIZATION_KEY, MAIN_ORGANIZATION_KEY,
 };
 use crate::error::AppError;
-use crate::routes::cms::{cms_context, render_view, see_other, CmsAdmin, PageParts};
+use crate::routes::cms::{
+    cms_context, render_view, see_other, solo_administrator, CmsAdmin, PageParts,
+};
 use crate::routes::refresh_vhost_state;
 use crate::state::AppState;
 use crate::util::{format_timestamp, read_form};
@@ -926,6 +928,31 @@ async fn add_tenant_member(
         .await;
     };
 
+    // F21: an organization never loses its last administrator — the
+    // same law the tenant's own Team page answers to. Moving the last
+    // one to editor is refused here exactly like the removal below.
+    if role != UserRole::Admin {
+        match solo_administrator(cms.organizations.as_ref(), organization.id, user.id).await {
+            Ok(true) => {
+                return member_rejected(
+                    &state,
+                    &parts,
+                    cms.organizations.as_ref(),
+                    &key,
+                    &username,
+                    &form.role,
+                    "This is the organization's last administrator: the role cannot be removed.",
+                )
+                .await;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::error!(%error, "administrator count failed");
+                return AppError::internal("storage failure").into_response();
+            }
+        }
+    }
+
     match cms
         .organizations
         .upsert_member(organization.id, user.id, role)
@@ -967,6 +994,20 @@ async fn remove_tenant_member(
     };
     if organization.key == CMS_ORGANIZATION_KEY {
         return see_other(&format!("/admin/tenants/{key}?error=mirror"));
+    }
+
+    // F21: the last administrator stays — the platform grants
+    // another first (or the tenant does, from its own Team page),
+    // then this one goes.
+    match solo_administrator(cms.organizations.as_ref(), organization.id, user_id).await {
+        Ok(true) => {
+            return see_other(&format!("/admin/tenants/{key}?error=last-admin"));
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::error!(%error, "administrator count failed");
+            return AppError::internal("storage failure").into_response();
+        }
     }
 
     match cms
