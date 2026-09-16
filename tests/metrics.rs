@@ -99,12 +99,30 @@ async fn the_metrics_path_is_configurable() {
 
 #[tokio::test]
 async fn registered_users_appear_while_auth_is_enabled() {
+    // The CI runner taught this test a lesson: the assertion said "no
+    // user" while the storage layer was saying something else entirely
+    // — the handler's warn! went nowhere because no subscriber was
+    // ever installed in the test process. Capture the server's
+    // diagnostics into the harness output (shown only on failure), so
+    // a failing count() or a registration storage error names the
+    // exact SQLite error instead of a bare gauge assert two steps
+    // removed from the cause.
+    let _diagnostics = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::WARN)
+            .finish(),
+    );
+
     let (mut config, _db) = auth_config();
     config.metrics.enabled = true;
     let server = TestServer::start_full(config).await;
 
-    // One registration -> gauge = 1 at scrape time.
-    reqwest::Client::new()
+    // One registration -> gauge = 1 at scrape time. The status is part
+    // of the contract: a bounced registration (validation, storage
+    // failure) must fail the test right here with the server's own
+    // answer in the message, not as a userless scrape below.
+    let registration = reqwest::Client::new()
         .post(server.url("/api/auth/register"))
         .json(&serde_json::json!({
             "username": "alice",
@@ -112,16 +130,41 @@ async fn registered_users_appear_while_auth_is_enabled() {
         }))
         .send()
         .await
-        .expect("registration succeeds");
+        .expect("registration request succeeds");
+    assert_eq!(
+        registration.status(),
+        201,
+        "the registration must take: {}",
+        registration
+            .text()
+            .await
+            .unwrap_or_else(|_| "<no body>".to_owned())
+    );
 
-    let body = reqwest::get(server.url("/metrics"))
-        .await
-        .expect("metrics request succeeds")
-        .text()
-        .await
-        .expect("metrics body");
+    // The scrape. The route refreshes the gauge at scrape time, but a
+    // storage hiccup degrades it to the last read BY DESIGN (monitoring
+    // must keep serving while the storage layer misbehaves); a real
+    // Prometheus simply scrapes again on its next interval. The test
+    // does the same — briefly — before declaring the gauge broken.
+    let mut body = String::new();
+    for attempt in 0..5 {
+        let scrape = reqwest::get(server.url("/metrics"))
+            .await
+            .expect("metrics request succeeds");
+        assert_eq!(scrape.status(), 200, "the scrape itself must serve");
+        body = scrape.text().await.expect("metrics body");
+        if body.contains("wallermax_registered_users 1") {
+            return;
+        }
+        if attempt + 1 < 5 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
 
-    assert!(body.contains("wallermax_registered_users 1"));
+    assert!(
+        body.contains("wallermax_registered_users 1"),
+        "the registered user never reached the gauge: {body}"
+    );
 }
 
 #[tokio::test]
