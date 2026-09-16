@@ -766,7 +766,7 @@ async fn the_page_lifecycle_over_plain_forms() {
     );
     assert!(body.contains("value=\"ciclo\""), "slug preserved: {body}");
     assert!(
-        body.contains("&lt;p&gt;versión uno&lt;/p&gt;"),
+        body.contains("&lt;p&gt;versión uno&lt;&#x2F;p&gt;"),
         "content preserved escaped: {body}"
     );
 
@@ -1195,8 +1195,9 @@ async fn the_full_browser_circle_login_logout_modal() {
     assert!(body.contains("id=\"login\""), "login modal: {body}");
     assert!(body.contains("id=\"register\""), "register modal: {body}");
     assert!(
-        body.contains("name=\"redirect\" value=\"/\""),
-        "the modal posts the current path: {body}"
+        body.contains("name=\"redirect\" value=\"&#x2F;\""),
+        "the modal posts the current path (the slash escapes; browsers \
+         decode it right back): {body}"
     );
 
     // Form login (the modal's POST) sets the session cookie.

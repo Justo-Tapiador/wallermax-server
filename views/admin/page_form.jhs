@@ -51,7 +51,7 @@
     </section>
 <?jhs } ?>
 
-    <form method="post" action="<?= form.is_new ? "/admin/pages" : "/admin/pages/" + form.id ?>">
+    <form method="post" action="<?= raw(form.is_new ? "/admin/pages" : "/admin/pages/" + form.id) ?>">
       <input type="hidden" name="page_id" value="<?= form.id == null ? "" : form.id ?>">
       <div class="form-layout">
         <div class="card editor-card">
@@ -121,7 +121,7 @@
             <input class="input" id="nota" type="text" name="revision_note" maxlength="200"
                    placeholder="What you changed — kept with the history"
                    value="<?= form.revision_note ?>">
-            <small>Every save — create, edit, restore — records a content revision; this note rides along in the <a href="<?= form.is_new ? "/admin/pages" : "/admin/pages/" + form.id + "/history" ?>">history</a>.</small>
+            <small>Every save — create, edit, restore — records a content revision; this note rides along in the <a href="<?= raw(form.is_new ? "/admin/pages" : "/admin/pages/" + form.id + "/history") ?>">history</a>.</small>
           </div>
           <div class="divider"></div>
           <div class="field">

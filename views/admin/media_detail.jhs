@@ -25,11 +25,11 @@
     <section class="card" aria-labelledby="imagen-titulo">
       <div class="card-head"><h2 id="imagen-titulo">The image</h2></div>
       <div class="card-body">
-        <img class="detalle-imagen" src="<?= item.url ?>" alt="<?= item.alt_text ?>"
+        <img class="detalle-imagen" src="<?= raw(item.url) ?>" alt="<?= item.alt_text ?>"
              width="<?= item.width ?>" height="<?= item.height ?>">
         <dl class="detalle">
-          <dt>Final URL</dt><dd><code><?= item.url ?></code></dd>
-          <dt>Stored name</dt><dd><code><?= item.stored_name ?></code> (server-generated: flat, unique, nothing of yours in the path)</dd>
+          <dt>Final URL</dt><dd><code><?= raw(item.url) ?></code></dd>
+          <dt>Stored name</dt><dd><code><?= raw(item.stored_name) ?></code> (server-generated: flat, unique, nothing of yours in the path)</dd>
         </dl>
       </div>
     </section>

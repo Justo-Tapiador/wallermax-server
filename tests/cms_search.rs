@@ -390,7 +390,7 @@ async fn the_visitors_words_are_echoed_escaped() {
     assert_eq!(response.status(), 200, "a search box never answers 4xx");
     let body = response.text().await.expect("search page");
     assert!(
-        body.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+        body.contains("&lt;script&gt;alert(1)&lt;&#x2F;script&gt;"),
         "the echo escapes: {body}"
     );
     assert!(

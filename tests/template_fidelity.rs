@@ -54,7 +54,15 @@ const CASES: &[Case] = &[
         data: "{\"val\":\"<script>alert(1)</script>\"}",
         auto_escape_off: false,
         mode: Mode::Exact,
-        expected: "&lt;script&gt;alert(1)&lt;/script&gt;",
+        expected: "&lt;script&gt;alert(1)&lt;&#x2F;script&gt;",
+    },
+    Case {
+        name: "auto_escape_full_set",
+        template: "<?= val ?>",
+        data: "{\"val\":\"a/b `c` & <d>\"}",
+        auto_escape_off: false,
+        mode: Mode::Exact,
+        expected: "a&#x2F;b &#96;c&#96; &amp; &lt;d&gt;",
     },
     Case {
         name: "raw_bypass",
@@ -94,7 +102,7 @@ const CASES: &[Case] = &[
         data: "{\"msg\":\"<b>test</b>\"}",
         auto_escape_off: false,
         mode: Mode::Exact,
-        expected: "&lt;b&gt;test&lt;/b&gt;",
+        expected: "&lt;b&gt;test&lt;&#x2F;b&gt;",
     },
     Case {
         name: "null_graceful",
@@ -230,7 +238,7 @@ const CASES: &[Case] = &[
         data: "{\"val\":\"<i>dyn</i>\"}",
         auto_escape_off: false,
         mode: Mode::Exact,
-        expected: "<b>literal</b>&lt;i&gt;dyn&lt;/i&gt;",
+        expected: "<b>literal</b>&lt;i&gt;dyn&lt;&#x2F;i&gt;",
     },
     Case {
         name: "variadic_echo",

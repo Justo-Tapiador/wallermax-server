@@ -20,7 +20,7 @@
 <?jhs } ?>
 
     <form method="post"
-          action="<?= form.is_new ? "/admin/menus/" + form.menu_id + "/items" : "/admin/menus/" + form.menu_id + "/items/" + form.item_id ?>">
+          action="<?= raw(form.is_new ? "/admin/menus/" + form.menu_id + "/items" : "/admin/menus/" + form.menu_id + "/items/" + form.item_id) ?>">
       <div class="form-layout">
         <div class="card editor-card">
           <div class="field">

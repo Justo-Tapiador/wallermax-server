@@ -516,7 +516,9 @@ async fn preview_roundtrips_the_edit_form_and_switches_modes() {
         body.contains("<h1>Nuevo formato</h1>"),
         "markdown preview: {body}"
     );
-    // The re-rendered form still saves to the edit route…
+    // The re-rendered form still saves to the edit route — the
+    // action is trusted chrome (server ids only), so the view marks
+    // it `raw()` and the URL stays clean under the full escape set…
     assert!(
         body.contains(&format!("/admin/pages/{id}\"")),
         "the edit action survives the round-trip: {body}"

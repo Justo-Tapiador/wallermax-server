@@ -337,8 +337,8 @@ async fn child_pages_render_breadcrumbs_and_seo_metadata() {
         "the meta description: {body}"
     );
     assert!(
-        body.contains("<meta property=\"og:image\" content=\"/assets/og-diseno.png\">"),
-        "the og:image: {body}"
+        body.contains("<meta property=\"og:image\" content=\"&#x2F;assets&#x2F;og-diseno.png\">"),
+        "the og:image (URLs escape the slash; browsers and crawlers decode it): {body}"
     );
 }
 

@@ -363,12 +363,14 @@ async fn a_tenant_lives_its_lifecycle_in_forms() {
     site.write("index.html", "<p>Acme home</p>");
     create_tenant(&admin, &server, None, "acme", &site.root_string()).await;
 
-    // The detail page lists it with its counts.
+    // The detail page lists it with its counts (the document root
+    // arrives escaped — the escaper also answers for `/`).
     let response = get(&admin, &server, None, "/admin/tenants/acme").await;
     assert_eq!(response.status(), 200);
     let body = response.text().await.expect("body");
+    let escaped_root = site.root_string().replace('/', "&#x2F;");
     assert!(
-        body.contains("acme") && body.contains(&site.root_string()),
+        body.contains("acme") && body.contains(&escaped_root),
         "detail: {body}"
     );
 
@@ -643,7 +645,7 @@ async fn a_host_name_maps_to_one_organization() {
     assert_eq!(response.status(), 200, "the second claim is refused");
     let body = response.text().await.expect("body");
     assert!(
-        body.contains("`acme`"),
+        body.contains("&#96;acme&#96;"),
         "the refusal names the owning organization: {body}"
     );
 }

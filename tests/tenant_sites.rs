@@ -509,7 +509,8 @@ async fn cms_origin_derives_from_the_domains_table() {
     );
     let body = response.text().await.expect("body");
     assert_eq!(
-        body, "<p>http://panel.data.test</p>",
-        "the origin comes from the domains table"
+        body, "<p>http:&#x2F;&#x2F;panel.data.test</p>",
+        "the origin comes from the domains table (echoed data escapes; \
+         browsers decode it right back)"
     );
 }

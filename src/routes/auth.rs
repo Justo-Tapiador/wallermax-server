@@ -1215,7 +1215,18 @@ mod tests {
     fn html_escaping_neutralizes_markup() {
         assert_eq!(
             crate::error::escape_html_text("<script>alert('x')</script>&"),
-            "&lt;script&gt;alert(&#039;x&#039;)&lt;/script&gt;&amp;"
+            "&lt;script&gt;alert(&#039;x&#039;)&lt;&#x2F;script&gt;&amp;"
+        );
+    }
+
+    #[test]
+    fn html_escaping_covers_the_full_owasp_set() {
+        // The slash and the backtick are invisible to the rendered
+        // page (both decode back to themselves) and close the
+        // `</script>` breakout for good measure.
+        assert_eq!(
+            crate::error::escape_html_text("a/b `c` \"d\" <e>"),
+            "a&#x2F;b &#96;c&#96; &quot;d&quot; &lt;e&gt;"
         );
     }
 }

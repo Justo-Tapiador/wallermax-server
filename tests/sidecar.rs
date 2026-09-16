@@ -95,6 +95,7 @@ const RICH_JHS: &str = concat!(
     "hello <?= user ?>\n",
     "<?= \"<b>\" ?>\n",
     "<?= raw(\"<b>ok</b>\") ?>\n",
+    "<?= \"6/8 `brass`\" ?>\n",
     "<?jhs var items = [\"a\", \"b\"]; ?>\n",
     "<?jhs items.forEach(function (item) { ?>",
     " <li>#{<?= item ?>}</li>\n",
@@ -370,6 +371,14 @@ async fn boa_and_sidecar_backends_render_identical_html() {
         .expect("sidecar body");
 
     assert_eq!(boa_body, sidecar_body, "backends must agree byte for byte");
+
+    // The escaping set is the same seven characters on both sides
+    // (the OWASP set): the slash and the backtick ride along, so the
+    // closed `</script>` sequence can never survive an escape.
+    assert!(
+        boa_body.contains("6&#x2F;8 &#96;brass&#96;"),
+        "the full escaping set: {boa_body}"
+    );
 
     // And the auto-routed views tree renders identically too.
     let boa_view = reqwest::get(boa_server.url("/"))

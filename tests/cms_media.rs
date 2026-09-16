@@ -209,8 +209,12 @@ async fn uploads_round_trip_from_form_to_public_url() {
         "canonical URL: {url}"
     );
     assert!(url.ends_with(".png"), "canonical URL: {url}");
+    // The snippet echoes through the escaper (it mixes the alt text —
+    // user data — with the URL), so its slashes travel as entities:
+    // the textarea still copies back the exact snippet.
+    let escaped_url = url.replace('/', "&#x2F;");
     assert!(
-        html.contains(&format!("![Logo del sitio]({url})")),
+        html.contains(&format!("![Logo del sitio]({escaped_url})")),
         "the Markdown snippet uses the alt text: {url}"
     );
 

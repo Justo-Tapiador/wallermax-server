@@ -594,7 +594,9 @@ fn prelude(auto_escape: bool, require_enabled: bool) -> String {
          \x20     .replace(/</g, '&lt;')\n\
          \x20     .replace(/>/g, '&gt;')\n\
          \x20     .replace(/\"/g, '&quot;')\n\
-         \x20     .replace(/'/g, '&#039;');\n\
+         \x20     .replace(/'/g, '&#039;')\n\
+         \x20     .replace(/\\//g, '&#x2F;')\n\
+         \x20     .replace(/`/g, '&#96;');\n\
          \x20 }\n\
          \x20 var AUTO = ",
     ) + auto
@@ -1014,7 +1016,7 @@ mod tests {
                 &data(json!({"val": "<script>alert(1)</script>"})),
             )
             .expect("renders");
-        assert_eq!(out.html, "&lt;script&gt;alert(1)&lt;/script&gt;");
+        assert_eq!(out.html, "&lt;script&gt;alert(1)&lt;&#x2F;script&gt;");
     }
 
     #[test]
@@ -1052,7 +1054,7 @@ mod tests {
         let out = engine()
             .render_string("<?jhs echo(msg); ?>", &data(json!({"msg": "<b>test</b>"})))
             .expect("renders");
-        assert_eq!(out.html, "&lt;b&gt;test&lt;/b&gt;");
+        assert_eq!(out.html, "&lt;b&gt;test&lt;&#x2F;b&gt;");
     }
 
     #[test]
@@ -1255,7 +1257,7 @@ mod tests {
                 &data(json!({"val": "<i>dyn</i>"})),
             )
             .expect("renders");
-        assert_eq!(out.html, "<b>literal</b>&lt;i&gt;dyn&lt;/i&gt;");
+        assert_eq!(out.html, "<b>literal</b>&lt;i&gt;dyn&lt;&#x2F;i&gt;");
     }
 
     #[test]

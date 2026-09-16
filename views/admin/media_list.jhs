@@ -51,7 +51,7 @@
 <?jhs media_items.forEach(function (medio) { ?>
         <div class="media-item">
           <a href="/admin/media/<?= medio.id ?>" class="media-thumb" aria-label="<?= medio.original_name ?>">
-            <img src="<?= medio.thumb_url ?>" alt="<?= medio.alt_text ?>" loading="lazy">
+            <img src="<?= raw(medio.thumb_url) ?>" alt="<?= medio.alt_text ?>" loading="lazy">
           </a>
           <div class="media-info">
             <strong><a href="/admin/media/<?= medio.id ?>"><?= medio.original_name ?></a></strong>

@@ -779,8 +779,12 @@ mod tests {
             ""
         );
 
-        // 8 bytes → 12 base64 characters (padding included).
-        let base64 = fixture.render("<?= require('crypto').randomBytes(8).toString('base64') ?>");
+        // 8 bytes → 12 base64 characters (padding included). `raw()`:
+        // the base64 alphabet contains `/`, and random bytes are not
+        // user influence — the length is what is pinned, not the
+        // escaping.
+        let base64 =
+            fixture.render("<?= raw(require('crypto').randomBytes(8).toString('base64')) ?>");
         assert_eq!(base64.len(), 12, "base64: {base64}");
 
         let latin1 = fixture.render(

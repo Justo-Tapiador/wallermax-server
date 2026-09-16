@@ -486,9 +486,11 @@ async fn the_sign_in_link_carries_the_return_page() {
         .await
         .expect("anonymous main home");
     let body = response.text().await.expect("main home body");
+    // The URL renders escaped (`/` as &#x2F;) — the entities decode
+    // back to the same address when the browser follows the link.
     assert!(
         body.contains(
-            "href=\"http://cms.app.localhost:8080/login?redirect=http%3A%2F%2Fapp.localhost%2F\""
+            "href=\"http:&#x2F;&#x2F;cms.app.localhost:8080&#x2F;login?redirect=http%3A%2F%2Fapp.localhost%2F\""
         ),
         "the sign-in link points at the login page carrying this page back: {body}"
     );

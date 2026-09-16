@@ -335,6 +335,14 @@ Properties and guarantees:
   user-chosen input; `auto_escape` (on by default) HTML-escapes it, so
   personalisation cannot turn into stored XSS. Only `raw()` bypasses
   the escaper — use it for trusted markup, never for identity fields.
+- **The escaper covers the full OWASP set** — `&`, `<`, `>`, `"`,
+  `'`, `/` and the backtick. The last two decode back to themselves,
+  so the rendered page is unchanged; they close the door on the
+  `</script>` sequence surviving an escape into a script context, and
+  on the attribute-delimiter quirks old browsers had with backticks.
+  The same seven characters everywhere: the boa sandbox, the Node
+  sidecar and the server's own error pages answer one law, pinned by
+  the backend-parity test.
 - **`user` is always *defined*** (unlike undeclared variables): null
   for anonymous visitors. Guard with `if (user && ...)` — a truthiness
   check is the portable form. `pages` is always an array; `query` and

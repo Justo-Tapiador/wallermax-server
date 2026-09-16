@@ -112,6 +112,12 @@ const MAIN_TEMPLATE: &str = "<nav><?= cms_origin ?>/login</nav>";
 /// The CMS host's own template, echoing the bare global.
 const VIEW_TEMPLATE: &str = "<p><?= cms_origin ?></p>";
 
+/// How a URL echoes back through the escaper: every slash travels as
+/// an entity (browsers decode it right back — links stay correct).
+fn esc(url: &str) -> String {
+    url.replace('/', "&#x2F;")
+}
+
 /// A `Host` header value for the tests.
 fn host(value: &str) -> HeaderValue {
     HeaderValue::from_str(value).expect("test host value")
@@ -171,7 +177,7 @@ async fn vhosts_derive_the_first_host_as_the_origin() {
 
     assert_eq!(
         body(&server, "/origin.jhs", None).await,
-        format!("<nav>http://{CMS_HOST}/login</nav>")
+        format!("<nav>{}/login</nav>", esc(&format!("http://{CMS_HOST}")))
     );
 }
 
@@ -183,7 +189,10 @@ async fn non_default_ports_tag_along() {
 
     assert_eq!(
         body(&server, "/origin.jhs", None).await,
-        format!("<nav>http://{CMS_HOST}:8080/login</nav>")
+        format!(
+            "<nav>{}/login</nav>",
+            esc(&format!("http://{CMS_HOST}:8080"))
+        )
     );
 }
 
@@ -205,7 +214,7 @@ async fn tls_lends_the_https_scheme() {
     assert_eq!(response.status(), 200, "the template renders");
     assert_eq!(
         response.text().await.expect("body text"),
-        format!("<nav>https://{CMS_HOST}/login</nav>")
+        format!("<nav>{}/login</nav>", esc(&format!("https://{CMS_HOST}")))
     );
 }
 
@@ -220,7 +229,7 @@ async fn site_url_overrides_the_derived_origin() {
     // operator's declared origin wins, exactly as in the sitemap.
     assert_eq!(
         body(&server, "/origin.jhs", None).await,
-        "<nav>https://cms.example.com/login</nav>"
+        format!("<nav>{}/login</nav>", esc("https://cms.example.com"))
     );
 }
 
@@ -237,6 +246,6 @@ async fn cms_host_templates_see_the_same_origin() {
     // and the main site's links can never disagree about the origin.
     assert_eq!(
         body(&server, "/origin", Some(CMS_HOST)).await,
-        format!("<p>http://{CMS_HOST}</p>")
+        format!("<p>{}</p>", esc(&format!("http://{CMS_HOST}")))
     );
 }

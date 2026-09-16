@@ -450,12 +450,20 @@ pub fn status_title(status: StatusCode) -> &'static str {
 }
 
 /// HTML-escapes a text so server messages stay inert inside the page.
+///
+/// The full OWASP set (F10-era parity hardening, the escapeHtml
+/// follow-up): the five classics plus the slash and the backtick —
+/// invisible to the rendered page (both decode back to themselves),
+/// and the closed `</script>` sequence can never survive an escape
+/// into a script context.
 pub fn escape_html_text(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#039;")
+        .replace('/', "&#x2F;")
+        .replace('`', "&#96;")
 }
 
 #[cfg(test)]

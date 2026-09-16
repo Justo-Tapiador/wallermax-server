@@ -203,7 +203,7 @@ async fn renders_jhs_under_the_static_root() {
     // echo() output is HTML-escaped (node-jhs2 semantics); raw strings
     // are covered by the fidelity battery.
     assert!(
-        body.contains("&lt;li&gt;a&lt;/li&gt;&lt;li&gt;b&lt;/li&gt;"),
+        body.contains("&lt;li&gt;a&lt;&#x2F;li&gt;&lt;li&gt;b&lt;&#x2F;li&gt;"),
         "echo output: {body}"
     );
     assert!(body.ends_with("footer42"), "expression output: {body}");
@@ -914,9 +914,11 @@ async fn the_req_global_exposes_the_request_shape() {
     let body = response.text().await.expect("body text");
 
     // Method, path, first query value and the allowlisted user-agent;
-    // the cookie header never reaches the sandbox (editor threat model).
+    // the cookie header never reaches the sandbox (editor threat
+    // model). The path echoes as data, so its slash travels as an
+    // entity — browsers decode it right back.
     assert_eq!(
-        body, "GET|/reqview|42|wallermax-test-agent|undefined",
+        body, "GET|&#x2F;reqview|42|wallermax-test-agent|undefined",
         "req global: {body}"
     );
 }

@@ -378,7 +378,7 @@ async fn every_save_appends_a_revision() {
     let detail = response.text().await.expect("revision body");
     assert!(detail.contains("Revision 1 of «La página con historial»"));
     assert!(
-        detail.contains("&lt;strong&gt;uno&lt;/strong&gt;"),
+        detail.contains("&lt;strong&gt;uno&lt;&#x2F;strong&gt;"),
         "the body renders as escaped source, not HTML"
     );
     assert!(
