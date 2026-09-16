@@ -58,14 +58,15 @@
     }
 
     nav { display: flex; align-items: center; gap: 28px; }
-    nav a, .theme {
+    nav a, nav button, .theme {
       color: #a9bdd5;
       cursor: pointer;
       border: 0;
       background: none;
+      padding: 0;
       transition: color .2s, transform .2s;
     }
-    nav a:hover, .theme:hover { color: #fff; transform: translateY(-1px); }
+    nav a:hover, nav button:hover, .theme:hover { color: #fff; transform: translateY(-1px); }
     nav a.active { color: var(--blue-2); }
 
     .hero {
