@@ -1056,6 +1056,43 @@ impl AppConfig {
         Ok(config)
     }
 
+    /// Loads and validates the configuration from explicit in-memory TOML
+    /// layers, applying the same rules and the same order as
+    /// [`AppConfig::load`]: built-in defaults, then `base`, then `local`
+    /// (later layers win). Passing `None` (or an empty string) for a layer
+    /// simply leaves it out, so the defaults surface — exactly like a
+    /// missing file at startup.
+    ///
+    /// This is the **wallermax-manager** entry point (F22): the desktop
+    /// manager validates its editors through the server's real pipeline —
+    /// the same `config` crate layering, the same serde types, the same
+    /// `normalize()`/`validate()` pass — so the editor can never accept a
+    /// file the server would reject, nor reject one the server would
+    /// accept. Environment overrides are deliberately **not** applied: the
+    /// manager edits files; whatever the operator layers on top with
+    /// `WALLERMAX_*` at run time stays the operator's business.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConfigError`] when a layer is malformed or the merged
+    /// configuration fails validation.
+    pub fn load_from_toml_layers(
+        base: Option<&str>,
+        local: Option<&str>,
+    ) -> Result<Self, ConfigError> {
+        let mut builder = Config::builder().add_source(Config::try_from(&Self::default())?);
+        if let Some(base) = base.filter(|text| !text.trim().is_empty()) {
+            builder = builder.add_source(File::from_str(base, config::FileFormat::Toml));
+        }
+        if let Some(local) = local.filter(|text| !text.trim().is_empty()) {
+            builder = builder.add_source(File::from_str(local, config::FileFormat::Toml));
+        }
+        let mut config = builder.build()?.try_deserialize::<AppConfig>()?;
+        config.normalize();
+        config.validate()?;
+        Ok(config)
+    }
+
     /// Normalizes values that only make sense in one shape.
     ///
     /// `cms.hosts` entries are trimmed, lowercased and stripped of

@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["crates/wallermax-manager-core", "src-tauri"]
+
+# The wallermax-manager workspace: a desktop, server-management application
+# for wallermax-server (F22). It is deliberately a *separate* workspace with
+# its own lockfile: the manager builds at its own pace and never perturbs
+# the server's dependency graph, while the core crate still reuses the
+# server's real configuration types through a path dependency — the editor
+# validates with the server's own parsing rules, never a re-implementation.

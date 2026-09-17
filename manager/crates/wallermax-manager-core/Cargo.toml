@@ -1,0 +1,19 @@
+[package]
+name = "wallermax-manager-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "The server-management core of wallermax-manager: layered configuration editing validated by the server's real parser, parent-process supervision, log capture and endpoint metrics."
+license = "MIT"
+publish = false
+
+[dependencies]
+wallermax-server = { path = "../../.." }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml_edit = "0.22"
+
+# Process-tree signalling on Unix (SIGTERM/SIGKILL to the whole group the
+# manager created); Windows stops go through `taskkill /T /F` instead.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

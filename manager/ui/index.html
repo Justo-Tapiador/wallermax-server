@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WallerMax Manager</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo">W</div>
+      <div>WallerMax Manager<br><span class="sub">server control, no browsers</span></div>
+    </div>
+
+    <nav class="nav" id="nav">
+      <button data-page="dashboard" class="active"><span class="ico">◱</span>Dashboard</button>
+      <button data-page="configuration"><span class="ico">✎</span>Configuration</button>
+      <button data-page="server"><span class="ico">▶</span>Server</button>
+      <button data-page="logs"><span class="ico">≡</span>Logs</button>
+      <button data-page="tools"><span class="ico">⚒</span>Tools</button>
+      <button data-page="settings"><span class="ico">⚙</span>Settings</button>
+    </nav>
+
+    <div class="side-bottom">
+      <div class="state-pill state-stopped" id="pill-side">
+        <span class="dot"></span><span id="pill-text">Stopped</span>
+      </div>
+      <small id="pill-sub">no supervised process yet</small>
+      <div class="side-actions">
+        <button class="btn primary" id="btn-start-side">Start</button>
+        <button class="btn danger" id="btn-stop-side">Stop</button>
+      </div>
+    </div>
+  </aside>
+
+  <main>
+    <header class="top">
+      <span class="where" id="where">Dashboard</span>
+      <div class="right">
+        <span class="origin-chip mono" id="origin-chip">…</span>
+        <span class="state-pill state-stopped" id="pill-top"><span class="dot"></span><span id="pill-text-top">Stopped</span></span>
+      </div>
+    </header>
+
+    <div class="content">
+
+      <!-- ================= dashboard ================= -->
+      <section class="page active" id="page-dashboard">
+        <div class="heading">
+          <div><h1>Dashboard</h1><p>The local server at a glance.</p></div>
+          <button class="btn" id="btn-refresh-dash">Refresh</button>
+        </div>
+        <div class="banner" id="dash-notice" style="display:none"></div>
+        <div class="banner error" id="dash-error" style="display:none"></div>
+
+        <div class="grid4">
+          <div class="card stat"><div class="stat-top"><span class="stat-icon">◉</span>Server state</div><h2 id="dash-state">—</h2><div class="trend" id="dash-state-sub">process supervision</div></div>
+          <div class="card stat"><div class="stat-top"><span class="stat-icon">◷</span>Uptime</div><h2 id="dash-uptime">—</h2><div class="trend">wallermax_uptime_seconds</div></div>
+          <div class="card stat"><div class="stat-top"><span class="stat-icon">⇅</span>Requests</div><h2 id="dash-requests">—</h2><div class="trend">wallermax_requests_total</div></div>
+          <div class="card stat"><div class="stat-top"><span class="stat-icon">⚡</span>Requests / s</div><h2 id="dash-rps">—</h2><div class="trend">from /api/stats</div></div>
+        </div>
+
+        <div class="grid3">
+          <div class="card stat"><div class="stat-top"><span class="stat-icon">⛨</span>Rate limited</div><h2 id="dash-limited">—</h2><div class="trend">rejected by the limiter</div></div>
+          <div class="card stat"><div class="stat-top"><span class="stat-icon">☺</span>Registered users</div><h2 id="dash-users">—</h2><div class="trend">while auth is enabled</div></div>
+          <div class="card stat"><div class="stat-top"><span class="stat-icon">Ⓥ</span>Server version</div><h2 id="dash-version">—</h2><div class="trend">from /api/stats</div></div>
+        </div>
+      </section>
+
+      <!-- ================= configuration ================= -->
+      <section class="page" id="page-configuration">
+        <div class="heading">
+          <div><h1>Configuration</h1><p>Layered TOML editing — validated by the server's real parser.</p></div>
+          <div class="seg" id="file-seg">
+            <button data-file="base" class="active">wallermax.toml</button>
+            <button data-file="local">wallermax.local.toml</button>
+          </div>
+        </div>
+
+        <div class="seg" id="mode-seg" style="margin-bottom:14px">
+          <button data-mode="form" class="active">Form</button>
+          <button data-mode="raw">Raw TOML</button>
+        </div>
+
+        <div class="card pad" id="config-form-wrap">
+          <div class="form-grid" id="config-form"><!-- built by app.js --></div>
+          <div style="margin-top:16px; display:flex; gap:10px; align-items:center">
+            <button class="btn primary" id="btn-form-save">Save layer</button>
+            <button class="btn" id="btn-config-validate">Validate pair</button>
+            <span class="muted" style="font-size:12.5px">Empty fields keep or create the file's value; comments elsewhere are preserved.</span>
+          </div>
+        </div>
+
+        <div class="card pad" id="config-raw-wrap" style="display:none">
+          <textarea class="raw-editor mono" id="raw-editor" spellcheck="false" placeholder="# empty — saving an empty layer means &quot;all defaults&quot;"></textarea>
+          <div style="margin-top:12px; display:flex; gap:10px; align-items:center">
+            <button class="btn primary" id="btn-raw-save">Save layer</button>
+            <button class="btn" id="btn-raw-reload">Reload</button>
+            <span class="muted" id="raw-meta" style="font-size:12.5px"></span>
+          </div>
+        </div>
+
+        <div class="banner" id="config-banner" style="display:none; margin-top:14px"></div>
+      </section>
+
+      <!-- ================= server ================= -->
+      <section class="page" id="page-server">
+        <div class="heading">
+          <div><h1>Server</h1><p>The process, supervised by this manager.</p></div>
+        </div>
+
+        <div class="card pad">
+          <h3>Process</h3>
+          <dl class="kv">
+            <dt>State</dt><dd id="srv-state">—</dd>
+            <dt>PID</dt><dd id="srv-pid" class="mono">—</dd>
+            <dt>Started</dt><dd id="srv-started">—</dd>
+            <dt>Exit code</dt><dd id="srv-exit">—</dd>
+          </dl>
+          <div style="margin-top:16px; display:flex; gap:10px">
+            <button class="btn primary" id="btn-start">Start server</button>
+            <button class="btn danger" id="btn-stop">Stop server</button>
+            <button class="btn" id="btn-refresh-status">Refresh</button>
+          </div>
+          <div class="banner" id="probe-banner" style="display:none; margin-top:14px"></div>
+        </div>
+
+        <div class="card pad" style="margin-top:13px">
+          <h3>Recent output</h3>
+          <div class="log-box" id="srv-log-preview"><span class="muted">no output captured yet — start the server or open Logs</span></div>
+        </div>
+      </section>
+
+      <!-- ================= logs ================= -->
+      <section class="page" id="page-logs">
+        <div class="heading">
+          <div><h1>Logs</h1><p>Captured stdout and stderr, in order, with a cursor — no duplicates, no gaps.</p></div>
+        </div>
+        <div class="log-toolbar">
+          <input type="text" id="log-filter" placeholder="filter lines…">
+          <label class="check"><input type="checkbox" id="log-autoscroll" checked> autoscroll</label>
+          <label class="check"><input type="checkbox" id="log-show-err" checked> stderr</label>
+          <label class="check"><input type="checkbox" id="log-show-out" checked> stdout</label>
+          <button class="btn small" id="btn-log-clear">Clear view</button>
+          <span class="muted" id="log-count" style="margin-left:auto">0 lines</span>
+        </div>
+        <div class="log-box" id="log-box"><span class="muted">nothing captured yet</span></div>
+      </section>
+
+      <!-- ================= tools ================= -->
+      <section class="page" id="page-tools">
+        <div class="heading">
+          <div><h1>Tools</h1><p>Paths, validation and backups.</p></div>
+        </div>
+
+        <div class="banner" id="tools-notice" style="display:none"></div>
+
+        <div class="card pad">
+          <h3>Paths</h3>
+          <dl class="kv">
+            <dt>Manager settings</dt><dd class="mono" id="path-settings">—</dd>
+            <dt>Configuration directory</dt><dd class="mono" id="path-configdir">—</dd>
+            <dt>wallermax.toml</dt><dd class="mono" id="path-base">—</dd>
+            <dt>wallermax.local.toml</dt><dd class="mono" id="path-local">—</dd>
+          </dl>
+          <div style="margin-top:14px; display:flex; gap:10px">
+            <button class="btn" id="btn-open-folder">Open config folder</button>
+            <button class="btn" id="btn-tools-validate">Validate pair on disk</button>
+          </div>
+        </div>
+
+        <div class="card pad" style="margin-top:13px">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px">
+            <h3 style="margin:0">Backups</h3>
+            <div class="seg" id="backup-seg">
+              <button data-file="base" class="active">wallermax.toml</button>
+              <button data-file="local">wallermax.local.toml</button>
+            </div>
+          </div>
+          <table class="list">
+            <thead><tr><th>File</th><th>Size</th><th>Modified</th><th></th></tr></thead>
+            <tbody id="backup-rows"><tr><td colspan="4" class="muted">no backups yet — every save keeps one</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ================= settings ================= -->
+      <section class="page" id="page-settings">
+        <div class="heading">
+          <div><h1>Settings</h1><p>The manager's own configuration — stored as JSON, applied immediately.</p></div>
+        </div>
+
+        <div class="card pad">
+          <div class="form-grid">
+            <div class="field wide">
+              <label>Server command <code>— program plus arguments, no shell syntax; point at the binary itself, not at cargo run</code></label>
+              <input type="text" id="set-command" placeholder="C:\wallermax\target\release\wallermax-server.exe">
+            </div>
+            <div class="field">
+              <label>Working directory <code>— empty: the configuration directory</code></label>
+              <input type="text" id="set-workdir" placeholder="">
+            </div>
+            <div class="field">
+              <label>Configuration directory <code>— empty: search upward for wallermax.toml</code></label>
+              <input type="text" id="set-configdir" placeholder="">
+            </div>
+            <div class="field">
+              <label>Origin <code>— health, metrics and stats derive from it</code></label>
+              <input type="text" id="set-origin" placeholder="http://127.0.0.1:8080">
+            </div>
+            <div class="field">
+              <label>Health path</label><input type="text" id="set-health" placeholder="/health">
+            </div>
+            <div class="field">
+              <label>Metrics path</label><input type="text" id="set-metrics" placeholder="/metrics">
+            </div>
+            <div class="field">
+              <label>Stats path</label><input type="text" id="set-stats" placeholder="/api/stats">
+            </div>
+            <div class="field">
+              <label>Boot probe window (ms)</label><input type="number" id="set-probe" min="1" placeholder="4000">
+            </div>
+            <div class="field">
+              <label>Stop grace (ms)</label><input type="number" id="set-grace" min="1" placeholder="5000">
+            </div>
+          </div>
+          <div style="margin-top:16px">
+            <button class="btn primary" id="btn-settings-save">Save settings</button>
+            <span class="muted" style="font-size:12.5px">Stored at <span class="mono" id="settings-path-label">…</span></span>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+</div>
+
+<div id="toasts"></div>
+<script src="app.js"></script>
+</body>
+</html>
