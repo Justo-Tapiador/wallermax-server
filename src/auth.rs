@@ -112,6 +112,40 @@ pub fn verify_password(password: &str, stored_hash: &str) -> bool {
         .is_ok()
 }
 
+/// [`hash_password`] on the blocking pool.
+///
+/// Argon2id is deliberately expensive (tens of milliseconds, ~19 MiB of
+/// memory churn per call); running it on an async worker thread would
+/// stall every other request that shares the thread for the whole
+/// verification. Every `await` context — the login, registration and
+/// password routes — must go through this wrapper; the sync versions
+/// stay for tests and non-async embedders.
+///
+/// A panic inside the closure (not expected: the sync function returns
+/// `Result`, it does not panic) maps to [`AuthError::Hash`], so callers
+/// see one error shape either way.
+///
+/// # Errors
+///
+/// Returns [`AuthError::Hash`] when hashing fails or the blocking task
+/// itself is cancelled.
+pub async fn hash_password_async(password: String) -> Result<String, AuthError> {
+    tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .unwrap_or_else(|error| Err(AuthError::Hash(format!("the hashing task failed: {error}"))))
+}
+
+/// [`verify_password`] on the blocking pool (see [`hash_password_async`]
+/// for why the pool is mandatory, not an optimization).
+///
+/// A panicked task reports "rejected", exactly like a wrong password:
+/// callers cannot tell the shapes apart anyway.
+pub async fn verify_password_async(password: String, stored_hash: String) -> bool {
+    tokio::task::spawn_blocking(move || verify_password(&password, &stored_hash))
+        .await
+        .unwrap_or(false)
+}
+
 /// Generates a fresh opaque refresh token: 32 random bytes,
 /// base64url-encoded without padding.
 ///
