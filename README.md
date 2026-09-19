@@ -8,8 +8,8 @@
 
 > A modular, secure and high-performance web server written in Rust.
 
-**Status: v0.21.0 — the roadmap phases done, added *Wallermax Manager* , 
-a dynamic template engine with require() running on the original node-jhs2 engine, browser sessions, and a small built-in CMS that owns the homepage, and a server-side proxy for external APIs.** Phase 4 added rotating
+**Status: v0.21.0 — the roadmap phases done, added *Wallermax Manager*,
+A cross-platform **desktop** application to manage a `wallermax-server`.**  Also added a dynamic template engine with require() running on the original node-jhs2 engine, browser sessions, and a small built-in CMS that owns the homepage, and a server-side proxy for external APIs.** Phase 4 added rotating
 refresh tokens with family revocation, a Prometheus `/metrics` endpoint, HTTPS via
 rustls (plus an HTTP-to-HTTPS redirect listener), trusted-proxy `X-Forwarded-For`
 parsing, a multi-stage Docker image with a compose example and a GitHub Actions CI
