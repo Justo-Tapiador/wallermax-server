@@ -1,10 +1,12 @@
 # Continuous integration for wallermax-server.
 #
-# Three jobs, from cheapest to most expensive:
+# Four jobs, from cheapest to most expensive:
 #
 #   lint    — formatting and clippy (warnings are errors) on Linux;
 #   test    — the full test suite on Linux and Windows (the two platforms
 #             the project is developed against);
+#   manager — the wallermax-manager workspace (fmt + clippy + tests), on
+#             Linux with the Tauri system dependencies installed;
 #   docker  — builds the container image with the Dockerfile (which pins
 #             the MSRV toolchain, so this doubles as the MSRV check) and
 #             smoke-tests /health and /metrics inside the container.
@@ -68,6 +70,44 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: cargo test
+        run: cargo test --locked
+
+  manager:
+    name: manager (fmt + clippy + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: manager
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The Tauri shell (manager/src-tauri) compiles wry/webkit2gtk on
+      # Linux; the core crate needs none of this but shares the job.
+      - name: Install Tauri Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libxdo-dev
+
+      - name: Install Rust (stable, rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: manager
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: cargo test
         run: cargo test --locked
