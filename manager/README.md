@@ -1,7 +1,8 @@
 # wallermax-manager
 [![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org) [![Built with Tauri](https://img.shields.io/badge/Built%20with-Tauri%202.11.5-black)](https://github.com/tokio-rs/axum) [![License: MIT](https://img.shields.io/badge/License-MIT-blue)](LICENSE) [![Roadmap](https://img.shields.io/badge/Roadmap-All%209%20phases%20done-green)](#roadmap)
+
 <div align="left">
-<p><img src="wm.png" width="500" alt="WALLERMAX-MANAGER></p>
+<p><img src="wm.png" width="500" alt="WALLERMAX-MANAGER"></p>
 </div>
 
 A cross-platform **desktop** application to manage a `wallermax-server`:
