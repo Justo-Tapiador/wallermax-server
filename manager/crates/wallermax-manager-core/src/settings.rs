@@ -34,7 +34,10 @@ pub struct Settings {
     /// directory for `wallermax.toml`.
     pub config_dir: String,
     /// Base origin the manager talks to: health, metrics and stats URLs
-    /// are all derived from it, e.g. `http://127.0.0.1:8080`.
+    /// are all derived from it, e.g. `http://127.0.0.1:8080`. An
+    /// `https://` origin suits a server with `[tls]` enabled — the
+    /// manager then talks TLS, accepting the server's development
+    /// certificate (see [`crate::http`]).
     pub origin: String,
     /// The website the dashboard links to while the server runs —
     /// e.g. `https://localhost` when TLS terminates at the server

@@ -20,7 +20,8 @@
 //! | [`settings`]          | The manager's own JSON settings (survives restarts)|
 //! | [`config_manager`]    | Layered TOML editing: validate, backup, write     |
 //! | [`process_manager`]   | Spawn, boot probe, logs, tree-kill stop, lifetime |
-//! | [`metrics`]           | Prometheus text parsing + a tiny blocking HTTP GET|
+//! | [`http`]              | The endpoint client: http/https GET, redirects    |
+//! | [`metrics`]           | Prometheus text parsing (fetched by [`http`])     |
 //! | [`ports`]             | Who listens on the server's port (pre-flight)    |
 //! | [`app`]               | The facade the Tauri commands delegate to         |
 //!
@@ -75,6 +76,7 @@
 
 pub mod app;
 pub mod config_manager;
+pub mod http;
 pub mod metrics;
 pub mod ports;
 pub mod process_manager;

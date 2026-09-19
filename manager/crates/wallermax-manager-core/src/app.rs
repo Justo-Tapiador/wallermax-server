@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::config_manager::{BackupInfo, ConfigManager, ConfigWhich, BASE_FILE};
-use crate::metrics::{self, MetricsSnapshot};
+use crate::http;
+use crate::metrics::MetricsSnapshot;
 use crate::ports::{self, Occupancy, PortOwner};
 use crate::process_manager::{
     self, ProcessManager, ProcessStatus, ServerState, SpawnSpec, StartReport,
@@ -145,9 +146,12 @@ impl App {
     }
 
     /// Validates, persists and applies new settings. The origin must be
-    /// an `http://` URL, the site URL an `http://` or `https://` one
-    /// (it opens in a browser, so TLS is allowed), and the endpoint
-    /// paths must start with `/`; the
+    /// an `http://` or `https://` URL — a server with `[tls]` enabled
+    /// serves its endpoints over TLS, and the manager talks to it the
+    /// same way a browser would (its development certificate is
+    /// accepted, see [`crate::http`]). The site URL is an `http://` or
+    /// `https://` one (it opens in a browser, so TLS is the norm), and
+    /// the endpoint paths must start with `/`; the
     /// configuration directory only changes when a value is given, so
     /// clearing the field keeps the discovered directory.
     ///
@@ -155,10 +159,11 @@ impl App {
     ///
     /// The first invalid field, or filesystem problems from the save.
     pub fn save_settings(&self, incoming: Settings) -> Result<(), String> {
-        if !incoming.origin.trim().starts_with("http://") {
+        let origin = incoming.origin.trim();
+        if !origin.starts_with("http://") && !origin.starts_with("https://") {
             return Err(format!(
-                "the origin must be an `http://` URL (the manager talks to the local \
-                 server); got `{}`",
+                "the origin must be an `http://` or `https://` URL — the manager talks to the \
+                 local server, and `https://` suits a server serving TLS; got `{}`",
                 incoming.origin
             ));
         }
@@ -538,15 +543,15 @@ impl App {
         let timeout = Duration::from_secs(2);
         let mut snapshot = DashboardSnapshot::default();
 
-        match metrics::http_get_text(&settings.health_url(), timeout) {
+        match http::http_get_text(&settings.health_url(), timeout) {
             Ok(_) => snapshot.reachable = true,
             Err(error) => snapshot.error = Some(error),
         }
-        if let Ok(text) = metrics::http_get_text(&settings.metrics_url(), timeout) {
+        if let Ok(text) = http::http_get_text(&settings.metrics_url(), timeout) {
             snapshot.reachable = true;
             fill_from_metrics(&MetricsSnapshot::parse(&text), &mut snapshot);
         }
-        if let Ok(text) = metrics::http_get_text(&settings.stats_url(), timeout) {
+        if let Ok(text) = http::http_get_text(&settings.stats_url(), timeout) {
             snapshot.reachable = true;
             fill_from_stats(&text, &mut snapshot);
         }
@@ -728,7 +733,13 @@ mod tests {
             origin: String::from("ftp://nope"),
             ..Settings::default()
         };
-        assert!(app.save_settings(broken).is_err());
+        let refusal = app
+            .save_settings(broken)
+            .expect_err("an unknown scheme is refused");
+        assert!(
+            refusal.contains("ftp://nope"),
+            "the refusal names what was offered: {refusal}"
+        );
         let bad_site = Settings {
             site_url: String::from("file:///etc"),
             ..Settings::default()
@@ -740,6 +751,27 @@ mod tests {
                 .origin,
             "http://127.0.0.1:9090"
         );
+    }
+
+    #[test]
+    fn an_https_origin_is_accepted_for_a_tls_server() {
+        let dir = crate::testutil::temp_dir("app-https-origin");
+        let app = app_in(&dir);
+        let mut edited = app.settings();
+        edited.origin = String::from("https://127.0.0.1:443");
+        app.save_settings(edited.clone()).expect("https applies");
+
+        assert_eq!(app.settings().origin, "https://127.0.0.1:443");
+        assert_eq!(app.health_url(), "https://127.0.0.1:443/health");
+        assert_eq!(app.metrics_url(), "https://127.0.0.1:443/metrics");
+        assert_eq!(app.stats_url(), "https://127.0.0.1:443/api/stats");
+        // The site URL still opens wherever the browser should land,
+        // independently of the origin the manager talks to.
+        assert_eq!(app.site_url(), "https://127.0.0.1:443");
+        edited.site_url = String::from("https://app.localhost");
+        app.save_settings(edited).expect("site URL applies");
+        assert_eq!(app.site_url(), "https://app.localhost");
+        assert_eq!(app.health_url(), "https://127.0.0.1:443/health");
     }
 
     #[test]
