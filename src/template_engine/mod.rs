@@ -74,4 +74,6 @@ pub use engine::{ConsoleLine, JhsEngine, JhsError, JhsOptions, RedirectIntent, R
 pub use parser::TagOptions;
 pub use renderer::TemplateRenderer;
 pub use require_bridge::{RequireOptions, DEFAULT_FORBIDDEN_MODULES};
-pub use sidecar::{AutoRenderer, SidecarOptions, SidecarRenderer};
+pub use sidecar::{
+    AutoRenderer, SidecarOptions, SidecarRenderer, SidecarSupervisor, StrictSidecar,
+};

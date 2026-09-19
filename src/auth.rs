@@ -35,6 +35,15 @@ use crate::db::User;
 /// force; the configuration layer rejects them at load time.
 pub const MIN_JWT_SECRET_LEN: usize = 32;
 
+/// The development placeholder committed in `wallermax.toml` so
+/// `cargo run` works out of the box.
+///
+/// It is public knowledge — the repository is open — so a deployment
+/// that still signs with it would let anyone who reads the repo forge
+/// admin tokens. It is therefore never used for signing: see
+/// [`JwtService::new_guarded`].
+pub const SHIPPED_DEV_JWT_SECRET: &str = "dev-only-secret-replace-via-WALLERMAX_AUTH__JWT_SECRET";
+
 /// Maximum accepted password length, in bytes.
 ///
 /// Argon2 memory usage is independent of the password length, but the cap
@@ -110,6 +119,40 @@ pub fn verify_password(password: &str, stored_hash: &str) -> bool {
     Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok()
+}
+
+/// [`hash_password`] on the blocking pool.
+///
+/// Argon2id is deliberately expensive (tens of milliseconds, ~19 MiB of
+/// memory churn per call); running it on an async worker thread would
+/// stall every other request that shares the thread for the whole
+/// verification. Every `await` context — the login, registration and
+/// password routes — must go through this wrapper; the sync versions
+/// stay for tests and non-async embedders.
+///
+/// A panic inside the closure (not expected: the sync function returns
+/// `Result`, it does not panic) maps to [`AuthError::Hash`], so callers
+/// see one error shape either way.
+///
+/// # Errors
+///
+/// Returns [`AuthError::Hash`] when hashing fails or the blocking task
+/// itself is cancelled.
+pub async fn hash_password_async(password: String) -> Result<String, AuthError> {
+    tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .unwrap_or_else(|error| Err(AuthError::Hash(format!("the hashing task failed: {error}"))))
+}
+
+/// [`verify_password`] on the blocking pool (see [`hash_password_async`]
+/// for why the pool is mandatory, not an optimization).
+///
+/// A panicked task reports "rejected", exactly like a wrong password:
+/// callers cannot tell the shapes apart anyway.
+pub async fn verify_password_async(password: String, stored_hash: String) -> bool {
+    tokio::task::spawn_blocking(move || verify_password(&password, &stored_hash))
+        .await
+        .unwrap_or(false)
 }
 
 /// Generates a fresh opaque refresh token: 32 random bytes,
@@ -225,6 +268,34 @@ impl JwtService {
         }
     }
 
+    /// [`Self::new`], but refusing to sign with the publicly known
+    /// development placeholder.
+    ///
+    /// When the configuration still carries [`SHIPPED_DEV_JWT_SECRET`]
+    /// (the value committed in `wallermax.toml` for `cargo run`), a
+    /// fresh random secret is minted for **this process** instead,
+    /// with a loud warning. Development keeps working out of the box
+    /// — each restart simply invalidates earlier access tokens, the
+    /// exact safe default for a secret nobody set. Operators who want
+    /// tokens that survive restarts set `WALLERMAX_AUTH__JWT_SECRET`
+    /// (or git-ignored `wallermax.local.toml`), exactly as the shipped
+    /// comment prescribes.
+    ///
+    /// This is a guard, not a hard failure: booting must not depend on
+    /// a secret nobody configured, but signing with a public one must
+    /// never happen either.
+    pub fn new_guarded(secret: &str, issuer: &str, token_ttl_secs: u64) -> Self {
+        if secret == SHIPPED_DEV_JWT_SECRET {
+            tracing::warn!(
+                "auth.jwt_secret is the public development placeholder; minting an ephemeral \
+                 per-process secret instead — set WALLERMAX_AUTH__JWT_SECRET (or write \
+                 wallermax.local.toml) for tokens that survive restarts"
+            );
+            return Self::new(&ephemeral_secret(), issuer, token_ttl_secs);
+        }
+        Self::new(secret, issuer, token_ttl_secs)
+    }
+
     /// Issues an access token for `user` starting at the current time.
     ///
     /// # Errors
@@ -267,6 +338,14 @@ impl JwtService {
             .map(|data| data.claims)
             .map_err(|error| AuthError::Token(error.to_string()))
     }
+}
+
+/// A random 32-byte signing key, hex-encoded (64 characters) — the
+/// entropy class the README prescribes for real deployments.
+fn ephemeral_secret() -> String {
+    let mut bytes = [0_u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    hex(&bytes)
 }
 
 /// Current unix time in seconds (never panics, saturates at zero).
@@ -367,6 +446,31 @@ mod tests {
             .expect("token signs");
 
         assert!(service.verify_token(&stale).is_err());
+    }
+
+    #[test]
+    fn the_shipped_dev_secret_is_never_used_for_signing() {
+        let guarded = JwtService::new_guarded(SHIPPED_DEV_JWT_SECRET, "test-issuer", 3600);
+        let naive = JwtService::new(SHIPPED_DEV_JWT_SECRET, "test-issuer", 3600);
+
+        // The whole point: a token minted under the guard must NOT
+        // verify under the publicly known placeholder.
+        let token = guarded.issue_token(&test_user()).expect("token signs");
+        assert!(naive.verify_token(&token).is_err());
+
+        // It still round-trips on the guarding service itself.
+        assert!(guarded.verify_token(&token).is_ok());
+    }
+
+    #[test]
+    fn configured_secrets_pass_through_the_guard_unchanged() {
+        let secret = "an-operators-real-secret-0123456789abcdef";
+        let guarded = JwtService::new_guarded(secret, "test-issuer", 3600);
+        let plain = JwtService::new(secret, "test-issuer", 3600);
+
+        // A configured secret is used verbatim: tokens interoperate.
+        let token = guarded.issue_token(&test_user()).expect("token signs");
+        assert!(plain.verify_token(&token).is_ok());
     }
 
     #[test]

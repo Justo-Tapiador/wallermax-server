@@ -1137,9 +1137,16 @@ fn validate_tenant_name(name: &str) -> Result<(), String> {
 }
 
 /// Validates a document root: non-empty, at most
-/// [`MAX_DOCUMENT_ROOT`] characters. The same freedom
-/// `[static] root_dir` has — relative paths resolve against the
-/// working directory, the documented convention.
+/// [`MAX_DOCUMENT_ROOT`] characters, and free of traversal and
+/// self-reference components. The same freedom `[static] root_dir`
+/// has otherwise — relative paths resolve against the working
+/// directory, the documented convention.
+///
+/// `..` and `.` components are rejected outright (on both separators:
+/// Windows accepts `\` too): a tenant's root must be a fixed
+/// directory, never a relative escape — `../public` would re-point a
+/// tenant's whole site at whatever sits above its intended root, and
+/// the vhost table would faithfully serve it.
 ///
 /// # Errors
 ///
@@ -1152,6 +1159,15 @@ fn validate_document_root(document_root: &str) -> Result<(), String> {
         return Err(format!(
             "The document root must be at most {MAX_DOCUMENT_ROOT} characters."
         ));
+    }
+    if document_root.chars().any(char::is_control) {
+        return Err("The document root cannot contain control characters.".to_owned());
+    }
+    if document_root
+        .split(['/', '\\'])
+        .any(|component| component == ".." || component == ".")
+    {
+        return Err("The document root cannot contain `..` or `.` path components.".to_owned());
     }
     Ok(())
 }
@@ -1187,4 +1203,76 @@ fn validate_hostname(hostname: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn honest_document_roots_pass() {
+        // The documented freedom: relative (cwd-resolved) or absolute,
+        // any depth, both separators.
+        for root in [
+            "sites/acme",
+            "sites/sub/acme",
+            "acme",
+            "/var/www/acme",
+            "C:\\Sites\\acme",
+        ] {
+            assert!(validate_document_root(root).is_ok(), "{root} must pass");
+        }
+    }
+
+    #[test]
+    fn document_roots_reject_traversal_components() {
+        // A tenant root must be a fixed directory, never a relative
+        // escape — on either separator.
+        for root in [
+            "..",
+            ".",
+            "../public",
+            "sites/../public",
+            "/var/www/..",
+            "a\\..\\b",
+            "sites\\.",
+            "a/./b",
+        ] {
+            assert!(
+                validate_document_root(root).is_err(),
+                "{root} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn document_roots_reject_empty_oversized_and_control_characters() {
+        assert!(validate_document_root("").is_err());
+        assert!(validate_document_root(&"a".repeat(MAX_DOCUMENT_ROOT + 1)).is_err());
+        assert!(validate_document_root("sites/acme\u{0}").is_err());
+        assert!(validate_document_root("sites/ac\tme").is_err());
+    }
+
+    #[test]
+    fn honest_host_names_pass() {
+        for host in ["acme.example.com", "cms.app.localhost", "a-b.io"] {
+            assert!(validate_hostname(host).is_ok(), "{host} must pass");
+        }
+    }
+
+    #[test]
+    fn host_names_reject_non_bare_shapes() {
+        for host in [
+            "",
+            "https://acme.example.com",
+            "acme.example.com:8080",
+            "acme.example.com/path",
+            "user@acme.example.com",
+            ".acme.example.com",
+            "acme..example.com",
+            "acme example.com",
+        ] {
+            assert!(validate_hostname(host).is_err(), "{host} must be rejected");
+        }
+    }
 }

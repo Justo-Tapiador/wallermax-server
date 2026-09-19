@@ -107,7 +107,15 @@ USER wallermax
 VOLUME /data
 EXPOSE 8080
 
+# Container-level liveness against GET /health, using the Node.js the
+# image already ships for the JHS sidecar (no curl/wget added). The
+# port follows WALLERMAX_SERVER__PORT (the same override the port
+# binding honours), defaulting to 8080. `docker run` marks the
+# container unhealthy after three consecutive failures; orchestrators
+# (compose, swarm, k8s with a healthcheck probe) act on it.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.WALLERMAX_SERVER__PORT||8080)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
 # The binary is PID 1 and handles SIGINT/SIGTERM itself (graceful shutdown),
-# so no init wrapper is needed. There is no built-in HEALTHCHECK either:
-# probe GET /health (or the Prometheus endpoint) from your orchestrator.
+# so no init wrapper is needed.
 ENTRYPOINT ["/usr/local/bin/wallermax-server"]

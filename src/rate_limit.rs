@@ -14,11 +14,14 @@
 //! Note: the client IP is the TCP peer address. When running behind a
 //! reverse proxy, all traffic appears to come from the proxy; trusted
 //! `X-Forwarded-For` support is planned for a later phase.
+//!
+//! [`LoginThrottle`] is the credential-level companion: it counts *failed
+//! login attempts* (not requests) and locks brute-force sources out.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::IpAddr;
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Maximum number of tracked client IPs before stale buckets are swept.
 ///
@@ -145,6 +148,278 @@ fn sweep_stale(buckets: &mut HashMap<IpAddr, Bucket>, capacity: f64, refill_per_
             .saturating_duration_since(bucket.last_refill)
             .as_secs_f64();
         bucket.tokens + elapsed * refill_per_second < capacity
+    });
+}
+
+// ── Login brute-force throttling ──────────────────────────────────────
+
+/// Consecutive failures on one (IP, username) pair before the lockout.
+pub const LOGIN_MAX_FAILURES: u32 = 5;
+/// Base lockout for the first trip; each consecutive trip doubles it.
+const LOGIN_LOCKOUT_BASE: Duration = Duration::from_secs(30);
+/// Ceiling for the doubling lockout.
+const LOGIN_LOCKOUT_MAX: Duration = Duration::from_secs(15 * 60);
+/// Failures (any usernames) from one IP inside [`LOGIN_SPRAY_WINDOW`]
+/// before the whole address is locked: username spraying must not get a
+/// per-username budget.
+pub const LOGIN_SPRAY_FAILURES: usize = 20;
+/// Sliding window that counts a single IP's failures.
+const LOGIN_SPRAY_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// Lockout for a spraying address.
+const LOGIN_SPRAY_LOCKOUT: Duration = Duration::from_secs(5 * 60);
+/// How long an idle (unlocked) pair entry is worth keeping.
+const LOGIN_IDLE_HORIZON: Duration = Duration::from_secs(15 * 60);
+/// Bound on tracked keys per map (see [`RateLimiter`]'s sweep rationale).
+const MAX_TRACKED_LOGIN_KEYS: usize = 10_000;
+
+/// Failed-login throttling: the credential-level companion of the
+/// request-level [`RateLimiter`].
+///
+/// The token bucket bounds *every* request; this one bounds the
+/// *guessable* ones. Two granularities, one struct:
+///
+/// - **(client IP, username)** — [`LOGIN_MAX_FAILURES`] consecutive
+///   failures lock the pair for [`LOGIN_LOCKOUT_BASE`], doubling per
+///   consecutive lockout (capped at [`LOGIN_LOCKOUT_MAX`]). A
+///   successful login clears the pair's slate.
+/// - **client IP** alone — [`LOGIN_SPRAY_FAILURES`] failures against
+///   *any* usernames inside [`LOGIN_SPRAY_WINDOW`] lock the whole
+///   address for [`LOGIN_SPRAY_LOCKOUT`], so distributing guesses over
+///   many usernames buys nothing.
+///
+/// Like the buckets above, the maps are swept when they grow past
+/// [`MAX_TRACKED_LOGIN_KEYS`] entries, so a spoofed-address flood
+/// cannot grow memory without bound.
+///
+/// Determinism: every decision has an `_at` twin that takes the
+/// instant, so the lockout math is unit-tested without sleeping.
+pub struct LoginThrottle {
+    pairs: Mutex<HashMap<(IpAddr, String), PairEntry>>,
+    sprays: Mutex<HashMap<IpAddr, SprayEntry>>,
+}
+
+/// Failure bookkeeping for one (IP, username) pair.
+#[derive(Debug, Clone, Copy)]
+struct PairEntry {
+    failures: u32,
+    lockouts: u32,
+    locked_until: Option<Instant>,
+    last_seen: Instant,
+}
+
+/// Sliding-window bookkeeping for one address.
+#[derive(Debug, Default)]
+struct SprayEntry {
+    recent: VecDeque<Instant>,
+    locked_until: Option<Instant>,
+}
+
+impl Default for LoginThrottle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LoginThrottle {
+    /// An empty throttle.
+    pub fn new() -> Self {
+        Self {
+            pairs: Mutex::new(HashMap::new()),
+            sprays: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Whether a login attempt from `ip` for `username` may proceed.
+    ///
+    /// Pure check: it consumes nothing (only failures advance state),
+    /// so a rejected attempt stays rejected until its lockout expires.
+    pub fn check(&self, ip: IpAddr, username: &str) -> Decision {
+        self.check_at(ip, username, Instant::now())
+    }
+
+    /// [`Self::check`] at a given instant (deterministic tests).
+    pub fn check_at(&self, ip: IpAddr, username: &str, now: Instant) -> Decision {
+        let username = username.to_ascii_lowercase();
+
+        // The address-wide spray lock wins over everything: while it
+        // holds, no username from this address may proceed.
+        {
+            let sprays = self
+                .sprays
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(entry) = sprays.get(&ip) {
+                if let Some(locked_until) = entry.locked_until {
+                    if locked_until > now {
+                        return Decision::Rejected {
+                            retry_after_secs: seconds_until(locked_until, now),
+                        };
+                    }
+                }
+            }
+        }
+
+        let pairs = self
+            .pairs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if let Some(entry) = pairs.get(&(ip, username)) {
+            if let Some(locked_until) = entry.locked_until {
+                if locked_until > now {
+                    return Decision::Rejected {
+                        retry_after_secs: seconds_until(locked_until, now),
+                    };
+                }
+            }
+            return Decision::Allowed {
+                remaining: (LOGIN_MAX_FAILURES.saturating_sub(entry.failures)) as f64,
+            };
+        }
+        Decision::Allowed {
+            remaining: LOGIN_MAX_FAILURES as f64,
+        }
+    }
+
+    /// Records a failed login attempt from `ip` for `username`.
+    pub fn record_failure(&self, ip: IpAddr, username: &str) {
+        self.record_failure_at(ip, username, Instant::now());
+    }
+
+    /// [`Self::record_failure`] at a given instant (deterministic tests).
+    pub fn record_failure_at(&self, ip: IpAddr, username: &str, now: Instant) {
+        let username = username.to_ascii_lowercase();
+
+        // The pair lockout...
+        {
+            let mut pairs = self
+                .pairs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !pairs.contains_key(&(ip, username.clone())) && pairs.len() >= MAX_TRACKED_LOGIN_KEYS
+            {
+                sweep_stale_pairs(&mut pairs, now);
+                if pairs.len() >= MAX_TRACKED_LOGIN_KEYS {
+                    tracing::warn!(
+                        tracked = pairs.len(),
+                        "login throttle pair map reset: too many simultaneously active keys"
+                    );
+                    pairs.clear();
+                }
+            }
+            let entry = pairs.entry((ip, username)).or_insert(PairEntry {
+                failures: 0,
+                lockouts: 0,
+                locked_until: None,
+                last_seen: now,
+            });
+            entry.last_seen = now;
+            // A failure while already locked cannot normally arrive
+            // (attempts are checked first); extend nothing if it does.
+            if entry.locked_until.is_some_and(|until| until > now) {
+                return;
+            }
+            entry.failures += 1;
+            if entry.failures >= LOGIN_MAX_FAILURES {
+                entry.lockouts += 1;
+                entry.locked_until = Some(now + lockout_for(entry.lockouts));
+                entry.failures = 0;
+            }
+        }
+
+        // ...and the address-wide spray counter.
+        {
+            let mut sprays = self
+                .sprays
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !sprays.contains_key(&ip) && sprays.len() >= MAX_TRACKED_LOGIN_KEYS {
+                sweep_stale_sprays(&mut sprays, now);
+                if sprays.len() >= MAX_TRACKED_LOGIN_KEYS {
+                    sprays.clear();
+                }
+            }
+            let entry = sprays.entry(ip).or_default();
+            if entry.locked_until.is_some_and(|until| until > now) {
+                return;
+            }
+            entry.recent.push_back(now);
+            while entry
+                .recent
+                .front()
+                .is_some_and(|stamp| now.saturating_duration_since(*stamp) > LOGIN_SPRAY_WINDOW)
+            {
+                entry.recent.pop_front();
+            }
+            if entry.recent.len() >= LOGIN_SPRAY_FAILURES {
+                entry.locked_until = Some(now + LOGIN_SPRAY_LOCKOUT);
+                entry.recent.clear();
+                tracing::warn!(
+                    client_ip = %ip,
+                    "login throttled: the address failed logins across many usernames"
+                );
+            }
+        }
+    }
+
+    /// Records a successful login: the (IP, username) pair's slate is
+    /// wiped. The address-wide spray history is deliberately kept —
+    /// one honest user behind a NAT is not a spraying pattern's exit.
+    pub fn record_success(&self, ip: IpAddr, username: &str) {
+        let username = username.to_ascii_lowercase();
+        self.pairs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&(ip, username));
+    }
+
+    /// Number of tracked keys across both maps (observability/testing).
+    pub fn tracked_keys(&self) -> usize {
+        let pairs = self
+            .pairs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
+        let sprays = self
+            .sprays
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
+        pairs + sprays
+    }
+}
+
+/// The lockout for the `n`-th consecutive trip: 30s, 60s, 120s... capped.
+fn lockout_for(consecutive_lockouts: u32) -> Duration {
+    let factor = 1_u64
+        .checked_shl(consecutive_lockouts.saturating_sub(1).min(6))
+        .unwrap_or(64);
+    LOGIN_LOCKOUT_BASE
+        .saturating_mul(factor as u32)
+        .min(LOGIN_LOCKOUT_MAX)
+}
+
+/// `Retry-After` seconds until `until` (always at least one).
+fn seconds_until(until: Instant, now: Instant) -> u64 {
+    until.saturating_duration_since(now).as_secs().max(1)
+}
+
+/// Drops pair entries with no lock and no activity inside the horizon.
+fn sweep_stale_pairs(pairs: &mut HashMap<(IpAddr, String), PairEntry>, now: Instant) {
+    pairs.retain(|_, entry| {
+        entry.locked_until.is_some_and(|until| until > now)
+            || now.saturating_duration_since(entry.last_seen) < LOGIN_IDLE_HORIZON
+    });
+}
+
+/// Drops spray entries with no lock and an empty window.
+fn sweep_stale_sprays(sprays: &mut HashMap<IpAddr, SprayEntry>, now: Instant) {
+    sprays.retain(|_, entry| {
+        entry.locked_until.is_some_and(|until| until > now)
+            || entry
+                .recent
+                .back()
+                .is_some_and(|stamp| now.saturating_duration_since(*stamp) < LOGIN_SPRAY_WINDOW)
     });
 }
 
@@ -324,5 +599,167 @@ mod tests {
         }
 
         assert!(limiter.tracked_ips() <= MAX_TRACKED_IPS);
+    }
+
+    // ── LoginThrottle ────────────────────────────────────────────────
+
+    const OTHER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+    fn secs_later(base: Instant, secs: u64) -> Instant {
+        base + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn five_failures_lock_the_ip_username_pair() {
+        let throttle = LoginThrottle::new();
+        let t0 = Instant::now();
+
+        for _ in 0..LOGIN_MAX_FAILURES {
+            throttle.record_failure_at(IP, "alice", t0);
+        }
+
+        match throttle.check_at(IP, "alice", t0) {
+            Decision::Rejected { retry_after_secs } => {
+                assert!(retry_after_secs >= 30, "base lockout: {retry_after_secs}");
+            }
+            decision => panic!("expected a lockout, got {decision:?}"),
+        }
+
+        // The pair is the unit: another username from the same address
+        // is still below the spray threshold and may proceed.
+        assert!(matches!(
+            throttle.check_at(IP, "bob", t0),
+            Decision::Allowed { .. }
+        ));
+        // And another address is untouched.
+        assert!(matches!(
+            throttle.check_at(OTHER_IP, "alice", t0),
+            Decision::Allowed { .. }
+        ));
+    }
+
+    #[test]
+    fn usernames_are_matched_case_insensitively() {
+        let throttle = LoginThrottle::new();
+        let t0 = Instant::now();
+
+        for _ in 0..LOGIN_MAX_FAILURES {
+            throttle.record_failure_at(IP, "Alice", t0);
+        }
+
+        // "alice" is the same pair as "Alice".
+        assert!(matches!(
+            throttle.check_at(IP, "alice", t0),
+            Decision::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn lockouts_expire_and_escalate() {
+        let throttle = LoginThrottle::new();
+        let t0 = Instant::now();
+
+        // First trip: 30 seconds.
+        for _ in 0..LOGIN_MAX_FAILURES {
+            throttle.record_failure_at(IP, "alice", t0);
+        }
+        assert!(matches!(
+            throttle.check_at(IP, "alice", secs_later(t0, 29)),
+            Decision::Rejected { .. }
+        ));
+        assert!(matches!(
+            throttle.check_at(IP, "alice", secs_later(t0, 31)),
+            Decision::Allowed { .. }
+        ));
+
+        // Second consecutive trip: doubled.
+        for _ in 0..LOGIN_MAX_FAILURES {
+            throttle.record_failure_at(IP, "alice", secs_later(t0, 31));
+        }
+        assert!(matches!(
+            throttle.check_at(IP, "alice", secs_later(t0, 31 + 59)),
+            Decision::Rejected { .. }
+        ));
+        assert!(matches!(
+            throttle.check_at(IP, "alice", secs_later(t0, 31 + 61)),
+            Decision::Allowed { .. }
+        ));
+    }
+
+    #[test]
+    fn a_successful_login_clears_the_pair() {
+        let throttle = LoginThrottle::new();
+        let t0 = Instant::now();
+
+        for _ in 0..(LOGIN_MAX_FAILURES - 1) {
+            throttle.record_failure_at(IP, "alice", t0);
+        }
+        throttle.record_success(IP, "alice");
+
+        // The slate is wiped: it takes a full new budget to trip again.
+        for _ in 0..(LOGIN_MAX_FAILURES - 1) {
+            throttle.record_failure_at(IP, "alice", t0);
+        }
+        assert!(matches!(
+            throttle.check_at(IP, "alice", t0),
+            Decision::Allowed { .. }
+        ));
+    }
+
+    #[test]
+    fn username_spraying_locks_the_whole_address() {
+        let throttle = LoginThrottle::new();
+        let t0 = Instant::now();
+
+        for i in 0..LOGIN_SPRAY_FAILURES {
+            throttle.record_failure_at(IP, &format!("victim-{i}"), t0);
+        }
+
+        // Even a brand-new username from the spraying address is out...
+        assert!(matches!(
+            throttle.check_at(IP, "fresh-target", t0),
+            Decision::Rejected { .. }
+        ));
+        // ...while other addresses keep their budget.
+        assert!(matches!(
+            throttle.check_at(OTHER_IP, "fresh-target", t0),
+            Decision::Allowed { .. }
+        ));
+    }
+
+    #[test]
+    fn the_spray_window_and_lock_expire_together() {
+        let throttle = LoginThrottle::new();
+        let t0 = Instant::now();
+
+        for i in 0..LOGIN_SPRAY_FAILURES {
+            throttle.record_failure_at(IP, &format!("victim-{i}"), t0);
+        }
+        assert!(matches!(
+            throttle.check_at(IP, "anyone", t0),
+            Decision::Rejected { .. }
+        ));
+
+        // Five minutes later the spray lock has expired AND the window
+        // has slid past every counted failure.
+        let after = t0 + LOGIN_SPRAY_WINDOW + LOGIN_SPRAY_LOCKOUT + Duration::from_secs(1);
+        assert!(matches!(
+            throttle.check_at(IP, "anyone", after),
+            Decision::Allowed { .. }
+        ));
+    }
+
+    #[test]
+    fn login_keys_stay_bounded() {
+        let throttle = LoginThrottle::new();
+        let t0 = Instant::now();
+
+        // Far more distinct pairs than the tracking bound.
+        for i in 0..(MAX_TRACKED_LOGIN_KEYS + 50) as u32 {
+            let ip = IpAddr::V4(Ipv4Addr::new(10, 0, (i >> 8) as u8, (i & 0xff) as u8));
+            throttle.record_failure_at(ip, "someone", t0);
+        }
+
+        assert!(throttle.tracked_keys() <= 2 * MAX_TRACKED_LOGIN_KEYS);
     }
 }

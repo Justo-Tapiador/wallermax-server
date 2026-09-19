@@ -34,11 +34,11 @@ use crate::db::{
 use crate::external_api::ExternalApi;
 use crate::metrics::Metrics;
 use crate::proxy::{self, Cidr};
-use crate::rate_limit::RateLimiter;
+use crate::rate_limit::{LoginThrottle, RateLimiter};
 use crate::template_engine::renderer::BrokenRenderer;
 use crate::template_engine::{
     AutoRenderer, JhsEngine, JhsOptions, RequireOptions, SidecarOptions, SidecarRenderer,
-    TemplateRenderer,
+    StrictSidecar, TemplateRenderer,
 };
 use crate::vhosts::HostBinding;
 
@@ -181,7 +181,13 @@ impl TemplateEngine {
                 renderer = boa;
             }
             "sidecar" => match SidecarRenderer::spawn(&sidecar_options) {
-                Ok(sidecar) => renderer = sidecar,
+                Ok(sidecar) => {
+                    // Strict, but not brittle: a crashed sidecar is
+                    // re-spawned in the background (renders answer the
+                    // transport error until the fresh one lands).
+                    renderer =
+                        std::sync::Arc::new(StrictSidecar::new(sidecar, sidecar_options.clone()));
+                }
                 Err(error) => {
                     sidecar_spawn_error = Some(error.clone());
                     renderer = std::sync::Arc::new(BrokenRenderer::new(error));
@@ -190,7 +196,11 @@ impl TemplateEngine {
             _ => match SidecarRenderer::spawn(&sidecar_options) {
                 Ok(sidecar) => {
                     tracing::info!("template backend: auto (Node sidecar, boa fallback)");
-                    renderer = std::sync::Arc::new(AutoRenderer::new(sidecar, boa));
+                    renderer = std::sync::Arc::new(AutoRenderer::new(
+                        sidecar,
+                        sidecar_options.clone(),
+                        boa,
+                    ));
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -436,6 +446,10 @@ struct StateInner {
     requests_served: AtomicU64,
     rate_limited_requests: AtomicU64,
     rate_limiter: RateLimiter,
+    /// Credential-level login throttling (see [`LoginThrottle`]):
+    /// failed-login lockouts per (client IP, username) and per IP,
+    /// independent of the request-level token bucket.
+    login_throttle: LoginThrottle,
     security_headers: Vec<(HeaderName, HeaderValue)>,
     /// The resolved `[external_api]` proxy (endpoints plus client), or
     /// an inert instance while no endpoints are configured.
@@ -521,6 +535,7 @@ impl AppState {
             config.rate_limit.capacity,
             config.rate_limit.refill_per_second,
         );
+        let login_throttle = LoginThrottle::new();
         let trusted_proxies = proxy::Cidr::parse_all(&config.server.trusted_proxies);
         if !config.server.trusted_proxies.is_empty() && trusted_proxies.is_empty() {
             // Cannot happen: validation rejects unparsable entries. The
@@ -578,6 +593,7 @@ impl AppState {
                 requests_served: AtomicU64::new(0),
                 rate_limited_requests: AtomicU64::new(0),
                 rate_limiter,
+                login_throttle,
                 security_headers,
                 external_api,
                 trusted_proxies,
@@ -598,6 +614,11 @@ impl AppState {
     /// Returns the shared rate limiter.
     pub fn rate_limiter(&self) -> &RateLimiter {
         &self.inner.rate_limiter
+    }
+
+    /// Returns the shared login brute-force throttle.
+    pub fn login_throttle(&self) -> &LoginThrottle {
+        &self.inner.login_throttle
     }
 
     /// Returns the security header pairs applied to every response.

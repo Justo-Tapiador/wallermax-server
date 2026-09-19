@@ -242,9 +242,8 @@ fn parse_labels(text: Option<&str>) -> BTreeMap<String, String> {
 /// timeouts, non-2xx statuses and truncated answers.
 pub fn http_get_text(url: &str, timeout: Duration) -> Result<String, String> {
     let (authority, path) = split_url(url)?;
-    let address = resolve(&authority)?;
     let mut stream =
-        connect(&address).map_err(|error| format!("could not reach {url}: {error}"))?;
+        connect(&authority).map_err(|error| format!("could not reach {url}: {error}"))?;
     stream
         .set_read_timeout(Some(timeout))
         .map_err(|error| format!("could not arm the read timeout: {error}"))?;
@@ -308,24 +307,80 @@ fn split_url(url: &str) -> Result<(String, String), String> {
     Ok((authority.to_owned(), path))
 }
 
-/// Resolves `host:port` (defaulting port 80) to the first socket address.
-fn resolve(authority: &str) -> Result<SocketAddr, String> {
-    let port = match authority.rsplit_once(':') {
-        Some((_, port)) => port
-            .parse::<u16>()
-            .map_err(|_| format!("invalid port in `{authority}`"))?,
-        None => 80,
+/// Splits an authority into its host and port, defaulting the port to
+/// 80.
+///
+/// Understands every shape an `http://` URL can carry: `host`,
+/// `host:port`, bracketed IPv6 (`[::1]:8080`) and bare IPv6 (`::1` —
+/// the colons belong to the address, they are not separators).
+fn host_port(authority: &str) -> Result<(&str, u16), String> {
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        // Bracketed IPv6: `[::1]` or `[::1]:8080`.
+        let (host, tail) = rest
+            .split_once(']')
+            .ok_or_else(|| format!("unterminated IPv6 address in `{authority}`"))?;
+        let port = match tail.strip_prefix(':') {
+            Some(port) => port,
+            None if tail.is_empty() => "",
+            None => {
+                return Err(format!(
+                    "garbage after the IPv6 address in `{authority}`: `{tail}`"
+                ))
+            }
+        };
+        (host, port)
+    } else if authority.matches(':').count() > 1 {
+        // Bare IPv6: every colon belongs to the address itself.
+        (authority, "")
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => (host, port),
+            None => (authority, ""),
+        }
     };
-    authority
-        .to_socket_addrs()
-        .map_err(|error| format!("could not resolve `{authority}`: {error}"))?
-        .find(|addr| addr.port() == port)
-        .ok_or_else(|| format!("no address answered for `{authority}`"))
+    let port = if port.is_empty() {
+        80
+    } else {
+        port.parse::<u16>()
+            .map_err(|_| format!("invalid port in `{authority}`"))?
+    };
+    Ok((host, port))
 }
 
-/// Connects with a bounded dial so a dead endpoint fails fast.
-fn connect(address: &SocketAddr) -> std::io::Result<TcpStream> {
-    TcpStream::connect_timeout(address, Duration::from_secs(2))
+/// Resolves `host:port` (defaulting port 80) to every address it names.
+///
+/// The host and the port are resolved **as a pair**: resolving the bare
+/// string only works when the port is spelled out, so an origin like
+/// `http://localhost` used to die with `invalid socket address` no
+/// matter whether the server was running — the bug behind a dashboard
+/// banner that no amount of Refresh ever cleared.
+fn resolve_all(authority: &str) -> Result<Vec<SocketAddr>, String> {
+    let (host, port) = host_port(authority)?;
+    let addresses: Vec<SocketAddr> = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| format!("could not resolve `{authority}`: {error}"))?
+        .collect();
+    if addresses.is_empty() {
+        return Err(format!("no address answered for `{authority}`"));
+    }
+    Ok(addresses)
+}
+
+/// Connects to the first address `authority` names that accepts the
+/// connection. `localhost` can name both `::1` and `127.0.0.1`, and a
+/// server that binds only one of them still answers.
+fn connect(authority: &str) -> Result<TcpStream, String> {
+    let addresses = resolve_all(authority)?;
+    let mut last = String::new();
+    for address in &addresses {
+        match TcpStream::connect_timeout(address, Duration::from_secs(2)) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last = format!("{address}: {error}"),
+        }
+    }
+    Err(format!(
+        "every address of `{authority}` refused the connection — last tried {last}"
+    ))
 }
 
 /// Reassembles a chunked body. Tolerates a trailing truncated chunk (the
@@ -451,5 +506,47 @@ some_other_metric 42
     fn chunked_bodies_are_reassembled() {
         let dechunked = dechunk("4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n");
         assert_eq!(dechunked, "Wikipedia");
+    }
+
+    #[test]
+    fn port_less_authorities_default_to_port_80() {
+        // The regression behind the stubborn dashboard banner: an origin
+        // like `http://localhost` used to fail with "invalid socket
+        // address" regardless of the server's state.
+        let (host, port) = host_port("localhost").expect("a port-less authority");
+        assert_eq!(host, "localhost");
+        assert_eq!(port, 80);
+        let addresses = resolve_all("localhost").expect("localhost resolves");
+        assert!(!addresses.is_empty());
+        assert!(
+            addresses.iter().all(|addr| addr.port() == 80),
+            "every candidate carries the default port: {addresses:?}"
+        );
+    }
+
+    #[test]
+    fn ipv6_authorities_keep_their_colons() {
+        assert_eq!(host_port("[::1]:9000").expect("bracketed"), ("::1", 9000));
+        assert_eq!(
+            host_port("[::1]").expect("bracketed, port-less"),
+            ("::1", 80)
+        );
+        assert_eq!(host_port("::1").expect("bare ipv6"), ("::1", 80));
+        assert_eq!(
+            host_port("127.0.0.1:8123").expect("host and port"),
+            ("127.0.0.1", 8123)
+        );
+        assert!(resolve_all("[::1]:9000").is_ok());
+    }
+
+    #[test]
+    fn malformed_authorities_are_rejected_by_name() {
+        for authority in ["localhost:http", "[::1", "[::1]junk"] {
+            let error = resolve_all(authority).expect_err("must be rejected");
+            assert!(
+                error.contains(authority),
+                "the complaint names `{authority}`: {error}"
+            );
+        }
     }
 }

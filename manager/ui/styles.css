@@ -121,6 +121,9 @@ main { min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 .banner.error { border-color: #7c2745; background: #2c0f1c; color: #ffc9d5; }
 .banner.ok { border-color: #1c5c40; background: #0a261b; color: #b8f3d9; }
 
+/* The takeover button rides inside its banner, below the diagnosis. */
+.banner .btn { margin-top: 10px; }
+
 .muted { color: var(--muted); }
 .green { color: var(--green); }
 .red { color: var(--red); }

@@ -36,6 +36,12 @@ pub struct Settings {
     /// Base origin the manager talks to: health, metrics and stats URLs
     /// are all derived from it, e.g. `http://127.0.0.1:8080`.
     pub origin: String,
+    /// The website the dashboard links to while the server runs —
+    /// e.g. `https://localhost` when TLS terminates at the server
+    /// itself. Empty means "the origin" (the common case: the site and
+    /// the management endpoints share one address). Unlike the origin
+    /// this one is opened in a browser, so `https://` is allowed.
+    pub site_url: String,
     /// Path of the health endpoint relative to `origin`.
     pub health_path: String,
     /// Path of the Prometheus endpoint relative to `origin`.
@@ -57,6 +63,7 @@ impl Default for Settings {
             working_dir: String::new(),
             config_dir: String::new(),
             origin: String::from("http://127.0.0.1:8080"),
+            site_url: String::new(),
             health_path: String::from("/health"),
             metrics_path: String::from("/metrics"),
             stats_path: String::from("/api/stats"),
@@ -135,6 +142,17 @@ impl Settings {
         self.url(&self.stats_path)
     }
 
+    /// The website URL shown while the server runs: `site_url` when
+    /// set, the shared origin otherwise.
+    pub fn site_url(&self) -> String {
+        let site = self.site_url.trim();
+        if site.is_empty() {
+            self.origin.trim_end_matches('/').to_owned()
+        } else {
+            site.trim_end_matches('/').to_owned()
+        }
+    }
+
     /// Joins `path` onto the origin, tolerating trailing slashes on
     /// either side and missing leading slashes on the path.
     fn url(&self, path: &str) -> String {
@@ -209,6 +227,7 @@ mod tests {
             working_dir: String::from("C:/wallermax"),
             config_dir: String::from("C:/wallermax"),
             origin: String::from("http://127.0.0.1:9000/"),
+            site_url: String::from("https://localhost"),
             health_path: String::from("/health"),
             metrics_path: String::from("/metrics"),
             stats_path: String::from("/api/stats"),
@@ -259,6 +278,16 @@ mod tests {
         assert_eq!(settings.health_url(), "http://127.0.0.1:8080/health");
         assert_eq!(settings.metrics_url(), "http://127.0.0.1:8080/metrics");
         assert_eq!(settings.stats_url(), "http://127.0.0.1:8080/api/stats");
+    }
+
+    #[test]
+    fn the_site_url_falls_back_to_the_origin() {
+        let mut settings = Settings::default();
+        assert_eq!(settings.site_url(), settings.origin);
+        settings.origin = String::from("http://127.0.0.1:9000/");
+        assert_eq!(settings.site_url(), "http://127.0.0.1:9000");
+        settings.site_url = String::from("  https://localhost  ");
+        assert_eq!(settings.site_url(), "https://localhost");
     }
 }
 

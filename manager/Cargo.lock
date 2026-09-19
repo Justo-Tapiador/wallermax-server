@@ -6032,11 +6032,12 @@ dependencies = [
  "serde_json",
  "toml_edit 0.22.27",
  "wallermax-server",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "wallermax-server"
-version = "0.20.0"
+version = "0.21.0"
 dependencies = [
  "argon2",
  "async-trait",

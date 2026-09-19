@@ -248,18 +248,25 @@ const isBuiltin = (name) =>
        'tty', 'url', 'util', 'v8', 'vm', 'worker_threads', 'zlib'].includes(name);
 
 /**
- * Builds the per-render `require()` handed to templates. The banner uses
- * the port's exact message wording (node-jhs2's own banned_require error
- * is a JSON blob, which the port never adopted); built-ins resolve
+ * Builds the `require()` handed to templates (and, recursively, to the
+ * local modules those templates load — `base` is the requiring module's
+ * directory, so relative specs resolve like real CommonJS). The banner
+ * uses the port's exact message wording (node-jhs2's own banned_require
+ * error is a JSON blob, which the port never adopted); built-ins resolve
  * against the REAL Node require — the whole point of the sidecar
  * backend; local modules load from the modules directory with the
  * port's probe order, containment check and per-render instance cache.
+ *
+ * The banner fires for EVERY hop: a template loading a local module
+ * that itself requires a forbidden module sees the same rejection as a
+ * direct require — the module-level wrapper delegates back here, never
+ * straight to the loader.
  *
  * The wrapper is installed by assigning `engine.require_filter`: the
  * engine reads that property when it builds the sandbox context, so the
  * assignment wins over the constructor's bound original.
  */
-function makeRequire(moduleCache) {
+function makeRequire(moduleCache, base = '') {
   function jhsRequire(spec) {
     if (typeof spec !== 'string') {
       // The port's boa error renders as "TypeError: <message>"; bake the
@@ -300,7 +307,7 @@ function makeRequire(moduleCache) {
     }
 
     // 3. Local CommonJS modules under the modules directory.
-    return loadLocalModule(spec, name, '', moduleCache);
+    return loadLocalModule(spec, name, base, moduleCache);
   }
   return jhsRequire;
 }
@@ -437,9 +444,13 @@ function evaluateModule(spec, canonical, moduleCache) {
       `module '${canonical}' failed to load: ${error.message}`,
     );
   }
+  // The inner require is the SAME wrapper the template itself gets:
+  // banner first, real built-ins, then local modules resolved relative
+  // to this module's directory — never a private lane that skips the
+  // banner.
   wrapper(
     module.exports,
-    (innerSpec) => loadLocalModule(innerSpec, innerSpec.trim().replace(/^node:/, ''), base, moduleCache),
+    makeRequire(moduleCache, base),
     module,
     canonical,
     path.dirname(canonical),

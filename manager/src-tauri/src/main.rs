@@ -25,7 +25,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::State;
 
-use wallermax_manager_core::app::{App, DashboardSnapshot};
+use wallermax_manager_core::app::{App, DashboardSnapshot, PortStatus};
 use wallermax_manager_core::config_manager::{BackupInfo, ConfigWhich};
 use wallermax_manager_core::process_manager::{LogPage, ProcessStatus, StartReport};
 use wallermax_manager_core::settings::Settings;
@@ -127,6 +127,27 @@ async fn server_start(state: State<'_, Arc<App>>) -> Result<StartReport, String>
         .map_err(|error| format!("the start task failed: {error}"))?
 }
 
+/// The takeover: the one-click recovery for a port still held by a
+/// previous session's server — same slow-shape as `server_start` (the
+/// taskkills and the port wait must never freeze the window).
+#[tauri::command]
+async fn server_takeover(state: State<'_, Arc<App>>) -> Result<StartReport, String> {
+    let app = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || app.takeover_and_start())
+        .await
+        .map_err(|error| format!("the takeover task failed: {error}"))?
+}
+
+/// The port probe — the connect attempt (plus the netstat/tasklist
+/// pass on Windows while the port is busy) is slow by UI standards.
+#[tauri::command]
+async fn port_status(state: State<'_, Arc<App>>) -> Result<PortStatus, String> {
+    let app = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || app.port_status())
+        .await
+        .map_err(|error| format!("the port probe failed: {error}"))
+}
+
 #[tauri::command]
 async fn server_stop(state: State<'_, Arc<App>>) -> Result<(), String> {
     let app = state.inner().clone();
@@ -155,11 +176,12 @@ async fn dashboard_fetch(state: State<'_, Arc<App>>) -> Result<DashboardSnapshot
     tauri::async_runtime::spawn_blocking(move || app.fetch_dashboard())
         .await
         .map_err(|error| format!("the dashboard task failed: {error}"))
-        
 }
 
-/// The per-platform "open this folder in the file manager" program.
-fn folder_opener() -> &'static str {
+/// The per-platform "open this in the user's world" program: folders
+/// land in the file manager, URLs in the default browser (`explorer`,
+/// `open` and `xdg-open` all take both).
+fn system_opener() -> &'static str {
     if cfg!(windows) {
         "explorer"
     } else if cfg!(target_os = "macos") {
@@ -178,11 +200,29 @@ fn open_config_folder(state: State<'_, Arc<App>>) -> Result<(), String> {
             dir.display()
         ));
     }
-    Command::new(folder_opener())
+    Command::new(system_opener())
         .arg(&dir)
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("could not open {}: {error}", dir.display()))
+}
+
+#[tauri::command]
+fn open_site(state: State<'_, Arc<App>>) -> Result<(), String> {
+    let url = state.site_url();
+    // The URL may have been hand-edited into the settings file since
+    // the last save; the scheme guard keeps the opener from being
+    // pointed at local files.
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(format!(
+            "the site URL must be an `http://` or `https://` URL; got `{url}`"
+        ));
+    }
+    Command::new(system_opener())
+        .arg(&url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("could not open {url}: {error}"))
 }
 
 fn main() {
@@ -202,11 +242,14 @@ fn main() {
             config_backups,
             config_restore_backup,
             server_start,
+            server_takeover,
             server_stop,
             server_status,
             server_logs,
+            port_status,
             dashboard_fetch,
-            open_config_folder
+            open_config_folder,
+            open_site
         ])
         .run(tauri::generate_context!())
         .expect("error while running wallermax-manager");

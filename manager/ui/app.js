@@ -115,6 +115,11 @@ const state = {
   logCursor: 0,
   logLines: [],
   timers: { status: null, logs: null, dashboard: null },
+  lastStatus: null,       // the process state behind the dashboard's banners
+  origin: "",             // the origin the endpoints derive from
+  detectedOrigin: "",     // the server's own address, read from wallermax.toml
+  siteUrl: "",            // the website URL behind the Open website buttons
+  portStatus: null,        // who holds the server's port, when someone does
 };
 
 /* ------------------------------------------------------------------ */
@@ -124,6 +129,7 @@ const state = {
 async function pollStatus() {
   try {
     const status = await invoke("server_status");
+    state.lastStatus = status;
     paintStatus(status);
   } catch (error) {
     /* a transient IPC problem must not kill the loop */
@@ -134,7 +140,23 @@ async function pollStatus() {
 async function pollDashboard() {
   try {
     const dash = await invoke("dashboard_fetch");
+    // The port probe answers the question the unreachable banner
+    // cannot: is the server's port already held by someone else (a
+    // leftover from an earlier session)? Only asked when it matters —
+    // nothing reachable and nothing supervised.
+    const running = state.lastStatus && state.lastStatus.state === "running";
+    if (!dash.reachable && !running) {
+      try {
+        state.portStatus = await invoke("port_status");
+      } catch (error) {
+        console.error("port probe failed", error);
+        state.portStatus = null;
+      }
+    } else {
+      state.portStatus = null;
+    }
     paintDashboard(dash);
+    paintTakeover();
   } catch (error) {
     showBanner("dash-error", String(error), "error");
   }
@@ -197,13 +219,46 @@ function paintStatus(status) {
   $("btn-stop").disabled = !running;
   $("btn-stop-side").disabled = !running;
 
+  // The website link lives exactly as long as the server does: shown
+  // while the process runs, gone the moment it stops. A button — not
+  // an anchor — so the click goes to the OS opener and never navigates
+  // the manager's own webview.
+  for (const node of [$("btn-open-site"), $("btn-open-site-side")]) {
+    node.style.display = running ? "" : "none";
+    node.title = running && state.siteUrl ? state.siteUrl : "";
+  }
+
   $("dash-state").textContent = running ? "Running" : exited ? "Exited" : "Stopped";
   $("dash-state-sub").textContent = running ? `pid ${status.pid}` : "process supervision";
 }
 
 function paintDashboard(dash) {
-  showBanner("dash-notice", dash.reachable ? "" : "The server is not answering yet — start it from the sidebar.", dash.reachable ? "" : "");
-  showBanner("dash-error", dash.reachable ? "" : (dash.error || "endpoint unreachable"), "error");
+  // The banners must say what is actually wrong. "Start it from the
+  // sidebar" is a lie when the process IS running and the endpoint is
+  // what refuses to answer — that is an origin/port mismatch, and the
+  // message has to point there.
+  const status = state.lastStatus;
+  const running = status && status.state === "running";
+  const exited = status && status.state === "exited";
+  if (dash.reachable) {
+    showBanner("dash-notice", "");
+    showBanner("dash-error", "");
+  } else if (running) {
+    const where = state.origin ? ` at ${state.origin}` : "";
+    showBanner("dash-notice", `The server process is running (pid ${status.pid}) but its endpoint${where} is not answering — the origin in Settings must match the server's own host and port.`, "error");
+    showBanner("dash-error", dash.error || "endpoint unreachable", "error");
+  } else if (exited) {
+    showBanner("dash-notice", "The server process has exited — the recent output is on the Logs page.", "");
+    showBanner("dash-error", "");
+  } else if (state.portStatus && state.portStatus.occupied) {
+    // The takeover banner below tells the whole story — the notice must
+    // not suggest a start that would only collide with the squatter.
+    showBanner("dash-notice", "");
+    showBanner("dash-error", "");
+  } else {
+    showBanner("dash-notice", "The server is not answering yet — start it from the sidebar.", "");
+    showBanner("dash-error", "");
+  }
   $("dash-uptime").textContent = dash.reachable ? fmtDuration(dash.uptime_seconds) : "—";
   $("dash-requests").textContent = fmtNumber(dash.requests_total);
   $("dash-rps").textContent = fmtNumber(dash.requests_per_second);
@@ -526,15 +581,37 @@ async function loadSettings() {
     $("set-workdir").value = settings.working_dir;
     $("set-configdir").value = settings.config_dir;
     $("set-origin").value = settings.origin;
+    $("set-site").value = settings.site_url || "";
     $("set-health").value = settings.health_path;
     $("set-metrics").value = settings.metrics_path;
     $("set-stats").value = settings.stats_path;
     $("set-probe").value = settings.probe_window_ms;
     $("set-grace").value = settings.stop_grace_ms;
     $("origin-chip").textContent = settings.origin;
+    state.origin = settings.origin;
+    state.siteUrl = (settings.site_url || "").trim() || settings.origin;
+    await loadOriginHint();
   } catch (error) {
     toast(String(error), "error");
   }
+}
+
+/* The server's own address, straight out of wallermax.toml — the
+ * one-click correction for a mismatched origin (the classic
+ * "http://localhost" versus a server bound to 127.0.0.1:8080). */
+async function loadOriginHint() {
+  const [host, port] = await Promise.all([
+    invoke("config_get_value", { file: "base", key: "server.host" }).catch(() => null),
+    invoke("config_get_value", { file: "base", key: "server.port" }).catch(() => null),
+  ]);
+  const detectedHost = host || "127.0.0.1";
+  const detectedPort = String(port || "8080");
+  const detected = `http://${detectedHost}:${detectedPort}`;
+  state.detectedOrigin = detected;
+  const hint = $("origin-hint");
+  if (!hint) return;
+  $("origin-hint-text").textContent = `the server's wallermax.toml binds ${detectedHost}:${detectedPort}`;
+  hint.style.display = "block";
 }
 
 async function saveSettings() {
@@ -543,6 +620,7 @@ async function saveSettings() {
     working_dir: $("set-workdir").value.trim(),
     config_dir: $("set-configdir").value.trim(),
     origin: $("set-origin").value.trim(),
+    site_url: $("set-site").value.trim(),
     health_path: $("set-health").value.trim(),
     metrics_path: $("set-metrics").value.trim(),
     stats_path: $("set-stats").value.trim(),
@@ -555,9 +633,73 @@ async function saveSettings() {
     $("origin-chip").textContent = settings.origin;
     await loadPaths();
     pollDashboard();
+    pollStatus();
   } catch (error) {
     toast(String(error), "error");
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* the port banner: who holds it, and the one-click takeover            */
+/* ------------------------------------------------------------------ */
+
+/* Painted after the unreachable banner: when something already holds
+ * the address a fresh server would bind, the banner names it — and,
+ * when every owner is the configured server program (the classic
+ * invisible leftover from an earlier session), offers to take the
+ * port over and start. */
+function paintTakeover() {
+  const node = $("dash-takeover");
+  const status = state.portStatus;
+  const running = state.lastStatus && state.lastStatus.state === "running";
+  if (!status || !status.occupied || running) {
+    node.style.display = "none";
+    return;
+  }
+  const who = status.owners.length
+    ? status.owners.map((owner) => `pid ${owner.pid} (${owner.image})`).join(", ")
+    : "a process this OS could not name";
+  const cause = status.owners.length
+    ? " — likely a server left over from an earlier manager session (servers run without a console window)."
+    : ".";
+  node.className = "banner error";
+  node.replaceChildren(
+    document.createTextNode(
+      `The server's address ${status.address} is already in use by ${who}${cause}`
+    )
+  );
+  if (status.takeover_ready) {
+    const button = document.createElement("button");
+    button.id = "btn-takeover";
+    button.className = "btn small";
+    button.textContent = "Take over the port and start";
+    button.addEventListener("click", takeoverStart);
+    node.append(document.createElement("br"), button);
+  }
+  node.style.display = "block";
+}
+
+async function takeoverStart() {
+  const button = $("btn-takeover");
+  if (button) button.disabled = true;
+  try {
+    const report = await invoke("server_takeover");
+    if (report.probe.booted) {
+      showBanner("probe-banner", report.probe.output.trim()
+        ? `Takeover done — boot probe: healthy.\n${report.probe.output.trim()}`
+        : `Takeover done — the process is up (pid ${report.pid}).`, "ok");
+    } else {
+      showBanner("probe-banner",
+        `Takeover done, but the boot probe failed${report.probe.exit_code === null ? "" : ` (exit code ${report.probe.exit_code})`}.\n${report.probe.output.trim() || "no output captured"}`,
+        "error");
+    }
+  } catch (error) {
+    showBanner("probe-banner", String(error), "error");
+  }
+  state.portStatus = null;
+  paintTakeover();
+  pollStatus();
+  pollDashboard();
 }
 
 /* ------------------------------------------------------------------ */
@@ -578,6 +720,15 @@ async function startServer() {
     }
   } catch (error) {
     showBanner("probe-banner", String(error), "error");
+    // A refused start may be a busy port — the banner knows who holds
+    // it, so ask right away (the takeover button rides on it).
+    try {
+      state.portStatus = await invoke("port_status");
+    } catch (probeError) {
+      console.error("port probe failed", probeError);
+      state.portStatus = null;
+    }
+    paintTakeover();
   }
   pollStatus();
 }
@@ -590,6 +741,14 @@ async function stopServer() {
     toast(String(error), "error");
   }
   pollStatus();
+}
+
+async function openSite() {
+  try {
+    await invoke("open_site");
+  } catch (error) {
+    toast(String(error), "error");
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -695,6 +854,8 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btn-stop").addEventListener("click", stopServer);
   $("btn-start-side").addEventListener("click", startServer);
   $("btn-stop-side").addEventListener("click", stopServer);
+  $("btn-open-site").addEventListener("click", openSite);
+  $("btn-open-site-side").addEventListener("click", openSite);
   $("btn-refresh-status").addEventListener("click", pollStatus);
   $("btn-refresh-dash").addEventListener("click", pollDashboard);
 
@@ -716,6 +877,12 @@ window.addEventListener("DOMContentLoaded", () => {
 
   $("btn-settings-save").addEventListener("click", saveSettings);
 
+  $("btn-use-origin").addEventListener("click", () => {
+    if (state.detectedOrigin) {
+      $("set-origin").value = state.detectedOrigin;
+    }
+  });
+
   $("log-filter").addEventListener("input", renderLogs);
   $("log-show-out").addEventListener("change", renderLogs);
   $("log-show-err").addEventListener("change", renderLogs);
@@ -728,4 +895,5 @@ window.addEventListener("DOMContentLoaded", () => {
   restartTimers();
   showPage("dashboard");
   loadPaths();
+  loadSettings();
 });
