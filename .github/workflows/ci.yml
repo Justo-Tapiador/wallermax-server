@@ -6,7 +6,10 @@
 #   test    — the full test suite on Linux and Windows (the two platforms
 #             the project is developed against);
 #   manager — the wallermax-manager workspace (fmt + clippy + tests), on
-#             Linux with the Tauri system dependencies installed;
+#             Linux and Windows alike — the manager is a Windows-first
+#             tool, and its Windows-only code (kill-on-close job object,
+#             netstat/tasklist port owners) must compile and pass its
+#             tests there, not just be cfg-gated out on Linux;
 #   docker  — builds the container image with the Dockerfile (which pins
 #             the MSRV toolchain, so this doubles as the MSRV check) and
 #             smoke-tests /health and /metrics inside the container.
@@ -75,8 +78,12 @@ jobs:
         run: cargo test --locked
 
   manager:
-    name: manager (fmt + clippy + test)
-    runs-on: ubuntu-latest
+    name: "manager (${{ matrix.os }}: fmt + clippy + test)"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: manager
@@ -86,7 +93,9 @@ jobs:
 
       # The Tauri shell (manager/src-tauri) compiles wry/webkit2gtk on
       # Linux; the core crate needs none of this but shares the job.
+      # Windows needs nothing: WebView2 ships with the runner.
       - name: Install Tauri Linux system dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
