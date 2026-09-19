@@ -209,6 +209,10 @@
             <div class="field">
               <label>Origin <code>— health, metrics and stats derive from it</code></label>
               <input type="text" id="set-origin" placeholder="http://127.0.0.1:8080">
+              <div class="muted" id="origin-hint" style="display:none; font-size:12.5px; margin-top:6px">
+                <span id="origin-hint-text">—</span>
+                <button class="btn small" id="btn-use-origin" type="button">Use this origin</button>
+              </div>
             </div>
             <div class="field">
               <label>Health path</label><input type="text" id="set-health" placeholder="/health">

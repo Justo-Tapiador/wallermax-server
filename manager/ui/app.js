@@ -115,6 +115,9 @@ const state = {
   logCursor: 0,
   logLines: [],
   timers: { status: null, logs: null, dashboard: null },
+  lastStatus: null,       // the process state behind the dashboard's banners
+  origin: "",             // the origin the endpoints derive from
+  detectedOrigin: "",     // the server's own address, read from wallermax.toml
 };
 
 /* ------------------------------------------------------------------ */
@@ -124,6 +127,7 @@ const state = {
 async function pollStatus() {
   try {
     const status = await invoke("server_status");
+    state.lastStatus = status;
     paintStatus(status);
   } catch (error) {
     /* a transient IPC problem must not kill the loop */
@@ -202,8 +206,27 @@ function paintStatus(status) {
 }
 
 function paintDashboard(dash) {
-  showBanner("dash-notice", dash.reachable ? "" : "The server is not answering yet — start it from the sidebar.", dash.reachable ? "" : "");
-  showBanner("dash-error", dash.reachable ? "" : (dash.error || "endpoint unreachable"), "error");
+  // The banners must say what is actually wrong. "Start it from the
+  // sidebar" is a lie when the process IS running and the endpoint is
+  // what refuses to answer — that is an origin/port mismatch, and the
+  // message has to point there.
+  const status = state.lastStatus;
+  const running = status && status.state === "running";
+  const exited = status && status.state === "exited";
+  if (dash.reachable) {
+    showBanner("dash-notice", "");
+    showBanner("dash-error", "");
+  } else if (running) {
+    const where = state.origin ? ` at ${state.origin}` : "";
+    showBanner("dash-notice", `The server process is running (pid ${status.pid}) but its endpoint${where} is not answering — the origin in Settings must match the server's own host and port.`, "error");
+    showBanner("dash-error", dash.error || "endpoint unreachable", "error");
+  } else if (exited) {
+    showBanner("dash-notice", "The server process has exited — the recent output is on the Logs page.", "");
+    showBanner("dash-error", "");
+  } else {
+    showBanner("dash-notice", "The server is not answering yet — start it from the sidebar.", "");
+    showBanner("dash-error", "");
+  }
   $("dash-uptime").textContent = dash.reachable ? fmtDuration(dash.uptime_seconds) : "—";
   $("dash-requests").textContent = fmtNumber(dash.requests_total);
   $("dash-rps").textContent = fmtNumber(dash.requests_per_second);
@@ -532,9 +555,29 @@ async function loadSettings() {
     $("set-probe").value = settings.probe_window_ms;
     $("set-grace").value = settings.stop_grace_ms;
     $("origin-chip").textContent = settings.origin;
+    state.origin = settings.origin;
+    await loadOriginHint();
   } catch (error) {
     toast(String(error), "error");
   }
+}
+
+/* The server's own address, straight out of wallermax.toml — the
+ * one-click correction for a mismatched origin (the classic
+ * "http://localhost" versus a server bound to 127.0.0.1:8080). */
+async function loadOriginHint() {
+  const [host, port] = await Promise.all([
+    invoke("config_get_value", { file: "base", key: "server.host" }).catch(() => null),
+    invoke("config_get_value", { file: "base", key: "server.port" }).catch(() => null),
+  ]);
+  const detectedHost = host || "127.0.0.1";
+  const detectedPort = String(port || "8080");
+  const detected = `http://${detectedHost}:${detectedPort}`;
+  state.detectedOrigin = detected;
+  const hint = $("origin-hint");
+  if (!hint) return;
+  $("origin-hint-text").textContent = `the server's wallermax.toml binds ${detectedHost}:${detectedPort}`;
+  hint.style.display = "block";
 }
 
 async function saveSettings() {
@@ -716,6 +759,12 @@ window.addEventListener("DOMContentLoaded", () => {
 
   $("btn-settings-save").addEventListener("click", saveSettings);
 
+  $("btn-use-origin").addEventListener("click", () => {
+    if (state.detectedOrigin) {
+      $("set-origin").value = state.detectedOrigin;
+    }
+  });
+
   $("log-filter").addEventListener("input", renderLogs);
   $("log-show-out").addEventListener("change", renderLogs);
   $("log-show-err").addEventListener("change", renderLogs);
@@ -728,4 +777,5 @@ window.addEventListener("DOMContentLoaded", () => {
   restartTimers();
   showPage("dashboard");
   loadPaths();
+  loadSettings();
 });
