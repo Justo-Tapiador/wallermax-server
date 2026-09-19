@@ -9,6 +9,7 @@
 //! [`App::fetch_dashboard`] — never hold a lock while they wait, so the
 //! status and log polling the UI does stays responsive throughout.
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -17,7 +18,10 @@ use serde::Serialize;
 
 use crate::config_manager::{BackupInfo, ConfigManager, ConfigWhich, BASE_FILE};
 use crate::metrics::{self, MetricsSnapshot};
-use crate::process_manager::{self, ProcessManager, ProcessStatus, SpawnSpec, StartReport};
+use crate::ports::{self, Occupancy, PortOwner};
+use crate::process_manager::{
+    self, ProcessManager, ProcessStatus, ServerState, SpawnSpec, StartReport,
+};
 use crate::settings::Settings;
 
 /// The dashboard's flat, ready-to-show answer.
@@ -43,6 +47,22 @@ pub struct App {
     config_dir: Mutex<PathBuf>,
     notice: Mutex<Option<String>>,
     process: ProcessManager,
+}
+
+/// How long one pre-flight connect probe may take — short, because it
+/// runs between a Start click and the spawn.
+const PORT_PROBE: Duration = Duration::from_millis(400);
+
+/// The pre-flight picture of the server's port, for the dashboard.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct PortStatus {
+    /// The address the server will bind ("127.0.0.1:8080"), when it can
+    /// be derived from the configuration.
+    pub address: Option<String>,
+    /// Whether something already listens on that address.
+    pub occupied: bool,
+    /// The listening processes, when the OS can name them.
+    pub owners: Vec<PortOwner>,
 }
 
 impl App {
@@ -255,11 +275,17 @@ impl App {
     /// Starts the server with the configured command, watching its boot
     /// for the configured window.
     ///
+    /// The port is probed first: a busy one is refused with the
+    /// squatter named (see [`App::port_conflict`]) instead of letting
+    /// the fresh server die on its own bind with a bare "os error
+    /// 10048". A server this manager already supervises is left to the
+    /// process manager's clearer "already running" refusal.
+    ///
     /// # Errors
     ///
     /// When no command is configured, the command line is malformed, the
-    /// working directory is missing, a server is already running, or the
-    /// program cannot be spawned.
+    /// working directory is missing, the port is already taken, a
+    /// server is already running, or the program cannot be spawned.
     pub fn start_server(&self) -> Result<StartReport, String> {
         let settings = self.settings();
         if settings.server_command.trim().is_empty() {
@@ -281,6 +307,11 @@ impl App {
         } else {
             PathBuf::from(settings.working_dir.trim())
         };
+        if self.process.status().state != ServerState::Running {
+            if let Some(conflict) = self.port_conflict() {
+                return Err(conflict);
+            }
+        }
         self.process.start(
             &SpawnSpec { program, args, cwd },
             Duration::from_millis(settings.probe_window_ms),
@@ -305,6 +336,75 @@ impl App {
     /// The log page after `since`.
     pub fn server_logs(&self, since: u64, limit: usize) -> process_manager::LogPage {
         self.process.logs(since, limit)
+    }
+
+    // ----- the server's port ----------------------------------------------
+
+    /// The address the configured server will bind, derived the way the
+    /// server itself derives it: `WALLERMAX_SERVER__HOST` / `__PORT`
+    /// beat the local layer, which beats the base layer, which beats the
+    /// built-in `127.0.0.1:8080`.
+    ///
+    /// `None` when there is nothing useful to probe: a `server.port` of
+    /// `0` (the OS picks a free port — nothing can conflict) or a host
+    /// that is not an IP literal (the server's `host` is an `IpAddr`;
+    /// a name that fails to parse will fail the server's own startup
+    /// with the real error). A `WALLERMAX_CONFIG` redirect to another
+    /// file is deliberately not followed — the pre-flight is advisory,
+    /// never a gate.
+    fn server_bind(&self) -> Option<SocketAddr> {
+        let config = self.config();
+        let host = std::env::var("WALLERMAX_SERVER__HOST")
+            .ok()
+            .or_else(|| config.get_value(ConfigWhich::Local, "server.host"))
+            .or_else(|| config.get_value(ConfigWhich::Base, "server.host"))
+            .unwrap_or_else(|| String::from("127.0.0.1"));
+        let port = std::env::var("WALLERMAX_SERVER__PORT")
+            .ok()
+            .or_else(|| config.get_value(ConfigWhich::Local, "server.port"))
+            .or_else(|| config.get_value(ConfigWhich::Base, "server.port"))
+            .unwrap_or_else(|| String::from("8080"));
+        let port: u16 = port.trim().parse().ok()?;
+        if port == 0 {
+            return None;
+        }
+        Some(SocketAddr::new(host.trim().parse().ok()?, port))
+    }
+
+    /// The pre-flight verdict on the server's port: the full diagnosis
+    /// when something already listens there, `None` when the coast is
+    /// clear (or nothing can be probed).
+    fn port_conflict(&self) -> Option<String> {
+        let bind = self.server_bind()?;
+        let Occupancy::Busy(address) = ports::probe(&probe_targets(bind), PORT_PROBE) else {
+            return None;
+        };
+        let owners = ports::listening_owners(address.port());
+        Some(describe_conflict(address, &owners))
+    }
+
+    /// The dashboard's one-call answer to "who has the server's port":
+    /// the address the server will bind, whether something already
+    /// listens there, and the owners when the OS names them.
+    pub fn port_status(&self) -> PortStatus {
+        let Some(bind) = self.server_bind() else {
+            return PortStatus::default();
+        };
+        if !matches!(
+            ports::probe(&probe_targets(bind), PORT_PROBE),
+            Occupancy::Busy(_)
+        ) {
+            return PortStatus {
+                address: Some(bind.to_string()),
+                occupied: false,
+                owners: Vec::new(),
+            };
+        }
+        PortStatus {
+            address: Some(bind.to_string()),
+            occupied: true,
+            owners: ports::listening_owners(bind.port()),
+        }
     }
 
     // ----- endpoints ------------------------------------------------------
@@ -366,6 +466,48 @@ fn discover_config_dir(from: PathBuf) -> (PathBuf, bool) {
     (from, false)
 }
 
+/// The addresses worth probing for a bind address: a wildcard host is
+/// probed on loopback (a listener on *any* interface answers there), a
+/// specific host is probed as itself.
+fn probe_targets(bind: SocketAddr) -> Vec<SocketAddr> {
+    match bind.ip() {
+        IpAddr::V4(address) if address.is_unspecified() => vec![SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            bind.port(),
+        )],
+        IpAddr::V6(address) if address.is_unspecified() => vec![SocketAddr::new(
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            bind.port(),
+        )],
+        _ => vec![bind],
+    }
+}
+
+/// The "who is on my port" message: names every owner the OS can, and
+/// always ends with the way out. Owners are only named on Windows, so
+/// the named branch speaks Windows (Task Manager, taskkill).
+fn describe_conflict(address: SocketAddr, owners: &[PortOwner]) -> String {
+    if owners.is_empty() {
+        return format!(
+            "the server's address {address} is already in use by another process the OS \
+             could not name — find it with `netstat -ano` (or `ss -ltnp`) and stop it, or \
+             change `server.port` in the configuration"
+        );
+    }
+    let who: Vec<String> = owners
+        .iter()
+        .map(|owner| format!("pid {} ({})", owner.pid, owner.image))
+        .collect();
+    format!(
+        "the server's address {address} is already in use by {} — likely a server left \
+         over from an earlier manager session (servers run without a console window); \
+         end it with the Task Manager or run `taskkill /PID {first} /T /F`, or change \
+         `server.port` in the configuration",
+        who.join(", "),
+        first = owners[0].pid
+    )
+}
+
 /// Copies the known metric families into the snapshot.
 fn fill_from_metrics(parsed: &MetricsSnapshot, snapshot: &mut DashboardSnapshot) {
     snapshot.uptime_seconds = parsed.uptime_seconds();
@@ -405,6 +547,7 @@ fn fill_from_stats(text: &str, snapshot: &mut DashboardSnapshot) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config_manager::LOCAL_FILE;
     use crate::settings::Settings;
     use crate::testutil::{survivor_command_line, wait_for};
 
@@ -514,6 +657,14 @@ mod tests {
     #[test]
     fn the_app_starts_and_stops_a_server() {
         let dir = crate::testutil::temp_dir("app-process");
+        // `server.port = 0`: the OS picks a free port, so the pre-flight
+        // has nothing to probe and the test never depends on some
+        // environment port being free.
+        std::fs::write(
+            dir.join(BASE_FILE),
+            "[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        )
+        .expect("seed the base config");
         let settings = Settings {
             server_command: String::from(survivor_command_line()),
             probe_window_ms: 1_200,
@@ -550,5 +701,106 @@ mod tests {
         let app = App::with_settings(empty, dir.join("none.json"), &dir);
         let error = app.start_server().expect_err("an empty command is refused");
         assert!(error.contains("server command"), "{error}");
+    }
+
+    #[test]
+    fn the_bind_address_follows_the_layers() {
+        let dir = crate::testutil::temp_dir("app-bind");
+        std::fs::write(
+            dir.join(BASE_FILE),
+            "[server]\nhost = \"127.0.0.1\"\nport = 9000\n",
+        )
+        .expect("seed the base");
+        let app = app_in(&dir);
+        assert_eq!(
+            app.server_bind().expect("the base answers"),
+            "127.0.0.1:9000"
+                .parse::<std::net::SocketAddr>()
+                .expect("valid address")
+        );
+
+        // The local layer wins over the base.
+        std::fs::write(dir.join(LOCAL_FILE), "[server]\nport = 9001\n").expect("seed the local");
+        assert_eq!(
+            app_in(&dir).server_bind().expect("the local wins").port(),
+            9001
+        );
+
+        // Port 0 means the OS picks a free port: nothing to probe.
+        std::fs::write(dir.join(LOCAL_FILE), "[server]\nport = 0\n").expect("zero the port");
+        assert!(
+            app_in(&dir).server_bind().is_none(),
+            "port 0 cannot conflict"
+        );
+
+        // A wildcard host is probed on loopback instead.
+        std::fs::write(
+            dir.join(LOCAL_FILE),
+            "[server]\nhost = \"0.0.0.0\"\nport = 9002\n",
+        )
+        .expect("seed the wildcard");
+        assert_eq!(
+            app_in(&dir).server_bind().expect("the wildcard answers"),
+            "0.0.0.0:9002"
+                .parse::<std::net::SocketAddr>()
+                .expect("valid address")
+        );
+    }
+
+    #[test]
+    fn start_refuses_when_the_port_is_already_taken() {
+        let dir = crate::testutil::temp_dir("app-port-busy");
+        // A real listener is the squatter.
+        let squatter = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the squatter");
+        let port = squatter.local_addr().expect("address").port();
+        std::fs::write(
+            dir.join(BASE_FILE),
+            format!("[server]\nhost = \"127.0.0.1\"\nport = {port}\n"),
+        )
+        .expect("aim the server at the squatter");
+
+        let settings = Settings {
+            server_command: String::from(survivor_command_line()),
+            ..Settings::default()
+        };
+        let app = App::with_settings(settings, dir.join("settings.json"), &dir);
+        let error = app.start_server().expect_err("the busy port is refused");
+        assert!(error.contains("already in use"), "{error}");
+        assert!(
+            error.contains(&port.to_string()),
+            "the message names the port: {error}"
+        );
+        // The squatter survived: the manager never kills what it did not
+        // start (that is the takeover's job, and only ever on purpose).
+        assert!(squatter.local_addr().is_ok(), "the squatter lives on");
+        drop(squatter);
+    }
+
+    #[test]
+    fn port_status_names_a_free_port_and_a_busy_one() {
+        let dir = crate::testutil::temp_dir("app-port-status");
+        let squatter = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the squatter");
+        let port = squatter.local_addr().expect("address").port();
+        std::fs::write(
+            dir.join(BASE_FILE),
+            format!("[server]\nhost = \"127.0.0.1\"\nport = {port}\n"),
+        )
+        .expect("aim at the squatter");
+
+        let busy = app_in(&dir).port_status();
+        assert!(busy.occupied, "the squatter is seen");
+        assert_eq!(
+            busy.address.as_deref(),
+            Some(format!("127.0.0.1:{port}").as_str())
+        );
+        drop(squatter);
+
+        let free = app_in(&dir).port_status();
+        assert!(!free.occupied, "the dropped listener is gone");
+        assert_eq!(
+            free.address.as_deref(),
+            Some(format!("127.0.0.1:{port}").as_str()),
+            "the address is still reported — only occupancy changes"
+        );
     }
 }

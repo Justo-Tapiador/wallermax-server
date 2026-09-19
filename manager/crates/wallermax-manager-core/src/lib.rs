@@ -21,6 +21,7 @@
 //! | [`config_manager`]    | Layered TOML editing: validate, backup, write     |
 //! | [`process_manager`]   | Spawn, boot probe, logs, tree-kill stop, lifetime |
 //! | [`metrics`]           | Prometheus text parsing + a tiny blocking HTTP GET|
+//! | [`ports`]             | Who listens on the server's port (pre-flight)    |
 //! | [`app`]               | The facade the Tauri commands delegate to         |
 //!
 //! ## Zero-drift validation
@@ -75,6 +76,7 @@
 pub mod app;
 pub mod config_manager;
 pub mod metrics;
+pub mod ports;
 pub mod process_manager;
 pub mod settings;
 
