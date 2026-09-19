@@ -117,7 +117,8 @@ const state = {
   timers: { status: null, logs: null, dashboard: null },
   lastStatus: null,       // the process state behind the dashboard's banners
   origin: "",             // the origin the endpoints derive from
-  detectedOrigin: "",     // the server's own address, read from wallermax.toml
+  serverTls: false,        // whether the configuration enables [tls] on the server
+  detectedOrigin: "",     // the server's own address, read from the configuration
   siteUrl: "",            // the website URL behind the Open website buttons
   portStatus: null,        // who holds the server's port, when someone does
 };
@@ -245,7 +246,12 @@ function paintDashboard(dash) {
     showBanner("dash-error", "");
   } else if (running) {
     const where = state.origin ? ` at ${state.origin}` : "";
-    showBanner("dash-notice", `The server process is running (pid ${status.pid}) but its endpoint${where} is not answering — the origin in Settings must match the server's own host and port.`, "error");
+    // A TLS server behind an `http://` origin is the classic mismatch
+    // once certificates enter the picture — say so by name.
+    const tlsHint = state.serverTls && state.origin.startsWith("http://")
+      ? " The server serves TLS — Settings offers its https origin."
+      : "";
+    showBanner("dash-notice", `The server process is running (pid ${status.pid}) but its endpoint${where} is not answering — the origin in Settings must match the server's own host and port.${tlsHint}`, "error");
     showBanner("dash-error", dash.error || "endpoint unreachable", "error");
   } else if (exited) {
     showBanner("dash-notice", "The server process has exited — the recent output is on the Logs page.", "");
@@ -596,22 +602,38 @@ async function loadSettings() {
   }
 }
 
-/* The server's own address, straight out of wallermax.toml — the
- * one-click correction for a mismatched origin (the classic
- * "http://localhost" versus a server bound to 127.0.0.1:8080). */
+/* The server's own address, straight out of the configuration pair —
+ * the one-click correction for a mismatched origin (the classic
+ * "http://localhost" versus a server bound to 127.0.0.1:8080, or an
+ * `http://` origin against a server serving TLS on the same port). */
 async function loadOriginHint() {
-  const [host, port] = await Promise.all([
-    invoke("config_get_value", { file: "base", key: "server.host" }).catch(() => null),
-    invoke("config_get_value", { file: "base", key: "server.port" }).catch(() => null),
+  const [host, port, tlsEnabled, httpListen] = await Promise.all([
+    configValue("server.host"),
+    configValue("server.port"),
+    configValue("tls.enabled"),
+    configValue("tls.http_listen"),
   ]);
   const detectedHost = host || "127.0.0.1";
   const detectedPort = String(port || "8080");
-  const detected = `http://${detectedHost}:${detectedPort}`;
-  state.detectedOrigin = detected;
+  const tls = String(tlsEnabled).toLowerCase() === "true";
+  state.serverTls = tls;
+  state.detectedOrigin = `${tls ? "https" : "http"}://${detectedHost}:${detectedPort}`;
   const hint = $("origin-hint");
   if (!hint) return;
-  $("origin-hint-text").textContent = `the server's wallermax.toml binds ${detectedHost}:${detectedPort}`;
+  $("origin-hint-text").textContent = tls
+    ? `the server's wallermax.toml serves TLS on ${detectedHost}:${detectedPort}${httpListen ? ` (plain ${httpListen} redirects to it)` : ""}`
+    : `the server's wallermax.toml binds ${detectedHost}:${detectedPort}`;
   hint.style.display = "block";
+}
+
+/* One configuration value, read the way the server reads it: the local
+ * layer beats the base layer, and anything missing is null. */
+async function configValue(key) {
+  for (const file of ["local", "base"]) {
+    const value = await invoke("config_get_value", { file, key }).catch(() => null);
+    if (value !== null && value !== undefined && String(value).trim() !== "") return value;
+  }
+  return null;
 }
 
 async function saveSettings() {
