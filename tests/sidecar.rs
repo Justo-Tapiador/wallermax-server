@@ -231,6 +231,47 @@ fn sidecar_answers_real_node_require_behind_the_banner() {
 }
 
 #[test]
+fn nested_module_requires_honour_the_banner_and_builtins() {
+    if !node_available() {
+        eprintln!("skipping: no node on PATH");
+        return;
+    }
+    let fixture = FixtureDir::create("nested");
+    let modules = fixture.path.join("modules");
+    // A local module that requires an allowed built-in at load time...
+    std::fs::write(
+        modules.join("nested-url.js"),
+        "module.exports = { probe: typeof require('url').parse };",
+    )
+    .expect("nested-url write");
+    // ...and one whose nested require hits a forbidden module.
+    std::fs::write(
+        modules.join("nested-fs.js"),
+        "module.exports = { probe: require('fs').constants };",
+    )
+    .expect("nested-fs write");
+    let renderer = renderer(&fixture.config("sidecar"));
+
+    // A nested allowed built-in resolves through the same wrapper (it
+    // used to fall off the built-in branch entirely and miss).
+    let output = renderer
+        .render_string("<?jhs echo(require('nested-url').probe) ?>", &empty_data())
+        .expect("nested builtin resolves");
+    assert_eq!(output.html, "function");
+
+    // A nested FORBIDDEN module trips the very same banner — the
+    // inner require used to skip it and go straight to the local
+    // loader.
+    let error = renderer
+        .render_string("<?jhs require('nested-fs') ?>", &empty_data())
+        .expect_err("nested forbidden module is bannered");
+    assert!(
+        error.to_string().contains("require('fs') is forbidden"),
+        "banner wording through the nested hop: {error}"
+    );
+}
+
+#[test]
 fn runaway_renders_are_hard_killed_within_the_budget() {
     if !node_available() {
         eprintln!("skipping: no node on PATH");
