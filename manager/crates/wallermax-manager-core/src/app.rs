@@ -122,7 +122,9 @@ impl App {
     }
 
     /// Validates, persists and applies new settings. The origin must be
-    /// an `http://` URL and the endpoint paths must start with `/`; the
+    /// an `http://` URL, the site URL an `http://` or `https://` one
+    /// (it opens in a browser, so TLS is allowed), and the endpoint
+    /// paths must start with `/`; the
     /// configuration directory only changes when a value is given, so
     /// clearing the field keeps the discovered directory.
     ///
@@ -135,6 +137,13 @@ impl App {
                 "the origin must be an `http://` URL (the manager talks to the local \
                  server); got `{}`",
                 incoming.origin
+            ));
+        }
+        let site = incoming.site_url.trim();
+        if !site.is_empty() && !site.starts_with("http://") && !site.starts_with("https://") {
+            return Err(format!(
+                "the site URL must be an `http://` or `https://` URL (it opens in the \
+                 browser); got `{site}`"
             ));
         }
         for (name, path) in [
@@ -315,6 +324,12 @@ impl App {
         self.settings().stats_url()
     }
 
+    /// The website URL the dashboard links to — `site_url` from the
+    /// settings when set, the shared origin otherwise.
+    pub fn site_url(&self) -> String {
+        self.settings().site_url()
+    }
+
     /// Collects the dashboard in one call: health, Prometheus metrics and
     /// the stats JSON, each with a short timeout, merged into one flat
     /// snapshot. Nothing here holds a lock while waiting.
@@ -421,11 +436,13 @@ mod tests {
         let mut edited = app.settings();
         edited.server_command = String::from("wallermax-server");
         edited.origin = String::from("http://127.0.0.1:9090");
+        edited.site_url = String::from("https://localhost");
         app.save_settings(edited.clone()).expect("save applies");
 
         let reloaded = Settings::load(app.settings_path()).expect("persisted");
         assert_eq!(reloaded, edited);
         assert_eq!(app.settings().origin, "http://127.0.0.1:9090");
+        assert_eq!(app.site_url(), "https://localhost");
 
         // Invalid settings never reach the disk.
         let broken = Settings {
@@ -433,6 +450,11 @@ mod tests {
             ..Settings::default()
         };
         assert!(app.save_settings(broken).is_err());
+        let bad_site = Settings {
+            site_url: String::from("file:///etc"),
+            ..Settings::default()
+        };
+        assert!(app.save_settings(bad_site).is_err());
         assert_eq!(
             Settings::load(app.settings_path())
                 .expect("still the good one")

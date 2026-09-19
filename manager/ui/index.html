@@ -32,6 +32,7 @@
         <button class="btn primary" id="btn-start-side">Start</button>
         <button class="btn danger" id="btn-stop-side">Stop</button>
       </div>
+      <button class="btn small" id="btn-open-site-side" style="display:none; width:100%; margin-top:8px">Open website ↗</button>
     </div>
   </aside>
 
@@ -50,7 +51,10 @@
       <section class="page active" id="page-dashboard">
         <div class="heading">
           <div><h1>Dashboard</h1><p>The local server at a glance.</p></div>
-          <button class="btn" id="btn-refresh-dash">Refresh</button>
+          <div style="display:flex; gap:10px">
+            <button class="btn" id="btn-open-site" style="display:none">Open website ↗</button>
+            <button class="btn" id="btn-refresh-dash">Refresh</button>
+          </div>
         </div>
         <div class="banner" id="dash-notice" style="display:none"></div>
         <div class="banner error" id="dash-error" style="display:none"></div>
@@ -213,6 +217,10 @@
                 <span id="origin-hint-text">—</span>
                 <button class="btn small" id="btn-use-origin" type="button">Use this origin</button>
               </div>
+            </div>
+            <div class="field">
+              <label>Site URL <code>— the website the dashboard links to; empty: the origin</code></label>
+              <input type="text" id="set-site" placeholder="https://localhost">
             </div>
             <div class="field">
               <label>Health path</label><input type="text" id="set-health" placeholder="/health">

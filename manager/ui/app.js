@@ -118,6 +118,7 @@ const state = {
   lastStatus: null,       // the process state behind the dashboard's banners
   origin: "",             // the origin the endpoints derive from
   detectedOrigin: "",     // the server's own address, read from wallermax.toml
+  siteUrl: "",            // the website URL behind the Open website buttons
 };
 
 /* ------------------------------------------------------------------ */
@@ -200,6 +201,15 @@ function paintStatus(status) {
   $("btn-start-side").disabled = running;
   $("btn-stop").disabled = !running;
   $("btn-stop-side").disabled = !running;
+
+  // The website link lives exactly as long as the server does: shown
+  // while the process runs, gone the moment it stops. A button — not
+  // an anchor — so the click goes to the OS opener and never navigates
+  // the manager's own webview.
+  for (const node of [$("btn-open-site"), $("btn-open-site-side")]) {
+    node.style.display = running ? "" : "none";
+    node.title = running && state.siteUrl ? state.siteUrl : "";
+  }
 
   $("dash-state").textContent = running ? "Running" : exited ? "Exited" : "Stopped";
   $("dash-state-sub").textContent = running ? `pid ${status.pid}` : "process supervision";
@@ -549,6 +559,7 @@ async function loadSettings() {
     $("set-workdir").value = settings.working_dir;
     $("set-configdir").value = settings.config_dir;
     $("set-origin").value = settings.origin;
+    $("set-site").value = settings.site_url || "";
     $("set-health").value = settings.health_path;
     $("set-metrics").value = settings.metrics_path;
     $("set-stats").value = settings.stats_path;
@@ -556,6 +567,7 @@ async function loadSettings() {
     $("set-grace").value = settings.stop_grace_ms;
     $("origin-chip").textContent = settings.origin;
     state.origin = settings.origin;
+    state.siteUrl = (settings.site_url || "").trim() || settings.origin;
     await loadOriginHint();
   } catch (error) {
     toast(String(error), "error");
@@ -586,6 +598,7 @@ async function saveSettings() {
     working_dir: $("set-workdir").value.trim(),
     config_dir: $("set-configdir").value.trim(),
     origin: $("set-origin").value.trim(),
+    site_url: $("set-site").value.trim(),
     health_path: $("set-health").value.trim(),
     metrics_path: $("set-metrics").value.trim(),
     stats_path: $("set-stats").value.trim(),
@@ -598,6 +611,7 @@ async function saveSettings() {
     $("origin-chip").textContent = settings.origin;
     await loadPaths();
     pollDashboard();
+    pollStatus();
   } catch (error) {
     toast(String(error), "error");
   }
@@ -633,6 +647,14 @@ async function stopServer() {
     toast(String(error), "error");
   }
   pollStatus();
+}
+
+async function openSite() {
+  try {
+    await invoke("open_site");
+  } catch (error) {
+    toast(String(error), "error");
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -738,6 +760,8 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btn-stop").addEventListener("click", stopServer);
   $("btn-start-side").addEventListener("click", startServer);
   $("btn-stop-side").addEventListener("click", stopServer);
+  $("btn-open-site").addEventListener("click", openSite);
+  $("btn-open-site-side").addEventListener("click", openSite);
   $("btn-refresh-status").addEventListener("click", pollStatus);
   $("btn-refresh-dash").addEventListener("click", pollDashboard);
 

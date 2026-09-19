@@ -157,8 +157,10 @@ async fn dashboard_fetch(state: State<'_, Arc<App>>) -> Result<DashboardSnapshot
         .map_err(|error| format!("the dashboard task failed: {error}"))
 }
 
-/// The per-platform "open this folder in the file manager" program.
-fn folder_opener() -> &'static str {
+/// The per-platform "open this in the user's world" program: folders
+/// land in the file manager, URLs in the default browser (`explorer`,
+/// `open` and `xdg-open` all take both).
+fn system_opener() -> &'static str {
     if cfg!(windows) {
         "explorer"
     } else if cfg!(target_os = "macos") {
@@ -177,11 +179,29 @@ fn open_config_folder(state: State<'_, Arc<App>>) -> Result<(), String> {
             dir.display()
         ));
     }
-    Command::new(folder_opener())
+    Command::new(system_opener())
         .arg(&dir)
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("could not open {}: {error}", dir.display()))
+}
+
+#[tauri::command]
+fn open_site(state: State<'_, Arc<App>>) -> Result<(), String> {
+    let url = state.site_url();
+    // The URL may have been hand-edited into the settings file since
+    // the last save; the scheme guard keeps the opener from being
+    // pointed at local files.
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err(format!(
+            "the site URL must be an `http://` or `https://` URL; got `{url}`"
+        ));
+    }
+    Command::new(system_opener())
+        .arg(&url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("could not open {url}: {error}"))
 }
 
 fn main() {
@@ -205,7 +225,8 @@ fn main() {
             server_status,
             server_logs,
             dashboard_fetch,
-            open_config_folder
+            open_config_folder,
+            open_site
         ])
         .run(tauri::generate_context!())
         .expect("error while running wallermax-manager");
