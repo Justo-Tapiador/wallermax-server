@@ -38,7 +38,7 @@ use crate::rate_limit::{LoginThrottle, RateLimiter};
 use crate::template_engine::renderer::BrokenRenderer;
 use crate::template_engine::{
     AutoRenderer, JhsEngine, JhsOptions, RequireOptions, SidecarOptions, SidecarRenderer,
-    TemplateRenderer,
+    StrictSidecar, TemplateRenderer,
 };
 use crate::vhosts::HostBinding;
 
@@ -181,7 +181,13 @@ impl TemplateEngine {
                 renderer = boa;
             }
             "sidecar" => match SidecarRenderer::spawn(&sidecar_options) {
-                Ok(sidecar) => renderer = sidecar,
+                Ok(sidecar) => {
+                    // Strict, but not brittle: a crashed sidecar is
+                    // re-spawned in the background (renders answer the
+                    // transport error until the fresh one lands).
+                    renderer =
+                        std::sync::Arc::new(StrictSidecar::new(sidecar, sidecar_options.clone()));
+                }
                 Err(error) => {
                     sidecar_spawn_error = Some(error.clone());
                     renderer = std::sync::Arc::new(BrokenRenderer::new(error));
@@ -190,7 +196,11 @@ impl TemplateEngine {
             _ => match SidecarRenderer::spawn(&sidecar_options) {
                 Ok(sidecar) => {
                     tracing::info!("template backend: auto (Node sidecar, boa fallback)");
-                    renderer = std::sync::Arc::new(AutoRenderer::new(sidecar, boa));
+                    renderer = std::sync::Arc::new(AutoRenderer::new(
+                        sidecar,
+                        sidecar_options.clone(),
+                        boa,
+                    ));
                 }
                 Err(error) => {
                     tracing::warn!(
