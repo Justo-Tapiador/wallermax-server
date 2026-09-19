@@ -119,6 +119,7 @@ const state = {
   origin: "",             // the origin the endpoints derive from
   detectedOrigin: "",     // the server's own address, read from wallermax.toml
   siteUrl: "",            // the website URL behind the Open website buttons
+  portStatus: null,        // who holds the server's port, when someone does
 };
 
 /* ------------------------------------------------------------------ */
@@ -139,7 +140,23 @@ async function pollStatus() {
 async function pollDashboard() {
   try {
     const dash = await invoke("dashboard_fetch");
+    // The port probe answers the question the unreachable banner
+    // cannot: is the server's port already held by someone else (a
+    // leftover from an earlier session)? Only asked when it matters —
+    // nothing reachable and nothing supervised.
+    const running = state.lastStatus && state.lastStatus.state === "running";
+    if (!dash.reachable && !running) {
+      try {
+        state.portStatus = await invoke("port_status");
+      } catch (error) {
+        console.error("port probe failed", error);
+        state.portStatus = null;
+      }
+    } else {
+      state.portStatus = null;
+    }
     paintDashboard(dash);
+    paintTakeover();
   } catch (error) {
     showBanner("dash-error", String(error), "error");
   }
@@ -232,6 +249,11 @@ function paintDashboard(dash) {
     showBanner("dash-error", dash.error || "endpoint unreachable", "error");
   } else if (exited) {
     showBanner("dash-notice", "The server process has exited — the recent output is on the Logs page.", "");
+    showBanner("dash-error", "");
+  } else if (state.portStatus && state.portStatus.occupied) {
+    // The takeover banner below tells the whole story — the notice must
+    // not suggest a start that would only collide with the squatter.
+    showBanner("dash-notice", "");
     showBanner("dash-error", "");
   } else {
     showBanner("dash-notice", "The server is not answering yet — start it from the sidebar.", "");
@@ -618,6 +640,69 @@ async function saveSettings() {
 }
 
 /* ------------------------------------------------------------------ */
+/* the port banner: who holds it, and the one-click takeover            */
+/* ------------------------------------------------------------------ */
+
+/* Painted after the unreachable banner: when something already holds
+ * the address a fresh server would bind, the banner names it — and,
+ * when every owner is the configured server program (the classic
+ * invisible leftover from an earlier session), offers to take the
+ * port over and start. */
+function paintTakeover() {
+  const node = $("dash-takeover");
+  const status = state.portStatus;
+  const running = state.lastStatus && state.lastStatus.state === "running";
+  if (!status || !status.occupied || running) {
+    node.style.display = "none";
+    return;
+  }
+  const who = status.owners.length
+    ? status.owners.map((owner) => `pid ${owner.pid} (${owner.image})`).join(", ")
+    : "a process this OS could not name";
+  const cause = status.owners.length
+    ? " — likely a server left over from an earlier manager session (servers run without a console window)."
+    : ".";
+  node.className = "banner error";
+  node.replaceChildren(
+    document.createTextNode(
+      `The server's address ${status.address} is already in use by ${who}${cause}`
+    )
+  );
+  if (status.takeover_ready) {
+    const button = document.createElement("button");
+    button.id = "btn-takeover";
+    button.className = "btn small";
+    button.textContent = "Take over the port and start";
+    button.addEventListener("click", takeoverStart);
+    node.append(document.createElement("br"), button);
+  }
+  node.style.display = "block";
+}
+
+async function takeoverStart() {
+  const button = $("btn-takeover");
+  if (button) button.disabled = true;
+  try {
+    const report = await invoke("server_takeover");
+    if (report.probe.booted) {
+      showBanner("probe-banner", report.probe.output.trim()
+        ? `Takeover done — boot probe: healthy.\n${report.probe.output.trim()}`
+        : `Takeover done — the process is up (pid ${report.pid}).`, "ok");
+    } else {
+      showBanner("probe-banner",
+        `Takeover done, but the boot probe failed${report.probe.exit_code === null ? "" : ` (exit code ${report.probe.exit_code})`}.\n${report.probe.output.trim() || "no output captured"}`,
+        "error");
+    }
+  } catch (error) {
+    showBanner("probe-banner", String(error), "error");
+  }
+  state.portStatus = null;
+  paintTakeover();
+  pollStatus();
+  pollDashboard();
+}
+
+/* ------------------------------------------------------------------ */
 /* server actions                                                      */
 /* ------------------------------------------------------------------ */
 
@@ -635,6 +720,15 @@ async function startServer() {
     }
   } catch (error) {
     showBanner("probe-banner", String(error), "error");
+    // A refused start may be a busy port — the banner knows who holds
+    // it, so ask right away (the takeover button rides on it).
+    try {
+      state.portStatus = await invoke("port_status");
+    } catch (probeError) {
+      console.error("port probe failed", probeError);
+      state.portStatus = null;
+    }
+    paintTakeover();
   }
   pollStatus();
 }

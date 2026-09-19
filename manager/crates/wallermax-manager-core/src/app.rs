@@ -12,7 +12,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -63,6 +63,9 @@ pub struct PortStatus {
     pub occupied: bool,
     /// The listening processes, when the OS can name them.
     pub owners: Vec<PortOwner>,
+    /// Whether the port is held *only* by processes whose image matches
+    /// the configured server program — takeover material.
+    pub takeover_ready: bool,
 }
 
 impl App {
@@ -380,12 +383,14 @@ impl App {
             return None;
         };
         let owners = ports::listening_owners(address.port());
-        Some(describe_conflict(address, &owners))
+        let expected = self.configured_server_image();
+        Some(describe_conflict(address, &owners, expected.as_deref()))
     }
 
     /// The dashboard's one-call answer to "who has the server's port":
     /// the address the server will bind, whether something already
-    /// listens there, and the owners when the OS names them.
+    /// listens there, the owners when the OS names them, and whether
+    /// those owners are all the configured server (takeover material).
     pub fn port_status(&self) -> PortStatus {
         let Some(bind) = self.server_bind() else {
             return PortStatus::default();
@@ -398,13 +403,108 @@ impl App {
                 address: Some(bind.to_string()),
                 occupied: false,
                 owners: Vec::new(),
+                takeover_ready: false,
             };
         }
+        let owners = ports::listening_owners(bind.port());
+        let takeover_ready = match self.configured_server_image() {
+            Some(expected) => {
+                !owners.is_empty()
+                    && owners
+                        .iter()
+                        .all(|owner| image_matches(&owner.image, &expected))
+            }
+            None => false,
+        };
         PortStatus {
             address: Some(bind.to_string()),
             occupied: true,
-            owners: ports::listening_owners(bind.port()),
+            owners,
+            takeover_ready,
         }
+    }
+
+    /// The one-click recovery for the classic aftermath: an earlier
+    /// manager session died before the kill-on-close job existed, and
+    /// its invisible server still holds the port. Every owner whose
+    /// image matches the configured server program is taken down
+    /// (tree-level, exactly like an explicit stop), the port is awaited
+    /// free, and the server starts normally.
+    ///
+    /// Nothing else is ever killed: a port held by an unrelated process
+    /// — or by one the OS cannot even name — is refused with the full
+    /// diagnosis, not fought over.
+    ///
+    /// # Errors
+    ///
+    /// When the port is held by anything but the configured server, or
+    /// the stale server refuses to die — plus everything
+    /// [`App::start_server`] can refuse.
+    pub fn takeover_and_start(&self) -> Result<StartReport, String> {
+        let Some(bind) = self.server_bind() else {
+            return self.start_server();
+        };
+        if !matches!(
+            ports::probe(&probe_targets(bind), PORT_PROBE),
+            Occupancy::Busy(_)
+        ) {
+            return self.start_server();
+        }
+        let Some(expected) = self.configured_server_image() else {
+            return Err(String::from(
+                "no server command is configured — set it in Settings before taking a port over",
+            ));
+        };
+        let owners = ports::listening_owners(bind.port());
+        if owners.is_empty()
+            || owners
+                .iter()
+                .any(|owner| !image_matches(&owner.image, &expected))
+        {
+            return Err(describe_conflict(bind, &owners, Some(expected.as_str())));
+        }
+
+        // All named owners are the configured server: take each tree
+        // down. A taskkill failure is not fatal here — a squatter that
+        // died between the netstat and the kill makes taskkill fail
+        // harmlessly, and the port check below decides what happens.
+        #[cfg(windows)]
+        for owner in &owners {
+            let _ = process_manager::kill_tree(owner.pid);
+        }
+
+        // Wait for the port to actually free up, then start normally.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !matches!(
+                ports::probe(&probe_targets(bind), PORT_PROBE),
+                Occupancy::Busy(_)
+            ) {
+                return self.start_server();
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "the previous server did not give up {bind} within five seconds — stop it \
+                     manually (`taskkill /PID {} /T /F`) and start again",
+                    owners[0].pid
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// The configured server program's name — `wallermax-server.exe`
+    /// from `C:\path\wallermax-server.exe`, `wallermax-server` from a
+    /// bare name — the identity a port owner must carry to be
+    /// takeover-killable.
+    fn configured_server_image(&self) -> Option<String> {
+        let settings = self.settings();
+        if settings.server_command.trim().is_empty() {
+            return None;
+        }
+        process_manager::split_command_line(settings.server_command.trim())
+            .ok()
+            .and_then(|tokens| tokens.first().cloned())
     }
 
     // ----- endpoints ------------------------------------------------------
@@ -483,10 +583,11 @@ fn probe_targets(bind: SocketAddr) -> Vec<SocketAddr> {
     }
 }
 
-/// The "who is on my port" message: names every owner the OS can, and
-/// always ends with the way out. Owners are only named on Windows, so
-/// the named branch speaks Windows (Task Manager, taskkill).
-fn describe_conflict(address: SocketAddr, owners: &[PortOwner]) -> String {
+/// The "who is on my port" message: names every owner the OS can,
+/// distinguishes the manager's own leftovers from a foreign process,
+/// and always ends with the way out. Owners are only named on Windows,
+/// so the named branches speak Windows (Task Manager, taskkill).
+fn describe_conflict(address: SocketAddr, owners: &[PortOwner], expected: Option<&str>) -> String {
     if owners.is_empty() {
         return format!(
             "the server's address {address} is already in use by another process the OS \
@@ -498,14 +599,49 @@ fn describe_conflict(address: SocketAddr, owners: &[PortOwner]) -> String {
         .iter()
         .map(|owner| format!("pid {} ({})", owner.pid, owner.image))
         .collect();
+    let ours =
+        expected.is_some_and(|name| owners.iter().all(|owner| image_matches(&owner.image, name)));
+    if ours {
+        return format!(
+            "the server's address {address} is already in use by {} — a server left over \
+             from an earlier manager session (servers run without a console window). Take it \
+             over from the dashboard, or end it yourself: `taskkill /PID {first} /T /F`",
+            who.join(", "),
+            first = owners[0].pid
+        );
+    }
     format!(
-        "the server's address {address} is already in use by {} — likely a server left \
-         over from an earlier manager session (servers run without a console window); \
-         end it with the Task Manager or run `taskkill /PID {first} /T /F`, or change \
-         `server.port` in the configuration",
+        "the server's address {address} is already in use by {} — {command}; stop whatever it \
+         is (Task Manager, or `taskkill /PID {first} /T /F`), or change `server.port` in the \
+         configuration",
         who.join(", "),
+        command = match expected {
+            Some(name) => format!("none of them is the configured server command (`{name}`)"),
+            None => String::from("no server command is configured to compare them against"),
+        },
         first = owners[0].pid
     )
+}
+
+/// Whether a listening owner's image is the configured server program:
+/// the file name decides (never the directory), the case does not, and
+/// the `.exe` extension may be spelled or implied — `wallermax-server`
+/// matches `WALLERMAX-SERVER.exe`, but `wallermax-serverd.exe` never
+/// matches `wallermax-server`. Both separators are honoured, so a
+/// Windows-shaped program path parses identically on every platform
+/// (`Path::file_name` would treat `\` as an ordinary character on
+/// Unix).
+fn image_matches(image: &str, program: &str) -> bool {
+    let file_name = |value: &str| {
+        value
+            .rsplit(['\\', '/'])
+            .next()
+            .unwrap_or(value)
+            .to_ascii_lowercase()
+    };
+    let image = file_name(image);
+    let program = file_name(program);
+    image == program || image.trim_end_matches(".exe") == program.trim_end_matches(".exe")
 }
 
 /// Copies the known metric families into the snapshot.
@@ -793,6 +929,10 @@ mod tests {
             busy.address.as_deref(),
             Some(format!("127.0.0.1:{port}").as_str())
         );
+        // Default settings carry no server command, so nothing is ever
+        // takeover-ready by default — the button needs a configured
+        // command to compare the owners against.
+        assert!(!busy.takeover_ready, "no command, no takeover");
         drop(squatter);
 
         let free = app_in(&dir).port_status();
@@ -801,6 +941,103 @@ mod tests {
             free.address.as_deref(),
             Some(format!("127.0.0.1:{port}").as_str()),
             "the address is still reported — only occupancy changes"
+        );
+    }
+
+    #[test]
+    fn image_matching_decides_by_file_name_only() {
+        assert!(image_matches("wallermax-server.exe", "wallermax-server"));
+        assert!(image_matches(
+            "WALLERMAX-SERVER.EXE",
+            "C:\\opt\\wallermax\\wallermax-server.exe"
+        ));
+        assert!(image_matches(
+            "C:\\elsewhere\\wallermax-server.exe",
+            "C:\\here\\wallermax-server.exe"
+        ));
+        assert!(
+            !image_matches("wallermax-serverd.exe", "wallermax-server"),
+            "a shared stem is not a shared identity"
+        );
+        assert!(!image_matches("node.exe", "wallermax-server"));
+    }
+
+    #[test]
+    fn takeover_starts_on_a_free_port_and_never_fights_for_a_busy_one() {
+        let dir = crate::testutil::temp_dir("app-takeover");
+        // A free port (0 = the OS picks): the takeover is just a start.
+        std::fs::write(
+            dir.join(BASE_FILE),
+            "[server]\nhost = \"127.0.0.1\"\nport = 0\n",
+        )
+        .expect("seed the base config");
+        let settings = Settings {
+            server_command: String::from(survivor_command_line()),
+            probe_window_ms: 1_200,
+            stop_grace_ms: 5_000,
+            ..Settings::default()
+        };
+        let app = App::with_settings(settings, dir.join("settings.json"), &dir);
+        let report = app
+            .takeover_and_start()
+            .expect("a free port starts like a plain start");
+        assert!(report.probe.booted, "probe: {:?}", report.probe);
+        app.stop_server().expect("stop works");
+        wait_for("the exit", || {
+            app.server_status().state == crate::process_manager::ServerState::Exited
+        });
+
+        // A busy port is never fought over: with no owner named (the
+        // non-Windows answer) or a foreign one (the Windows answer for
+        // this test's squatter), the takeover refuses and the squatter
+        // survives untouched.
+        let squatter = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the squatter");
+        let port = squatter.local_addr().expect("address").port();
+        std::fs::write(
+            dir.join(BASE_FILE),
+            format!("[server]\nhost = \"127.0.0.1\"\nport = {port}\n"),
+        )
+        .expect("aim at the squatter");
+        let app = App::with_settings(
+            Settings {
+                server_command: String::from(survivor_command_line()),
+                ..Settings::default()
+            },
+            dir.join("settings.json"),
+            &dir,
+        );
+        let error = app
+            .takeover_and_start()
+            .expect_err("a busy port is refused, never fought for");
+        assert!(error.contains("already in use"), "{error}");
+        assert!(
+            squatter.local_addr().is_ok(),
+            "the squatter survives the refusal"
+        );
+        drop(squatter);
+    }
+
+    #[test]
+    fn takeover_without_a_server_command_only_diagnoses() {
+        let dir = crate::testutil::temp_dir("app-takeover-nocommand");
+        let squatter = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the squatter");
+        let port = squatter.local_addr().expect("address").port();
+        std::fs::write(
+            dir.join(BASE_FILE),
+            format!("[server]\nhost = \"127.0.0.1\"\nport = {port}\n"),
+        )
+        .expect("aim at the squatter");
+        let app = app_in(&dir);
+        let error = app
+            .takeover_and_start()
+            .expect_err("there is nothing to compare the owners against");
+        assert!(
+            error.contains("no server command"),
+            "the missing command is the headline: {error}"
+        );
+        assert!(
+            squatter.local_addr().is_ok(),
+            "the squatter survives the refusal"
         );
     }
 }

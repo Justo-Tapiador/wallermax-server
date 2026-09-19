@@ -25,7 +25,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::State;
 
-use wallermax_manager_core::app::{App, DashboardSnapshot};
+use wallermax_manager_core::app::{App, DashboardSnapshot, PortStatus};
 use wallermax_manager_core::config_manager::{BackupInfo, ConfigWhich};
 use wallermax_manager_core::process_manager::{LogPage, ProcessStatus, StartReport};
 use wallermax_manager_core::settings::Settings;
@@ -127,6 +127,27 @@ async fn server_start(state: State<'_, Arc<App>>) -> Result<StartReport, String>
         .map_err(|error| format!("the start task failed: {error}"))?
 }
 
+/// The takeover: the one-click recovery for a port still held by a
+/// previous session's server — same slow-shape as `server_start` (the
+/// taskkills and the port wait must never freeze the window).
+#[tauri::command]
+async fn server_takeover(state: State<'_, Arc<App>>) -> Result<StartReport, String> {
+    let app = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || app.takeover_and_start())
+        .await
+        .map_err(|error| format!("the takeover task failed: {error}"))?
+}
+
+/// The port probe — the connect attempt (plus the netstat/tasklist
+/// pass on Windows while the port is busy) is slow by UI standards.
+#[tauri::command]
+async fn port_status(state: State<'_, Arc<App>>) -> Result<PortStatus, String> {
+    let app = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || app.port_status())
+        .await
+        .map_err(|error| format!("the port probe failed: {error}"))
+}
+
 #[tauri::command]
 async fn server_stop(state: State<'_, Arc<App>>) -> Result<(), String> {
     let app = state.inner().clone();
@@ -221,9 +242,11 @@ fn main() {
             config_backups,
             config_restore_backup,
             server_start,
+            server_takeover,
             server_stop,
             server_status,
             server_logs,
+            port_status,
             dashboard_fetch,
             open_config_folder,
             open_site

@@ -495,30 +495,13 @@ impl ProcessManager {
 
         #[cfg(windows)]
         {
-            // Console children cannot be closed gracefully on Windows;
-            // the tree is taken down in one captured, windowless taskkill
-            // (the server's storage is crash-safe by design).
-            let pid_text = pid.to_string();
-            let outcome = taskkill_command()
-                .args(["/PID", pid_text.as_str(), "/T", "/F"])
-                .output();
-            match outcome {
-                Ok(output) if !output.status.success() => {
-                    if is_exit_recorded(&exit) {
-                        return Ok(());
-                    }
-                    return Err(format!(
-                        "taskkill could not stop pid {pid}: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ));
+            // One captured, windowless taskkill takes the tree down (the
+            // storage is crash-safe by design).
+            if let Err(problem) = kill_tree(pid) {
+                if is_exit_recorded(&exit) {
+                    return Ok(());
                 }
-                Ok(_) => {}
-                Err(error) => {
-                    if is_exit_recorded(&exit) {
-                        return Ok(());
-                    }
-                    return Err(format!("could not run taskkill for pid {pid}: {error}"));
-                }
+                return Err(problem);
             }
             if !wait_until_dead(&exit, grace.max(Duration::from_secs(3))) {
                 return Err(format!(
@@ -608,6 +591,32 @@ fn taskkill_command() -> Command {
     let mut command = Command::new("taskkill");
     windowless(&mut command);
     command
+}
+
+/// Takes one process tree down the way [`ProcessManager::stop`] does:
+/// a single captured, windowless `taskkill /PID <pid> /T /F`. Public for
+/// the takeover path, which must fell a tree the manager did not spawn
+/// (a previous session's server) exactly like a supervised one.
+///
+/// # Errors
+///
+/// When taskkill itself refuses or cannot run — the caller decides
+/// whether that is fatal (a stop) or a race already won (a squatter
+/// that died between the netstat and the kill).
+#[cfg(windows)]
+pub fn kill_tree(pid: u32) -> Result<(), String> {
+    let pid_text = pid.to_string();
+    let outcome = taskkill_command()
+        .args(["/PID", pid_text.as_str(), "/T", "/F"])
+        .output();
+    match outcome {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(format!(
+            "taskkill could not stop pid {pid}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(error) => Err(format!("could not run taskkill for pid {pid}: {error}")),
+    }
 }
 
 /// Arms the kill-on-close safety net for a fresh child (Windows): the
