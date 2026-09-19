@@ -57,6 +57,15 @@ const PROBE_COOLDOWN: Duration = Duration::from_secs(10);
 /// How many stderr lines to keep for spawn-failure diagnostics.
 const STDERR_TAIL: usize = 40;
 
+/// V8 old-space ceiling for the sidecar's own heap, in MiB.
+///
+/// The broker process only parses requests and shuttles jobs, so this
+/// stays small; the render workers carry their own, independent ceiling
+/// (see `JHS_SIDECAR_WORKER_HEAP_MB` in `jhs-sidecar.mjs`). Without a
+/// cap a wedged sidecar grows until the OS OOM killer takes the
+/// server's container down with it.
+const SIDECAR_MAIN_HEAP_MB: u32 = 192;
+
 /// Everything the sidecar process needs to know, distilled from
 /// `[templates]` + `[templates.sidecar]` by the state constructor.
 pub struct SidecarOptions {
@@ -148,6 +157,9 @@ impl SidecarRenderer {
 
         let mut command = Command::new(&options.node_command);
         command
+            // Cap the broker's own heap (see SIDECAR_MAIN_HEAP_MB) —
+            // Node accepts its V8 flags before the script path.
+            .arg(format!("--max-old-space-size={SIDECAR_MAIN_HEAP_MB}"))
             .arg(options.script.as_os_str())
             .env("JHS_SIDECAR_TOKEN", &token)
             .env("JHS_SIDECAR_PORT", "0")
