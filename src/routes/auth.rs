@@ -53,6 +53,7 @@ use crate::error::AppError;
 use crate::extractors::{bearer_token, AuthUser, JsonBody};
 use crate::middleware::request_id::RequestId;
 use crate::proxy;
+use crate::rate_limit::Decision;
 use crate::session;
 use crate::state::{AppState, AuthContext};
 use crate::util::{read_form, unix_now};
@@ -379,9 +380,51 @@ async fn login(
         }
     };
 
+    // Brute-force throttle (see LoginThrottle): keyed by the resolved
+    // client IP (trusted proxies honoured) and the submitted username.
+    // Checked before any credential work; JSON clients get the global
+    // limiter's 429 envelope, browsers the same invalid-credentials
+    // bounce a wrong password produces — the lockout state leaks
+    // nothing to the login modal.
+    let client_ip = client_ip_of(&state, &peer, &headers);
+    if let Decision::Rejected { retry_after_secs } = state
+        .login_throttle()
+        .check(client_ip, &credentials.username)
+    {
+        state.record_rate_limited();
+        tracing::warn!(
+            client_ip = %client_ip,
+            username = %credentials.username,
+            retry_after_secs,
+            "login attempt throttled"
+        );
+        if is_form {
+            let secure = secure_cookies(&state);
+            let target = redirect_with_error(&redirect, "login_error", "invalid", "#login");
+            return redirect_response(
+                &target,
+                Some(session::clear_cookie_value(secure, cookie_domain(&state))),
+            );
+        }
+        return AppError::rate_limited(retry_after_secs)
+            .into_response_with_request_id(request_id.as_deref());
+    }
+
     match issue_login(&state, &peer, &headers, &credentials).await {
-        Ok(success) => respond_login(&state, success, is_form, &redirect),
+        Ok(success) => {
+            state
+                .login_throttle()
+                .record_success(client_ip, &credentials.username);
+            respond_login(&state, success, is_form, &redirect)
+        }
         Err(error) => {
+            // Only credential rejections advance the lockout: a storage
+            // hiccup (5xx) must not lock honest users out.
+            if error.status_code() == StatusCode::UNAUTHORIZED {
+                state
+                    .login_throttle()
+                    .record_failure(client_ip, &credentials.username);
+            }
             if is_form {
                 // Browsers bounce back to the page they came from with
                 // `?login_error=<code>#login`, which re-opens the modal
