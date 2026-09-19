@@ -211,7 +211,6 @@ impl LogBuffer {
     }
 
     fn push(&self, stream: LogStream, text: &str) {
-        let seq = self.written.fetch_add(1, Ordering::SeqCst);
         // Truncate on a character boundary — never mid-codepoint.
         let text = if text.chars().count() > LOG_LINE_MAX {
             let mut cut: String = text.chars().take(LOG_LINE_MAX).collect();
@@ -221,6 +220,15 @@ impl LogBuffer {
             text.to_owned()
         };
         let mut lines = self.lines.lock().expect("the log lock is live");
+        // The sequence number is allocated UNDER the lock that appends
+        // the line. The old version allocated it before locking, so a
+        // concurrent `page` could observe the bumped counter while the
+        // matching line was still queued behind the lock — and point
+        // `next_seq` past a line the poller never saw (a skipped line,
+        // permanently). With the allocation inside, `page` (which
+        // reads `written` while holding the same lock) only ever
+        // advertises numbers whose lines are already in the buffer.
+        let seq = self.written.fetch_add(1, Ordering::SeqCst);
         lines.push_back(LogLine { seq, stream, text });
         while lines.len() > self.capacity {
             lines.pop_front();
@@ -668,6 +676,81 @@ mod tests {
             split_command_line("prog \"dangling").is_err(),
             "dangling quote is rejected"
         );
+    }
+
+    #[test]
+    fn log_pages_never_advertise_an_unseen_line() {
+        // The invariant the paging protocol rests on: after any push,
+        // a page read at `since = 0` contains the pushed line and
+        // `next_seq` points exactly one past it — a poller following
+        // `next_seq` can never be told to skip a number whose line it
+        // has not seen.
+        let buffer = LogBuffer::with_capacity(64);
+        for expected in 0..100_u64 {
+            buffer.push(LogStream::Out, &format!("line {expected}"));
+            let page = buffer.page(0, 1000);
+            assert_eq!(
+                page.lines.last().map(|line| line.seq),
+                Some(expected),
+                "the freshly pushed line must be visible"
+            );
+            assert_eq!(
+                page.next_seq,
+                expected + 1,
+                "next_seq must point exactly one past the visible tail"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_push_and_page_never_lose_lines() {
+        // Four writers push while a reader pages continuously. Nothing
+        // is evicted (capacity exceeds the total), so the reader must
+        // see every sequence number exactly once, in order — the race
+        // the under-the-lock allocation closes.
+        let buffer = std::sync::Arc::new(LogBuffer::with_capacity(8192));
+        let writers: Vec<_> = (0..4_u64)
+            .map(|writer| {
+                let buffer = std::sync::Arc::clone(&buffer);
+                std::thread::spawn(move || {
+                    for _ in 0..500 {
+                        buffer.push(LogStream::Out, "concurrent");
+                    }
+                    writer
+                })
+            })
+            .collect();
+        let reader = {
+            let buffer = std::sync::Arc::clone(&buffer);
+            std::thread::spawn(move || {
+                let mut expected = 0_u64;
+                let mut since = 0_u64;
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while expected < 2_000 {
+                    let page = buffer.page(since, 10_000);
+                    for line in &page.lines {
+                        assert_eq!(
+                            line.seq, expected,
+                            "a line was skipped or reordered: expected {expected}, got {}",
+                            line.seq
+                        );
+                        expected += 1;
+                    }
+                    since = page.next_seq;
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the reader stalled at {expected} lines"
+                    );
+                }
+                expected
+            })
+        };
+
+        for writer in writers {
+            writer.join().expect("writer finishes");
+        }
+        let seen = reader.join().expect("reader finishes");
+        assert_eq!(seen, 2_000, "every pushed line must be paged exactly once");
     }
 
     #[test]
