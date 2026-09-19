@@ -8,8 +8,8 @@
 
 > A modular, secure and high-performance web server written in Rust.
 
-**Status: v0.20.0 — the roadmap phases done, a dynamic template engine with require() running on the original node-jhs2 engine,
-browser sessions, and a small built-in CMS that owns the homepage, and a server-side proxy for external APIs.** Phase 4 added rotating
+**Status: v0.21.0 — the roadmap phases done, added *Wallermax Manager* , 
+a dynamic template engine with require() running on the original node-jhs2 engine, browser sessions, and a small built-in CMS that owns the homepage, and a server-side proxy for external APIs.** Phase 4 added rotating
 refresh tokens with family revocation, a Prometheus `/metrics` endpoint, HTTPS via
 rustls (plus an HTTP-to-HTTPS redirect listener), trusted-proxy `X-Forwarded-For`
 parsing, a multi-stage Docker image with a compose example and a GitHub Actions CI
@@ -35,6 +35,7 @@ upstream CORS entirely). See
 [README-jhs-engine.md](README-jhs-engine.md),
 [Template backends](#template-backends-boa-and-the-node-sidecar-v0100),
 [The CMS](#the-cms-v080),
+[The Wallermax Manager](#the-wallermax-manager),
 [External API proxy](#external-api-proxy-v0120) and the
 [roadmap](#roadmap).
 
@@ -51,6 +52,7 @@ upstream CORS entirely). See
 - [Refresh tokens](#refresh-tokens)
 - [Browser sessions (v0.7.0)](#browser-sessions-v070)
 - [The CMS (v0.8.0)](#the-cms-v080)
+- [The Wallermax Manager](#the-wallermax-manager)
 - [External API proxy (v0.12.0)](#external-api-proxy-v0120)
 - [Prometheus metrics](#prometheus-metrics)
 - [TLS (HTTPS)](#tls-https)
@@ -985,6 +987,19 @@ template as the `menus` global, per-page SEO metadata and an automatic
 **[README-CMS.md](README-CMS.md)**, together with the roadmap of the
 CMS feature line (the media library and search done, revisions next).
 Still zero JavaScript.
+
+## The Wallermax Manager
+
+A cross-platform **desktop** application to manage a `wallermax-server`:
+its two configuration files, its process, its logs and its local
+endpoints — in a native window, never in a browser.
+
+> **Scope**: servers, not websites. The manager deliberately does
+> **not** touch web content, tenants or user accounts — the server's own
+> panel already does that. The prototype's *Websites* section is
+> intentionally absent.
+
+**[Full README.md](/manager/README.md)**
 
 ### Roles
 

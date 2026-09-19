@@ -154,7 +154,8 @@ async fn dashboard_fetch(state: State<'_, Arc<App>>) -> Result<DashboardSnapshot
     let app = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || app.fetch_dashboard())
         .await
-        .map_err(|error| format!("the dashboard task failed: {error}"))?
+        .map_err(|error| format!("the dashboard task failed: {error}"))
+        
 }
 
 /// The per-platform "open this folder in the file manager" program.
