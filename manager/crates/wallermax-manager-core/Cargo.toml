@@ -17,3 +17,16 @@ toml_edit = "0.22"
 # manager created); Windows stops go through `taskkill /T /F` instead.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Tying the server's lifetime to the manager's on Windows: the child is
+# assigned to a job object armed with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+# so a manager that dies — closed, crashed or killed — takes the whole
+# server tree down with it instead of leaving an invisible orphan holding
+# the port (the exact cause of "os error 10048" on the next start).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }

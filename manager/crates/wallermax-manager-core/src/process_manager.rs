@@ -40,6 +40,20 @@
 //!   manager's console clean instead of spraying
 //!   *"no se pudo terminar"* errors.
 //!
+//! ## The server dies with the manager
+//!
+//! On Windows the fresh child is also assigned to a job object armed
+//! with `JOB_OBJECT_LIMIT_KILL_ON_CLOSE`. The manager keeps that job's
+//! handle open for its whole life, so whenever the manager goes away —
+//! window closed, crash, `taskkill` — the kernel closes the handle and
+//! takes the whole server tree down with it. Without this a manager
+//! closed while the server runs leaves an *invisible* orphan behind
+//! (the server has no console window), and the next start dies on the
+//! old bind with "os error 10048" — port already in use. Unix keeps the
+//! classic behaviour instead: the child lives in its own process group
+//! and survives its parent, daemon-like, until it is stopped
+//! explicitly.
+//!
 //! ## The boot probe
 //!
 //! Every start is watched for a short window: a process that **dies**
@@ -411,6 +425,22 @@ impl ProcessManager {
             }
             let exit = spawn_reaper(child);
 
+            // Tie the fresh child to this manager's lifetime (Windows):
+            // whenever the manager goes away, the whole tree goes with
+            // it. A failure here never blocks the start — the explicit
+            // stop path still works; only the crash-orphan safety net
+            // is lost, and the captured output says so.
+            #[cfg(windows)]
+            if let Err(problem) = supervise_kill_on_close(pid) {
+                logs.push(
+                    LogStream::Err,
+                    &format!(
+                        "wallermax-manager: could not tie the server to the manager's \
+                         lifetime ({problem}); a manager exit may leave it running"
+                    ),
+                );
+            }
+
             *slot = Some(Managed {
                 pid,
                 started_at_unix: now_unix(),
@@ -578,6 +608,68 @@ fn taskkill_command() -> Command {
     let mut command = Command::new("taskkill");
     windowless(&mut command);
     command
+}
+
+/// Arms the kill-on-close safety net for a fresh child (Windows): the
+/// child joins a job object whose only handle this manager holds. When
+/// the manager exits — any way it exits — the kernel closes the handle
+/// and the job (the server and every helper it spawned, the `.jhs`
+/// sidecar included) is terminated with it. The job handle is
+/// deliberately never closed: its lifetime *is* the kill switch.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn supervise_kill_on_close(pid: u32) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+
+    // SAFETY: four raw Win32 calls with no pointers into Rust data
+    // beyond the `limits` struct zeroed and filled in below, and no
+    // handle escaping this function — the process handle is closed
+    // right after the single assignment, and the job handle is
+    // intentionally left open for the manager's whole life (that open
+    // handle is the mechanism; see the doc comment). Every failure path
+    // closes what it opened.
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return Err(String::from("CreateJobObjectW returned null"));
+        }
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let armed = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &limits as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if armed == 0 {
+            CloseHandle(job);
+            return Err(String::from(
+                "SetInformationJobObject refused the kill-on-close flag",
+            ));
+        }
+        let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+        if process.is_null() {
+            CloseHandle(job);
+            return Err(format!("OpenProcess({pid}) returned null"));
+        }
+        let assigned = AssignProcessToJobObject(job, process);
+        CloseHandle(process);
+        if assigned == 0 {
+            CloseHandle(job);
+            return Err(format!("AssignProcessToJobObject({pid}) failed"));
+        }
+        // Deliberately not closing `job`: its open handle is the kill
+        // switch — see the doc comment.
+        Ok(())
+    }
 }
 
 /// Polls until the child is recorded as dead, at most `budget` long.
@@ -840,6 +932,33 @@ mod tests {
             "the rejection says why: {error}"
         );
         manager.stop(GRACE).expect("cleanup");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn starting_arms_the_kill_on_close_job() {
+        // The job is armed right after the spawn; a failure to arm it
+        // would be recorded as a manager line in the captured output.
+        // (The kill-on-close *behaviour* itself — the whole tree dying
+        // with the manager — cannot be observed from inside the manager;
+        // arming without an error is the observable half, and the stop
+        // path below proves the child still behaves normally.)
+        let manager = ProcessManager::new();
+        let report = manager
+            .start(&survivor_spec(), WINDOW)
+            .expect("the survivor starts");
+        assert!(report.probe.booted, "probe: {:?}", report.probe);
+        let captured: Vec<String> = manager
+            .logs(0, 1000)
+            .lines
+            .into_iter()
+            .map(|line| line.text)
+            .collect();
+        assert!(
+            !captured.iter().any(|line| line.contains("could not tie")),
+            "arming must succeed, captured: {captured:?}"
+        );
+        manager.stop(GRACE).expect("stop still works");
     }
 
     #[test]

@@ -6032,6 +6032,7 @@ dependencies = [
  "serde_json",
  "toml_edit 0.22.27",
  "wallermax-server",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
