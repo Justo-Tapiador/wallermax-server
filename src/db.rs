@@ -543,17 +543,27 @@ impl UserRepository for SqliteUserRepository {
 
     async fn delete(&self, id: i64) -> Result<(), RepositoryError> {
         // F15: the memberships go with the account (refresh tokens
-        // cascade in SQL).
+        // cascade in SQL). Both deletes share ONE transaction: a failure
+        // halfway must not leave a user stripped of its memberships.
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(RepositoryError::from_sqlx)?;
         sqlx::query("DELETE FROM memberships WHERE user_id = ?1")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(RepositoryError::from_sqlx)?;
         sqlx::query("DELETE FROM users WHERE id = ?1")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map(|_| ())
+            .map_err(RepositoryError::from_sqlx)?;
+        transaction
+            .commit()
+            .await
             .map_err(RepositoryError::from_sqlx)
     }
 
@@ -3061,12 +3071,25 @@ impl OrganizationRepository for SqliteOrganizationRepository {
         // — the schema's no-foreign-key style (a users delete works
         // the same way). One statement per table keeps each failure
         // addressable; the organization row itself is the last to go.
+        // All of it shares ONE transaction (like the users delete): a
+        // failure halfway must not leave an organization stripped of
+        // its domains or memberships.
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(RepositoryError::from_sqlx)?;
         let id: Option<i64> = sqlx::query_scalar("SELECT id FROM organizations WHERE key = ?1")
             .bind(key)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *transaction)
             .await
             .map_err(RepositoryError::from_sqlx)?;
         let Some(id) = id else {
+            // Nothing to delete: release the read-only transaction.
+            transaction
+                .rollback()
+                .await
+                .map_err(RepositoryError::from_sqlx)?;
             return Ok(false);
         };
         for statement in [
@@ -3076,10 +3099,14 @@ impl OrganizationRepository for SqliteOrganizationRepository {
         ] {
             sqlx::query(statement)
                 .bind(id)
-                .execute(&self.pool)
+                .execute(&mut *transaction)
                 .await
                 .map_err(RepositoryError::from_sqlx)?;
         }
+        transaction
+            .commit()
+            .await
+            .map_err(RepositoryError::from_sqlx)?;
         Ok(true)
     }
 
