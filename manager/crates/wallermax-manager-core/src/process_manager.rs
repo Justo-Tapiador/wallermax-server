@@ -16,7 +16,14 @@
 //! - on Windows the program resolves through the standard
 //!   `CreateProcess` search order, which always includes `System32` —
 //!   `ping.exe`, `cmd.exe` and friends are found even under a stripped
-//!   `PATH`.
+//!   `PATH`;
+//! - also on Windows, the child is spawned with `CREATE_NO_WINDOW`:
+//!   the server is a console program and the manager a GUI one, and
+//!   without the flag Windows would allocate the child a fresh console
+//!   — a black window squatting on the desktop for as long as the
+//!   server lives. With it the child gets an invisible console whose
+//!   output still flows through the pipes, and the server's own
+//!   helpers (the `.jhs` sidecar) simply inherit that console.
 //!
 //! ## Stopping is tree-level
 //!
@@ -385,6 +392,11 @@ impl ProcessManager {
                 use std::os::unix::process::CommandExt;
                 command.process_group(0);
             }
+            // No console window next to the GUI: the server keeps its
+            // stdio through the pipes above, and its own children
+            // inherit the invisible console.
+            #[cfg(windows)]
+            windowless(&mut command);
             let mut child = command
                 .spawn()
                 .map_err(|error| format!("could not start `{}`: {error}", spec.program))?;
@@ -550,13 +562,21 @@ impl ProcessManager {
     }
 }
 
+/// Marks a console command so Windows does not allocate a visible
+/// console window for it when the GUI manager spawns it. The child's
+/// stdio is unaffected — it arrives through the pipes.
+#[cfg(windows)]
+fn windowless(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
 /// A windowless `taskkill` command (no console flash from the GUI).
 #[cfg(windows)]
 fn taskkill_command() -> Command {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut command = Command::new("taskkill");
-    command.creation_flags(CREATE_NO_WINDOW);
+    windowless(&mut command);
     command
 }
 
