@@ -26,7 +26,7 @@ function showBanner(id, message, kind) {
     return;
   }
   node.className = `banner ${kind || ""}`;
-  node.textContent = message;
+  node.innerHTML = ansiToHtml(message);
   node.style.display = "block";
 }
 
@@ -80,6 +80,158 @@ function fmtBytes(bytes) {
 
 function textNode(value) {
   return document.createTextNode(value === null || value === undefined ? "—" : String(value));
+}
+
+/* ------------------------------------------------------------------ */
+/* ANSI: the server's console colours, rendered as HTML                */
+/* ------------------------------------------------------------------ */
+
+/* The server's tracing subscriber writes Select Graphic Rendition
+ * codes (green INFO, yellow WARN, dim timestamps, bold targets) meant
+ * for a real terminal. A webview would paint them as literal "[32m"
+ * noise, so every surface that shows captured output — the Logs page,
+ * the server-page preview and the boot-probe banner — renders through
+ * `ansiToHtml`: the text is HTML-escaped first (log lines can carry
+ * user-controlled text), SGR sequences become semantic spans (the
+ * .ansi-* classes in styles.css), and anything else the terminal
+ * protocols define (cursor moves, window titles, ...) is swallowed.
+ * Unknown SGR codes are ignored, so a future server logging something
+ * new degrades to plain, safe text. */
+
+const ANSI_FG = {
+  30: "ansi-black", 31: "ansi-red", 32: "ansi-green", 33: "ansi-yellow",
+  34: "ansi-blue", 35: "ansi-magenta", 36: "ansi-cyan", 37: "ansi-white",
+  90: "ansi-bright-black", 91: "ansi-bright-red", 92: "ansi-bright-green",
+  93: "ansi-bright-yellow", 94: "ansi-bright-blue", 95: "ansi-bright-magenta",
+  96: "ansi-bright-cyan", 97: "ansi-bright-white",
+};
+
+function escapeHtml(value) {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function dropStyle(style, ...classes) {
+  for (const name of classes) {
+    const at = style.indexOf(name);
+    if (at !== -1) style.splice(at, 1);
+  }
+}
+
+/* Applies one SGR parameter list ("1;32") to the running style. */
+function applySgr(params, style) {
+  const parts = params === "" ? ["0"] : params.split(";");
+  for (let i = 0; i < parts.length; i += 1) {
+    const code = parts[i] === "" ? 0 : Number.parseInt(parts[i], 10);
+    if (Number.isNaN(code)) continue;
+    if (code === 0) {
+      style.length = 0;
+    } else if (code === 1) {
+      style.push("ansi-bold");
+    } else if (code === 2) {
+      style.push("ansi-dim");
+    } else if (code === 3) {
+      style.push("ansi-italic");
+    } else if (code === 4) {
+      style.push("ansi-underline");
+    } else if (code === 22) {
+      dropStyle(style, "ansi-bold", "ansi-dim");
+    } else if (code === 23) {
+      dropStyle(style, "ansi-italic");
+    } else if (code === 24) {
+      dropStyle(style, "ansi-underline");
+    } else if (ANSI_FG[code] !== undefined) {
+      dropStyle(style, ...Object.values(ANSI_FG));
+      style.push(ANSI_FG[code]);
+    } else if (code === 39) {
+      dropStyle(style, ...Object.values(ANSI_FG));
+    } else if (code === 38 && parts[i + 1] === "5") {
+      /* Indexed colour: the first 16 mirror the classic palette; the
+       * rest is beyond what a log line needs, but is consumed either
+       * way so its parameters are not misread as new codes. */
+      const indexed = Number.parseInt(parts[i + 2], 10);
+      dropStyle(style, ...Object.values(ANSI_FG));
+      if (indexed >= 0 && indexed <= 7) style.push(ANSI_FG[30 + indexed]);
+      else if (indexed >= 8 && indexed <= 15) style.push(ANSI_FG[82 + indexed]);
+      i += 2;
+    } else if (code === 48 && parts[i + 1] === "5") {
+      i += 2; /* background colour: consumed, never rendered */
+    } else if ((code === 38 || code === 48) && parts[i + 1] === "2") {
+      i += 4; /* 24-bit colour: consumed, never rendered */
+    }
+  }
+}
+
+function ansiToHtml(text) {
+  const out = [];
+  let run = "";      // plain text waiting to be emitted
+  let style = [];    // classes the next span will carry
+  let open = false;  // a span is currently open
+
+  const flush = () => {
+    if (run === "") return;
+    if (!open && style.length > 0) {
+      out.push(`<span class="${style.join(" ")}">`);
+      open = true;
+    }
+    out.push(escapeHtml(run));
+    run = "";
+  };
+  const close = () => {
+    flush();
+    if (open) {
+      out.push("</span>");
+      open = false;
+    }
+  };
+
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== "\x1b") {
+      run += text[i];
+      i += 1;
+      continue;
+    }
+    if (text[i + 1] === "[") {
+      /* CSI: parameter bytes (0x20-0x3f), then one final byte. */
+      let j = i + 2;
+      while (j < text.length) {
+        const byte = text.charCodeAt(j);
+        if (byte < 0x20 || byte > 0x3f) break;
+        j += 1;
+      }
+      if (j >= text.length) break; // truncated sequence: drop the tail
+      if (text[j] === "m") {
+        close();
+        /* SGR is incremental: a sequence like 22 only switches one
+         * attribute off and must keep the rest (colour included), so
+         * the running style carries over — only code 0 clears it. */
+        applySgr(text.slice(i + 2, j), style);
+      }
+      i = j + 1;
+    } else if (text[i + 1] === "]") {
+      /* OSC (window titles and friends): swallow up to BEL or ST. */
+      let j = i + 2;
+      while (j < text.length && text[j] !== "\x07" && !(text[j] === "\x1b" && text[j + 1] === "\\")) {
+        j += 1;
+      }
+      i = Math.min(j + (text[j] === "\x07" ? 1 : 2), text.length);
+    } else {
+      /* Any other escape: the introducer, then any intermediate bytes
+       * (0x20-0x2f), then the final byte — e.g. ESC ( B ("select US
+       * charset") is three bytes, and its final must not leak as text. */
+      let j = i + 1;
+      while (j < text.length) {
+        const byte = text.charCodeAt(j);
+        j += 1;
+        if (byte >= 0x20 && byte <= 0x2f) continue;
+        break;
+      }
+      i = j;
+    }
+  }
+  flush();
+  if (open) out.push("</span>");
+  return out.join("");
 }
 
 /* ------------------------------------------------------------------ */
@@ -331,7 +483,7 @@ function renderLogs() {
       seq.textContent = `#${line.seq}`;
       const text = document.createElement("span");
       text.className = "text";
-      text.textContent = line.text;
+      text.innerHTML = ansiToHtml(line.text);
       row.append(stream, seq, text);
       fragment.appendChild(row);
     }
@@ -357,7 +509,7 @@ function renderLogs() {
       row.className = `log-line ${line.stream}`;
       const text = document.createElement("span");
       text.className = "text";
-      text.textContent = line.text;
+      text.innerHTML = ansiToHtml(line.text);
       row.appendChild(text);
       preview.appendChild(row);
     }

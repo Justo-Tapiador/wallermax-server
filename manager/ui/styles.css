@@ -117,6 +117,7 @@ main { min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 .banner {
   border: 1px solid #4a3a17; background: #2b2008; color: #ffd88a;
   border-radius: 9px; padding: 11px 14px; margin-bottom: 14px; font-size: 13px;
+  white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .banner.error { border-color: #7c2745; background: #2c0f1c; color: #ffc9d5; }
 .banner.ok { border-color: #1c5c40; background: #0a261b; color: #b8f3d9; }
@@ -186,6 +187,30 @@ main { min-width: 0; display: flex; flex-direction: column; min-height: 0; }
 .log-line.err .stream { background: #3d1024; color: #ff8fa9; }
 .log-line .seq { color: #3d5a80; flex: none; min-width: 52px; text-align: right; }
 .log-line .text { white-space: pre-wrap; word-break: break-all; }
+
+/* ANSI SGR classes — the server's console colours, painted by ansiToHtml().
+ * The palette follows the app's tokens (greens, ambers, blues) so a log
+ * line reads like a terminal without breaking the dark theme. */
+.ansi-bold { font-weight: 600; }
+.ansi-dim { opacity: .55; }
+.ansi-italic { font-style: italic; }
+.ansi-underline { text-decoration: underline; }
+.ansi-black { color: #5c7191; } /* literal black would vanish on the dark panels */
+.ansi-red { color: #ff7b93; }
+.ansi-green { color: #3ddc97; }
+.ansi-yellow { color: #f5b942; }
+.ansi-blue { color: #6fa3e8; }
+.ansi-magenta { color: #d087e8; }
+.ansi-cyan { color: #5fd4e6; }
+.ansi-white { color: #eef5ff; }
+.ansi-bright-black { color: #8ea5c3; }
+.ansi-bright-red { color: #ff8fa9; }
+.ansi-bright-green { color: #6cf0b6; }
+.ansi-bright-yellow { color: #ffd166; }
+.ansi-bright-blue { color: #8ab8ff; }
+.ansi-bright-magenta { color: #e6a3f2; }
+.ansi-bright-cyan { color: #8ce6f5; }
+.ansi-bright-white { color: #ffffff; }
 
 /* ----- tables ----------------------------------------------------------- */
 
