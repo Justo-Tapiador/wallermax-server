@@ -33,7 +33,7 @@
 //! blocking pool, and the spawn handshake runs once at startup.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -473,6 +473,28 @@ struct SidecarFailure {
     path: Option<String>,
 }
 
+/// Reads once from `stream`, absorbing the interrupted-system-call
+/// errors a blocking socket can surface.
+///
+/// `ErrorKind::Interrupted` (`EINTR`, "Interrupted system call", os
+/// error 4) means the kernel stopped the read **before any byte
+/// moved** — a signal arrived first. POSIX semantics are explicit:
+/// the call made no progress and is safe to restart, which is
+/// exactly what the standard library's own `read_exact`/`write_all`
+/// loops do internally. A raw `read()` propagates it instead, so one
+/// stray signal on a loaded machine (seen as a one-in-thousands CI
+/// flake on GitHub's hosted runners) would fail an exchange that
+/// was never even attempted.
+fn read_chunk(stream: &mut impl Read, chunk: &mut [u8]) -> Result<usize, String> {
+    loop {
+        match stream.read(chunk) {
+            Ok(read) => return Ok(read),
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(error) => return Err(format!("read failed: {error}")),
+        }
+    }
+}
+
 /// Reads one full HTTP/1.1 response (status line + headers +
 /// content-length-framed body) and parses the JSON body.
 fn read_json_response(stream: &mut TcpStream) -> Result<Value, String> {
@@ -487,9 +509,7 @@ fn read_json_response(stream: &mut TcpStream) -> Result<Value, String> {
         if raw.len() > RESPONSE_LIMIT {
             return Err(String::from("the response headers exceeded the size limit"));
         }
-        let read = stream
-            .read(&mut chunk)
-            .map_err(|error| format!("read failed: {error}"))?;
+        let read = read_chunk(stream, &mut chunk)?;
         if read == 0 {
             return Err(String::from(
                 "the sidecar closed the connection before answering",
@@ -525,9 +545,7 @@ fn read_json_response(stream: &mut TcpStream) -> Result<Value, String> {
         if body.len() > RESPONSE_LIMIT {
             return Err(String::from("the response body exceeded the size limit"));
         }
-        let read = stream
-            .read(&mut chunk)
-            .map_err(|error| format!("read failed: {error}"))?;
+        let read = read_chunk(stream, &mut chunk)?;
         if read == 0 {
             return Err(String::from("the sidecar closed the connection mid-body"));
         }
@@ -972,6 +990,63 @@ mod tests {
             .expect("timeout");
         assert!(read_json_response(&mut client).is_err());
         writer.join().expect("writer thread");
+    }
+
+    /// A reader that answers `Interrupted` a few times before letting
+    /// the payload through — the shape of the CI flake [`read_chunk`]
+    /// exists to absorb. A real `EINTR` cannot be triggered on demand
+    /// from user space, so the kernel's part is played by a mock.
+    struct InterruptedThen<D> {
+        data: D,
+        interrupts_left: usize,
+    }
+
+    impl<D: Read> Read for InterruptedThen<D> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.interrupts_left > 0 {
+                self.interrupts_left -= 1;
+                return Err(std::io::Error::new(
+                    ErrorKind::Interrupted,
+                    "Interrupted system call (os error 4)",
+                ));
+            }
+            self.data.read(buf)
+        }
+    }
+
+    #[test]
+    fn interrupted_reads_are_retried_not_surfaced() {
+        let mut chunk = [0u8; 16];
+        let mut reader = InterruptedThen {
+            data: std::io::Cursor::new(b"payload".as_slice()),
+            interrupts_left: 3,
+        };
+        let read = read_chunk(&mut reader, &mut chunk).expect("the read survives the interrupts");
+        assert_eq!(read, "payload".len());
+        assert_eq!(&chunk[..read], b"payload");
+    }
+
+    /// A reader whose every answer is a hard error — the kind that
+    /// must keep flowing through to the caller untouched.
+    struct ResetReader;
+
+    impl Read for ResetReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                ErrorKind::ConnectionReset,
+                "reset by peer",
+            ))
+        }
+    }
+
+    #[test]
+    fn non_interrupted_read_errors_still_surface() {
+        let mut chunk = [0u8; 16];
+        let error = read_chunk(&mut ResetReader, &mut chunk).expect_err("hard errors still fail");
+        assert!(
+            error.contains("read failed:") && error.contains("reset by peer"),
+            "the message keeps its shape: {error}"
+        );
     }
 
     #[test]
