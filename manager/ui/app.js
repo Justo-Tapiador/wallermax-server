@@ -91,6 +91,9 @@ const CONFIG_FIELDS = [
   { section: "templates", key: "templates.views_dir", label: "Views dir", placeholder: "views" },
   { section: "metrics", key: "metrics.enabled", label: "Metrics enabled", check: true },
   { section: "tls", key: "tls.enabled", label: "TLS enabled", check: true },
+  { section: "tls", key: "tls.http_listen", label: "Plain-HTTP redirect", hint: "optional host:port that 308-redirects to HTTPS" },
+  { section: "tls", key: "tls.cert_path", label: "TLS certificate (PEM)", wide: true, hint: "PEM certificate chain — required while tls.enabled; relative to the server's working directory" },
+  { section: "tls", key: "tls.key_path", label: "TLS private key (PEM)", wide: true, hint: "PEM private key — required while tls.enabled; relative to the server's working directory" },
 ];
 
 const MIDDLEWARE_SWITCHES = [
@@ -394,7 +397,9 @@ function buildForm() {
       input = document.createElement("input");
       input.type = "text";
       input.id = `cfg-${field.key}`;
-      input.placeholder = `default: ${field.placeholder}`;
+      // `hint` fields describe what to type (the TLS paths have no
+      // default to show); the others advertise the file's default.
+      input.placeholder = field.hint || (field.placeholder ? `default: ${field.placeholder}` : "");
     }
     input.dataset.key = field.key;
     wrap.appendChild(input);
