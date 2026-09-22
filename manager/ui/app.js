@@ -30,6 +30,23 @@ function showBanner(id, message, kind) {
   node.style.display = "block";
 }
 
+/* The centered transition state: from the button press until the
+ * manager reflects the change. It waits a beat before appearing, so
+ * snappy actions never flash it — and while it is up, the backdrop
+ * swallows stray clicks (no double-starts, no double-saves). */
+async function withBusy(label, task) {
+  const overlay = $("busy");
+  if (!overlay) return task(); // a stripped-down shell: behave as before
+  $("busy-text").textContent = label;
+  const reveal = setTimeout(() => { overlay.style.display = "grid"; }, 130);
+  try {
+    return await task();
+  } finally {
+    clearTimeout(reveal);
+    overlay.style.display = "none";
+  }
+}
+
 function fmtDuration(seconds) {
   if (seconds === null || seconds === undefined) return "—";
   const s = Math.floor(seconds);
@@ -465,29 +482,31 @@ function fieldKeys() {
 }
 
 async function saveForm() {
-  const pairs = [];
-  for (const input of document.querySelectorAll("#config-form [data-key]")) {
-    let value;
-    if (input.dataset.check) {
-      if (input.indeterminate) continue; // untouched: leave the file as it is
-      value = input.checked ? "true" : "false";
-    } else {
-      value = input.value.trim();
-      if (value === "") continue; // untouched: leave the file as it is
+  await withBusy("Saving the configuration…", async () => {
+    const pairs = [];
+    for (const input of document.querySelectorAll("#config-form [data-key]")) {
+      let value;
+      if (input.dataset.check) {
+        if (input.indeterminate) continue; // untouched: leave the file as it is
+        value = input.checked ? "true" : "false";
+      } else {
+        value = input.value.trim();
+        if (value === "") continue; // untouched: leave the file as it is
+      }
+      pairs.push([input.dataset.key, value]);
     }
-    pairs.push([input.dataset.key, value]);
-  }
-  if (pairs.length === 0) {
-    showBanner("config-banner", "Nothing to save — every field is untouched.", "");
-    return;
-  }
-  try {
-    await invoke("config_set_values", { file: state.file, values: pairs });
-    showBanner("config-banner", `Saved ${pairs.length} value${pairs.length === 1 ? "" : "s"} to ${state.file === "base" ? "wallermax.toml" : "wallermax.local.toml"} (validated, backup kept).`, "ok");
-  } catch (error) {
-    showBanner("config-banner", String(error), "error");
-  }
-  await loadBackups();
+    if (pairs.length === 0) {
+      showBanner("config-banner", "Nothing to save — every field is untouched.", "");
+      return;
+    }
+    try {
+      await invoke("config_set_values", { file: state.file, values: pairs });
+      showBanner("config-banner", `Saved ${pairs.length} value${pairs.length === 1 ? "" : "s"} to ${state.file === "base" ? "wallermax.toml" : "wallermax.local.toml"} (validated, backup kept).`, "ok");
+    } catch (error) {
+      showBanner("config-banner", String(error), "error");
+    }
+    await loadBackups();
+  });
 }
 
 async function loadRaw() {
@@ -504,13 +523,15 @@ async function loadRaw() {
 }
 
 async function saveRaw() {
-  try {
-    await invoke("config_write", { file: state.file, content: $("raw-editor").value });
-    showBanner("config-banner", "Layer saved (validated, backup kept).", "ok");
-  } catch (error) {
-    showBanner("config-banner", String(error), "error");
-  }
-  await loadBackups();
+  await withBusy("Saving the layer…", async () => {
+    try {
+      await invoke("config_write", { file: state.file, content: $("raw-editor").value });
+      showBanner("config-banner", "Layer saved (validated, backup kept).", "ok");
+    } catch (error) {
+      showBanner("config-banner", String(error), "error");
+    }
+    await loadBackups();
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -564,13 +585,15 @@ async function loadBackups() {
         if (!window.confirm(`Restore ${backup.file_name} over the current ${which === "base" ? "wallermax.toml" : "wallermax.local.toml"}?`)) {
           return;
         }
-        try {
-          await invoke("config_restore_backup", { file: which, fileName: backup.file_name });
-          toast(`Restored ${backup.file_name} (the replaced file was backed up too).`, "ok");
-        } catch (error) {
-          toast(String(error), "error");
-        }
-        await loadBackups();
+        await withBusy(`Restoring ${backup.file_name}…`, async () => {
+          try {
+            await invoke("config_restore_backup", { file: which, fileName: backup.file_name });
+            toast(`Restored ${backup.file_name} (the replaced file was backed up too).`, "ok");
+          } catch (error) {
+            toast(String(error), "error");
+          }
+          await loadBackups();
+        });
       });
       actions.appendChild(button);
       row.append(name, size, modified, actions);
@@ -642,28 +665,29 @@ async function configValue(key) {
 }
 
 async function saveSettings() {
-  const settings = {
-    server_command: $("set-command").value.trim(),
-    working_dir: $("set-workdir").value.trim(),
-    config_dir: $("set-configdir").value.trim(),
-    origin: $("set-origin").value.trim(),
-    site_url: $("set-site").value.trim(),
-    health_path: $("set-health").value.trim(),
-    metrics_path: $("set-metrics").value.trim(),
-    stats_path: $("set-stats").value.trim(),
-    probe_window_ms: Number($("set-probe").value) || 4000,
-    stop_grace_ms: Number($("set-grace").value) || 5000,
-  };
-  try {
-    await invoke("settings_save", { settings });
-    toast("Settings saved and applied.", "ok");
-    $("origin-chip").textContent = settings.origin;
-    await loadPaths();
-    pollDashboard();
-    pollStatus();
-  } catch (error) {
-    toast(String(error), "error");
-  }
+  await withBusy("Saving the settings…", async () => {
+    const settings = {
+      server_command: $("set-command").value.trim(),
+      working_dir: $("set-workdir").value.trim(),
+      config_dir: $("set-configdir").value.trim(),
+      origin: $("set-origin").value.trim(),
+      site_url: $("set-site").value.trim(),
+      health_path: $("set-health").value.trim(),
+      metrics_path: $("set-metrics").value.trim(),
+      stats_path: $("set-stats").value.trim(),
+      probe_window_ms: Number($("set-probe").value) || 4000,
+      stop_grace_ms: Number($("set-grace").value) || 5000,
+    };
+    try {
+      await invoke("settings_save", { settings });
+      toast("Settings saved and applied.", "ok");
+      $("origin-chip").textContent = settings.origin;
+      await loadPaths();
+      await Promise.all([pollDashboard(), pollStatus()]);
+    } catch (error) {
+      toast(String(error), "error");
+    }
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -709,24 +733,25 @@ function paintTakeover() {
 async function takeoverStart() {
   const button = $("btn-takeover");
   if (button) button.disabled = true;
-  try {
-    const report = await invoke("server_takeover");
-    if (report.probe.booted) {
-      showBanner("probe-banner", report.probe.output.trim()
-        ? `Takeover done — boot probe: healthy.\n${report.probe.output.trim()}`
-        : `Takeover done — the process is up (pid ${report.pid}).`, "ok");
-    } else {
-      showBanner("probe-banner",
-        `Takeover done, but the boot probe failed${report.probe.exit_code === null ? "" : ` (exit code ${report.probe.exit_code})`}.\n${report.probe.output.trim() || "no output captured"}`,
-        "error");
+  await withBusy("Taking over the port…", async () => {
+    try {
+      const report = await invoke("server_takeover");
+      if (report.probe.booted) {
+        showBanner("probe-banner", report.probe.output.trim()
+          ? `Takeover done — boot probe: healthy.\n${report.probe.output.trim()}`
+          : `Takeover done — the process is up (pid ${report.pid}).`, "ok");
+      } else {
+        showBanner("probe-banner",
+          `Takeover done, but the boot probe failed${report.probe.exit_code === null ? "" : ` (exit code ${report.probe.exit_code})`}.\n${report.probe.output.trim() || "no output captured"}`,
+          "error");
+      }
+    } catch (error) {
+      showBanner("probe-banner", String(error), "error");
     }
-  } catch (error) {
-    showBanner("probe-banner", String(error), "error");
-  }
-  state.portStatus = null;
-  paintTakeover();
-  pollStatus();
-  pollDashboard();
+    state.portStatus = null;
+    paintTakeover();
+    await Promise.all([pollStatus(), pollDashboard()]);
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -734,40 +759,44 @@ async function takeoverStart() {
 /* ------------------------------------------------------------------ */
 
 async function startServer() {
-  try {
-    const report = await invoke("server_start");
-    if (report.probe.booted) {
-      showBanner("probe-banner", report.probe.output.trim()
-        ? `Boot probe: healthy.\n${report.probe.output.trim()}`
-        : `Boot probe: the process is up (pid ${report.pid}).`, "ok");
-    } else {
-      showBanner("probe-banner",
-        `Boot probe: the process refused to start${report.probe.exit_code === null ? "" : ` (exit code ${report.probe.exit_code})`}.\n${report.probe.output.trim() || "no output captured"}`,
-        "error");
-    }
-  } catch (error) {
-    showBanner("probe-banner", String(error), "error");
-    // A refused start may be a busy port — the banner knows who holds
-    // it, so ask right away (the takeover button rides on it).
+  await withBusy("Starting the server…", async () => {
     try {
-      state.portStatus = await invoke("port_status");
-    } catch (probeError) {
-      console.error("port probe failed", probeError);
-      state.portStatus = null;
+      const report = await invoke("server_start");
+      if (report.probe.booted) {
+        showBanner("probe-banner", report.probe.output.trim()
+          ? `Boot probe: healthy.\n${report.probe.output.trim()}`
+          : `Boot probe: the process is up (pid ${report.pid}).`, "ok");
+      } else {
+        showBanner("probe-banner",
+          `Boot probe: the process refused to start${report.probe.exit_code === null ? "" : ` (exit code ${report.probe.exit_code})`}.\n${report.probe.output.trim() || "no output captured"}`,
+          "error");
+      }
+    } catch (error) {
+      showBanner("probe-banner", String(error), "error");
+      // A refused start may be a busy port — the banner knows who holds
+      // it, so ask right away (the takeover button rides on it).
+      try {
+        state.portStatus = await invoke("port_status");
+      } catch (probeError) {
+        console.error("port probe failed", probeError);
+        state.portStatus = null;
+      }
+      paintTakeover();
     }
-    paintTakeover();
-  }
-  pollStatus();
+    await pollStatus();
+  });
 }
 
 async function stopServer() {
-  try {
-    await invoke("server_stop");
-    toast("Stop issued — the tree is taken down and the exit recorded.", "ok");
-  } catch (error) {
-    toast(String(error), "error");
-  }
-  pollStatus();
+  await withBusy("Stopping the server…", async () => {
+    try {
+      await invoke("server_stop");
+      toast("Stop issued — the tree is taken down and the exit recorded.", "ok");
+    } catch (error) {
+      toast(String(error), "error");
+    }
+    await pollStatus();
+  });
 }
 
 async function openSite() {
@@ -867,12 +896,14 @@ window.addEventListener("DOMContentLoaded", () => {
 
   $("btn-form-save").addEventListener("click", saveForm);
   $("btn-config-validate").addEventListener("click", async () => {
-    try {
-      await invoke("config_validate");
-      showBanner("config-banner", "The pair on disk validates against the server's real rules.", "ok");
-    } catch (error) {
-      showBanner("config-banner", String(error), "error");
-    }
+    await withBusy("Validating the pair…", async () => {
+      try {
+        await invoke("config_validate");
+        showBanner("config-banner", "The pair on disk validates against the server's real rules.", "ok");
+      } catch (error) {
+        showBanner("config-banner", String(error), "error");
+      }
+    });
   });
   $("btn-raw-save").addEventListener("click", saveRaw);
   $("btn-raw-reload").addEventListener("click", loadRaw);
@@ -894,12 +925,14 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
   $("btn-tools-validate").addEventListener("click", async () => {
-    try {
-      await invoke("config_validate");
-      toast("The pair on disk validates.", "ok");
-    } catch (error) {
-      toast(String(error), "error");
-    }
+    await withBusy("Validating the pair…", async () => {
+      try {
+        await invoke("config_validate");
+        toast("The pair on disk validates.", "ok");
+      } catch (error) {
+        toast(String(error), "error");
+      }
+    });
   });
 
   $("btn-settings-save").addEventListener("click", saveSettings);

@@ -251,6 +251,16 @@
 </div>
 
 <div id="toasts"></div>
+
+<!-- The centered transition state, shown by app.js from a button press
+     until the manager reflects the change (start, stop, saves…). -->
+<div class="busy" id="busy" style="display:none" role="status" aria-live="polite">
+  <div class="busy-box">
+    <div class="busy-spinner" aria-hidden="true"></div>
+    <div class="busy-text" id="busy-text">Working…</div>
+  </div>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>

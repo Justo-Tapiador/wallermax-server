@@ -201,6 +201,58 @@ table.list tr:last-child td { border-bottom: 0; }
 .toast.error { border-color: #7c2745; background: #2c0f1cf2; color: #ffd9e2; }
 .toast.ok { border-color: #1c5c40; background: #0a261bf2; color: #c4f4de; }
 
+/* ----- busy overlay ----------------------------------------------------- */
+
+/* The centered transition state: from the button press until the change
+   is reflected. Revealed by JS after a short delay (fast actions never
+   flash it); the backdrop also swallows stray clicks while it is up. */
+.busy {
+  position: fixed; inset: 0; z-index: 40;
+  display: grid; place-items: center;
+  background: rgba(4, 10, 20, .58);
+  backdrop-filter: blur(3px);
+  animation: busy-fade .16s ease-out;
+}
+@keyframes busy-fade { from { opacity: 0; } }
+
+.busy-box {
+  display: grid; justify-items: center; gap: 15px;
+  padding: 28px 38px; border-radius: 15px;
+  background: #0b1a2df5; border: 1px solid #1d3a5f;
+  box-shadow: 0 24px 70px #000000b0;
+}
+.busy-text { color: #c8d9ef; font-size: 13.5px; }
+
+/* Two counter-rotating rings in the app's own accents: blue→violet for
+   the work under way, a green spark for the change landing. The gentle
+   per-turn easing keeps it alive instead of metronomic. */
+.busy-spinner { position: relative; width: 46px; height: 46px; }
+.busy-spinner::before, .busy-spinner::after {
+  content: ""; position: absolute; border-radius: 50%;
+  border-style: solid; border-color: transparent;
+}
+.busy-spinner::before {
+  inset: 0; border-width: 3px;
+  border-top-color: var(--blue); border-right-color: var(--blue2);
+  animation: busy-spin .9s cubic-bezier(.55, .2, .45, .8) infinite;
+}
+.busy-spinner::after {
+  inset: 10px; border-width: 2px;
+  border-bottom-color: var(--green);
+  animation: busy-spin .9s cubic-bezier(.45, .2, .55, .8) infinite reverse;
+}
+@keyframes busy-spin { to { transform: rotate(360deg); } }
+
+/* Motion-sensitive setups keep the feedback without the spinning. */
+@media (prefers-reduced-motion: reduce) {
+  .busy { animation: none; }
+  .busy-spinner::before, .busy-spinner::after {
+    animation: busy-pulse 1.1s ease-in-out infinite;
+  }
+  .busy-spinner::after { animation-delay: .55s; }
+}
+@keyframes busy-pulse { 50% { opacity: .25; } }
+
 /* ----- sections --------------------------------------------------------- */
 
 section.page { display: none; }
