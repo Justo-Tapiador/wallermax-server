@@ -193,6 +193,34 @@ async fn login_failures_are_generic_and_identical() {
 }
 
 #[tokio::test]
+async fn brute_force_logins_lock_the_pair_out() {
+    let (config, _db) = auth_config();
+    let server = TestServer::start_full(config).await;
+    register(&server, "brute-force", "correct-password").await;
+
+    // Five consecutive failures trip the lockout...
+    for _ in 0..5 {
+        let response = login_raw(&server, "brute-force", "wrong-password").await;
+        assert_eq!(response.status(), 401);
+    }
+
+    // ...and the very next attempt — even with the RIGHT password —
+    // answers 429 with a Retry-After hint, before any credential work.
+    let response = login_raw(&server, "brute-force", "correct-password").await;
+    assert_eq!(response.status(), 429);
+    assert!(
+        response.headers().get("retry-after").is_some(),
+        "the 429 carries a Retry-After hint"
+    );
+
+    // The lockout is per (ip, username): another account from the
+    // same address logs in untouched.
+    register(&server, "bystander", "password-123").await;
+    let response = login_raw(&server, "bystander", "password-123").await;
+    assert_eq!(response.status(), 200);
+}
+
+#[tokio::test]
 async fn profile_requires_a_valid_token() {
     let (config, _db) = auth_config();
     let server = TestServer::start_full(config).await;

@@ -16,7 +16,14 @@
 //! - on Windows the program resolves through the standard
 //!   `CreateProcess` search order, which always includes `System32` —
 //!   `ping.exe`, `cmd.exe` and friends are found even under a stripped
-//!   `PATH`.
+//!   `PATH`;
+//! - also on Windows, the child is spawned with `CREATE_NO_WINDOW`:
+//!   the server is a console program and the manager a GUI one, and
+//!   without the flag Windows would allocate the child a fresh console
+//!   — a black window squatting on the desktop for as long as the
+//!   server lives. With it the child gets an invisible console whose
+//!   output still flows through the pipes, and the server's own
+//!   helpers (the `.jhs` sidecar) simply inherit that console.
 //!
 //! ## Stopping is tree-level
 //!
@@ -32,6 +39,20 @@
 //!   is crash-safe by design, and capturing `taskkill`'s output keeps the
 //!   manager's console clean instead of spraying
 //!   *"no se pudo terminar"* errors.
+//!
+//! ## The server dies with the manager
+//!
+//! On Windows the fresh child is also assigned to a job object armed
+//! with `JOB_OBJECT_LIMIT_KILL_ON_CLOSE`. The manager keeps that job's
+//! handle open for its whole life, so whenever the manager goes away —
+//! window closed, crash, `taskkill` — the kernel closes the handle and
+//! takes the whole server tree down with it. Without this a manager
+//! closed while the server runs leaves an *invisible* orphan behind
+//! (the server has no console window), and the next start dies on the
+//! old bind with "os error 10048" — port already in use. Unix keeps the
+//! classic behaviour instead: the child lives in its own process group
+//! and survives its parent, daemon-like, until it is stopped
+//! explicitly.
 //!
 //! ## The boot probe
 //!
@@ -211,7 +232,6 @@ impl LogBuffer {
     }
 
     fn push(&self, stream: LogStream, text: &str) {
-        let seq = self.written.fetch_add(1, Ordering::SeqCst);
         // Truncate on a character boundary — never mid-codepoint.
         let text = if text.chars().count() > LOG_LINE_MAX {
             let mut cut: String = text.chars().take(LOG_LINE_MAX).collect();
@@ -221,6 +241,15 @@ impl LogBuffer {
             text.to_owned()
         };
         let mut lines = self.lines.lock().expect("the log lock is live");
+        // The sequence number is allocated UNDER the lock that appends
+        // the line. The old version allocated it before locking, so a
+        // concurrent `page` could observe the bumped counter while the
+        // matching line was still queued behind the lock — and point
+        // `next_seq` past a line the poller never saw (a skipped line,
+        // permanently). With the allocation inside, `page` (which
+        // reads `written` while holding the same lock) only ever
+        // advertises numbers whose lines are already in the buffer.
+        let seq = self.written.fetch_add(1, Ordering::SeqCst);
         lines.push_back(LogLine { seq, stream, text });
         while lines.len() > self.capacity {
             lines.pop_front();
@@ -377,6 +406,11 @@ impl ProcessManager {
                 use std::os::unix::process::CommandExt;
                 command.process_group(0);
             }
+            // No console window next to the GUI: the server keeps its
+            // stdio through the pipes above, and its own children
+            // inherit the invisible console.
+            #[cfg(windows)]
+            windowless(&mut command);
             let mut child = command
                 .spawn()
                 .map_err(|error| format!("could not start `{}`: {error}", spec.program))?;
@@ -390,6 +424,22 @@ impl ProcessManager {
                 drain_stream(stderr, LogStream::Err, &logs);
             }
             let exit = spawn_reaper(child);
+
+            // Tie the fresh child to this manager's lifetime (Windows):
+            // whenever the manager goes away, the whole tree goes with
+            // it. A failure here never blocks the start — the explicit
+            // stop path still works; only the crash-orphan safety net
+            // is lost, and the captured output says so.
+            #[cfg(windows)]
+            if let Err(problem) = supervise_kill_on_close(pid) {
+                logs.push(
+                    LogStream::Err,
+                    &format!(
+                        "wallermax-manager: could not tie the server to the manager's \
+                         lifetime ({problem}); a manager exit may leave it running"
+                    ),
+                );
+            }
 
             *slot = Some(Managed {
                 pid,
@@ -445,30 +495,13 @@ impl ProcessManager {
 
         #[cfg(windows)]
         {
-            // Console children cannot be closed gracefully on Windows;
-            // the tree is taken down in one captured, windowless taskkill
-            // (the server's storage is crash-safe by design).
-            let pid_text = pid.to_string();
-            let outcome = taskkill_command()
-                .args(["/PID", pid_text.as_str(), "/T", "/F"])
-                .output();
-            match outcome {
-                Ok(output) if !output.status.success() => {
-                    if is_exit_recorded(&exit) {
-                        return Ok(());
-                    }
-                    return Err(format!(
-                        "taskkill could not stop pid {pid}: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ));
+            // One captured, windowless taskkill takes the tree down (the
+            // storage is crash-safe by design).
+            if let Err(problem) = kill_tree(pid) {
+                if is_exit_recorded(&exit) {
+                    return Ok(());
                 }
-                Ok(_) => {}
-                Err(error) => {
-                    if is_exit_recorded(&exit) {
-                        return Ok(());
-                    }
-                    return Err(format!("could not run taskkill for pid {pid}: {error}"));
-                }
+                return Err(problem);
             }
             if !wait_until_dead(&exit, grace.max(Duration::from_secs(3))) {
                 return Err(format!(
@@ -542,14 +575,110 @@ impl ProcessManager {
     }
 }
 
+/// Marks a console command so Windows does not allocate a visible
+/// console window for it when the GUI manager spawns it. The child's
+/// stdio is unaffected — it arrives through the pipes.
+#[cfg(windows)]
+fn windowless(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
 /// A windowless `taskkill` command (no console flash from the GUI).
 #[cfg(windows)]
 fn taskkill_command() -> Command {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut command = Command::new("taskkill");
-    command.creation_flags(CREATE_NO_WINDOW);
+    windowless(&mut command);
     command
+}
+
+/// Takes one process tree down the way [`ProcessManager::stop`] does:
+/// a single captured, windowless `taskkill /PID <pid> /T /F`. Public for
+/// the takeover path, which must fell a tree the manager did not spawn
+/// (a previous session's server) exactly like a supervised one.
+///
+/// # Errors
+///
+/// When taskkill itself refuses or cannot run — the caller decides
+/// whether that is fatal (a stop) or a race already won (a squatter
+/// that died between the netstat and the kill).
+#[cfg(windows)]
+pub fn kill_tree(pid: u32) -> Result<(), String> {
+    let pid_text = pid.to_string();
+    let outcome = taskkill_command()
+        .args(["/PID", pid_text.as_str(), "/T", "/F"])
+        .output();
+    match outcome {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(format!(
+            "taskkill could not stop pid {pid}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(error) => Err(format!("could not run taskkill for pid {pid}: {error}")),
+    }
+}
+
+/// Arms the kill-on-close safety net for a fresh child (Windows): the
+/// child joins a job object whose only handle this manager holds. When
+/// the manager exits — any way it exits — the kernel closes the handle
+/// and the job (the server and every helper it spawned, the `.jhs`
+/// sidecar included) is terminated with it. The job handle is
+/// deliberately never closed: its lifetime *is* the kill switch.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn supervise_kill_on_close(pid: u32) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+
+    // SAFETY: four raw Win32 calls with no pointers into Rust data
+    // beyond the `limits` struct zeroed and filled in below, and no
+    // handle escaping this function — the process handle is closed
+    // right after the single assignment, and the job handle is
+    // intentionally left open for the manager's whole life (that open
+    // handle is the mechanism; see the doc comment). Every failure path
+    // closes what it opened.
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return Err(String::from("CreateJobObjectW returned null"));
+        }
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let armed = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &limits as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if armed == 0 {
+            CloseHandle(job);
+            return Err(String::from(
+                "SetInformationJobObject refused the kill-on-close flag",
+            ));
+        }
+        let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+        if process.is_null() {
+            CloseHandle(job);
+            return Err(format!("OpenProcess({pid}) returned null"));
+        }
+        let assigned = AssignProcessToJobObject(job, process);
+        CloseHandle(process);
+        if assigned == 0 {
+            CloseHandle(job);
+            return Err(format!("AssignProcessToJobObject({pid}) failed"));
+        }
+        // Deliberately not closing `job`: its open handle is the kill
+        // switch — see the doc comment.
+        Ok(())
+    }
 }
 
 /// Polls until the child is recorded as dead, at most `budget` long.
@@ -671,6 +800,81 @@ mod tests {
     }
 
     #[test]
+    fn log_pages_never_advertise_an_unseen_line() {
+        // The invariant the paging protocol rests on: after any push,
+        // a page read at `since = 0` contains the pushed line and
+        // `next_seq` points exactly one past it — a poller following
+        // `next_seq` can never be told to skip a number whose line it
+        // has not seen.
+        let buffer = LogBuffer::with_capacity(64);
+        for expected in 0..100_u64 {
+            buffer.push(LogStream::Out, &format!("line {expected}"));
+            let page = buffer.page(0, 1000);
+            assert_eq!(
+                page.lines.last().map(|line| line.seq),
+                Some(expected),
+                "the freshly pushed line must be visible"
+            );
+            assert_eq!(
+                page.next_seq,
+                expected + 1,
+                "next_seq must point exactly one past the visible tail"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_push_and_page_never_lose_lines() {
+        // Four writers push while a reader pages continuously. Nothing
+        // is evicted (capacity exceeds the total), so the reader must
+        // see every sequence number exactly once, in order — the race
+        // the under-the-lock allocation closes.
+        let buffer = std::sync::Arc::new(LogBuffer::with_capacity(8192));
+        let writers: Vec<_> = (0..4_u64)
+            .map(|writer| {
+                let buffer = std::sync::Arc::clone(&buffer);
+                std::thread::spawn(move || {
+                    for _ in 0..500 {
+                        buffer.push(LogStream::Out, "concurrent");
+                    }
+                    writer
+                })
+            })
+            .collect();
+        let reader = {
+            let buffer = std::sync::Arc::clone(&buffer);
+            std::thread::spawn(move || {
+                let mut expected = 0_u64;
+                let mut since = 0_u64;
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while expected < 2_000 {
+                    let page = buffer.page(since, 10_000);
+                    for line in &page.lines {
+                        assert_eq!(
+                            line.seq, expected,
+                            "a line was skipped or reordered: expected {expected}, got {}",
+                            line.seq
+                        );
+                        expected += 1;
+                    }
+                    since = page.next_seq;
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the reader stalled at {expected} lines"
+                    );
+                }
+                expected
+            })
+        };
+
+        for writer in writers {
+            writer.join().expect("writer finishes");
+        }
+        let seen = reader.join().expect("reader finishes");
+        assert_eq!(seen, 2_000, "every pushed line must be paged exactly once");
+    }
+
+    #[test]
     fn spawns_captures_and_stops() {
         let manager = ProcessManager::new();
         let report = manager
@@ -737,6 +941,33 @@ mod tests {
             "the rejection says why: {error}"
         );
         manager.stop(GRACE).expect("cleanup");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn starting_arms_the_kill_on_close_job() {
+        // The job is armed right after the spawn; a failure to arm it
+        // would be recorded as a manager line in the captured output.
+        // (The kill-on-close *behaviour* itself — the whole tree dying
+        // with the manager — cannot be observed from inside the manager;
+        // arming without an error is the observable half, and the stop
+        // path below proves the child still behaves normally.)
+        let manager = ProcessManager::new();
+        let report = manager
+            .start(&survivor_spec(), WINDOW)
+            .expect("the survivor starts");
+        assert!(report.probe.booted, "probe: {:?}", report.probe);
+        let captured: Vec<String> = manager
+            .logs(0, 1000)
+            .lines
+            .into_iter()
+            .map(|line| line.text)
+            .collect();
+        assert!(
+            !captured.iter().any(|line| line.contains("could not tie")),
+            "arming must succeed, captured: {captured:?}"
+        );
+        manager.stop(GRACE).expect("stop still works");
     }
 
     #[test]

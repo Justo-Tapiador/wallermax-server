@@ -13,7 +13,38 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml_edit = "0.22"
 
+# TLS for the endpoint client: a server with `[tls]` enabled serves
+# its health/metrics/stats over HTTPS, and the manager talks to it the
+# way a browser would. The same version and features the server itself
+# serves TLS with (rustls, ring provider), so nothing new enters the
+# tree — it was already there through the server dependency.
+rustls = { version = "0.23", default-features = false, features = [
+  "ring",
+  "logging",
+  "std",
+  "tls12",
+] }
+
+[dev-dependencies]
+# Fresh self-signed certificates for the endpoint client's TLS tests —
+# the same generator the server's own test suite uses (ring-backed,
+# so Windows CI builds it without NASM or CMake).
+rcgen = "0.14.7"
+
 # Process-tree signalling on Unix (SIGTERM/SIGKILL to the whole group the
 # manager created); Windows stops go through `taskkill /T /F` instead.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Tying the server's lifetime to the manager's on Windows: the child is
+# assigned to a job object armed with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+# so a manager that dies — closed, crashed or killed — takes the whole
+# server tree down with it instead of leaving an invisible orphan holding
+# the port (the exact cause of "os error 10048" on the next start).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }

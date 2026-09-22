@@ -23,6 +23,10 @@
 //     default 5000) hard-kills runaway renders by TERMINATING the
 //     worker thread — the fix for node-jhs2's ineffective vm timeout —
 //     and respawns it;
+//   * a per-worker heap ceiling (JHS_SIDECAR_WORKER_HEAP_MB, default
+//     256) via worker resourceLimits: a memory-hungry template OOMs
+//     ITS worker — which the pool replaces — instead of growing the
+//     process until the OOM killer takes the whole server down;
 //   * request bodies are capped at 16 MiB;
 //   * stdout carries exactly ONE line — the READY handshake — and all
 //     logging goes to stderr, so the Rust parent can parse it blindly;
@@ -39,6 +43,9 @@
 //   JHS_SIDECAR_AUTO_ESCAPE     "true" | "false" (default true)
 //   JHS_SIDECAR_WORKERS         render worker count (default 2)
 //   JHS_SIDECAR_RENDER_BUDGET_MS  per-render hard-kill budget (default 5000)
+//   JHS_SIDECAR_WORKER_HEAP_MB   per-worker heap ceiling in MiB (default 256,
+//                                min 32, max 2048; inherited from the
+//                                server process environment when set)
 
 import http from 'node:http';
 import fs from 'node:fs';
@@ -101,6 +108,23 @@ const RENDER_BUDGET_MS = Math.max(
   Number.parseInt(ENV.JHS_SIDECAR_RENDER_BUDGET_MS || '5000', 10) || 5000,
 );
 
+// Per-worker V8 heap ceiling. Without it every worker inherits Node's
+// ~4 GB default old-space on 64-bit hosts: a single runaway template
+// (`var a = []; while (true) a.push('x')`) measurably grows the process
+// past 1.8 GB before the wall-clock budget fires. With the ceiling the
+// same template dies inside its worker with an out-of-memory error,
+// the pool replaces the worker, and the render answers a `worker`
+// error — the same containment the hard-kill budget gives for CPU.
+const WORKER_HEAP_MB = Math.min(
+  2048,
+  Math.max(32, Number.parseInt(ENV.JHS_SIDECAR_WORKER_HEAP_MB || '256', 10) || 256),
+);
+const WORKER_RESOURCE_LIMITS = {
+  maxOldGenerationSizeMb: WORKER_HEAP_MB,
+  maxYoungGenerationSizeMb: Math.min(64, Math.max(16, Math.floor(WORKER_HEAP_MB / 16))),
+  codeRangeSizeMb: Math.min(512, Math.max(64, Math.floor(WORKER_HEAP_MB / 4))),
+};
+
 const BODY_LIMIT = 16 * 1024 * 1024;
 const STARTED_AT = Date.now();
 let rendersServed = 0;
@@ -124,7 +148,14 @@ const pending = new Map(); // jobId -> { slot, timer, resolve, label }
 function spawnInto(slot) {
   slot.busy = false;
   slot.alive = false;
-  slot.worker = new Worker(workerUrl, { stdout: true, stderr: true });
+  slot.worker = new Worker(workerUrl, {
+    stdout: true,
+    stderr: true,
+    // The containment half of the sidecar's hardening story (see
+    // WORKER_HEAP_MB above): heap-hungry renders die in their worker,
+    // never in the broker process.
+    resourceLimits: WORKER_RESOURCE_LIMITS,
+  });
 
   slot.worker.on('message', (message) => {
     if (message.event === 'ready') {
@@ -589,7 +620,7 @@ server.listen(PORT, '127.0.0.1', () => {
   log(
     'info',
     `jhs-sidecar listening on 127.0.0.1:${port} ` +
-      `(workers=${WORKERS}, budget=${RENDER_BUDGET_MS}ms, ` +
+      `(workers=${WORKERS}, budget=${RENDER_BUDGET_MS}ms, workerHeapMb=${WORKER_HEAP_MB}, ` +
       `views=${VIEWS_DIR}, modules=${MODULES_DIR}, forbidden=${FORBIDDEN.length})`,
   );
 });

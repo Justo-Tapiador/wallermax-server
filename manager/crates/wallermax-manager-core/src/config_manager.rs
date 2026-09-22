@@ -503,6 +503,75 @@ mod tests {
     }
 
     #[test]
+    fn tls_paths_round_trip_with_windows_backslashes() {
+        // The configuration form now edits the whole [tls] section — and
+        // PEM paths on Windows arrive full of backslashes, which TOML
+        // basic strings must escape on the way in and unescape on the
+        // way back out.
+        let (manager, _dir) = manager();
+        manager
+            .set_values(
+                ConfigWhich::Base,
+                &[
+                    ("tls.enabled".to_owned(), "true".to_owned()),
+                    (
+                        "tls.cert_path".to_owned(),
+                        r"C:\certs\dev-cert.pem".to_owned(),
+                    ),
+                    (
+                        "tls.key_path".to_owned(),
+                        r"C:\certs\dev-key.pem".to_owned(),
+                    ),
+                    ("tls.http_listen".to_owned(), "127.0.0.1:8080".to_owned()),
+                ],
+            )
+            .expect("the edits apply");
+        let text = manager.read(ConfigWhich::Base).expect("read back");
+        let document = text.parse::<DocumentMut>().expect("the result is TOML");
+        assert_eq!(
+            document["tls"]["cert_path"].as_str(),
+            Some(r"C:\certs\dev-cert.pem"),
+            "the backslash path survives verbatim: {text}"
+        );
+        assert_eq!(
+            manager
+                .get_value(ConfigWhich::Base, "tls.key_path")
+                .as_deref(),
+            Some(r"C:\certs\dev-key.pem"),
+            "the form reads the path back unquoted"
+        );
+        let merged = manager
+            .load_merged()
+            .expect("the pair validates against the server's real rules");
+        assert_eq!(merged.tls.cert_path, r"C:\certs\dev-cert.pem");
+        assert_eq!(merged.tls.http_listen.as_deref(), Some("127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn tls_enabled_without_pem_paths_is_rejected() {
+        // The server's own rule: flipping tls.enabled on without the PEM
+        // paths never reaches the disk — the save refuses it.
+        let (manager, _dir) = manager();
+        let error = manager
+            .set_values(
+                ConfigWhich::Base,
+                &[("tls.enabled".to_owned(), "true".to_owned())],
+            )
+            .expect_err("TLS without PEM paths is rejected");
+        assert!(
+            error.contains("tls.cert_path"),
+            "the error names the missing key: {error}"
+        );
+        assert!(
+            manager
+                .read(ConfigWhich::Base)
+                .unwrap_or_default()
+                .is_empty(),
+            "the layer is left untouched"
+        );
+    }
+
+    #[test]
     fn validation_names_the_offending_line() {
         let (manager, _dir) = manager();
         let error = manager

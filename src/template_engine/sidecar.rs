@@ -22,10 +22,12 @@
 //!
 //! [`AutoRenderer`] wraps a healthy sidecar plus the in-process
 //! [`JhsEngine`] (the hardened boa backend): sidecar transport failures
-//! fall back to boa for that render (with an error log) and a health
-//! probe with a cooldown brings the sidecar back once it recovers.
-//! Template errors — a broken template fails identically on both
-//! backends — never trigger a fallback.
+//! fall back to boa for that render (with an error log), a health
+//! probe with a cooldown brings a wedged sidecar back once it recovers,
+//! and a crashed process is re-spawned in the background by the
+//! [`SidecarSupervisor`] (strict mode self-heals the same way, minus
+//! the fallback). Template errors — a broken template fails
+//! identically on both backends — never trigger a fallback.
 //!
 //! This module is deliberately synchronous: rendering happens on the
 //! blocking pool, and the spawn handshake runs once at startup.
@@ -35,7 +37,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -57,8 +59,20 @@ const PROBE_COOLDOWN: Duration = Duration::from_secs(10);
 /// How many stderr lines to keep for spawn-failure diagnostics.
 const STDERR_TAIL: usize = 40;
 
+/// V8 old-space ceiling for the sidecar's own heap, in MiB.
+///
+/// The broker process only parses requests and shuttles jobs, so this
+/// stays small; the render workers carry their own, independent ceiling
+/// (see `JHS_SIDECAR_WORKER_HEAP_MB` in `jhs-sidecar.mjs`). Without a
+/// cap a wedged sidecar grows until the OS OOM killer takes the
+/// server's container down with it.
+const SIDECAR_MAIN_HEAP_MB: u32 = 192;
+
 /// Everything the sidecar process needs to know, distilled from
 /// `[templates]` + `[templates.sidecar]` by the state constructor.
+/// Clone-able because the supervisor keeps a second copy to re-spawn
+/// a dead sidecar with the same recipe.
+#[derive(Clone)]
 pub struct SidecarOptions {
     /// Node.js binary (`node_command`).
     pub node_command: String,
@@ -148,6 +162,9 @@ impl SidecarRenderer {
 
         let mut command = Command::new(&options.node_command);
         command
+            // Cap the broker's own heap (see SIDECAR_MAIN_HEAP_MB) —
+            // Node accepts its V8 flags before the script path.
+            .arg(format!("--max-old-space-size={SIDECAR_MAIN_HEAP_MB}"))
             .arg(options.script.as_os_str())
             .env("JHS_SIDECAR_TOKEN", &token)
             .env("JHS_SIDECAR_PORT", "0")
@@ -537,26 +554,177 @@ fn stderr_report(tail: &VecDeque<String>) -> String {
     }
 }
 
+// ── Supervision: keeping a sidecar alive ───────────────────────────
+
+/// Wait between respawn attempts after the first failure: 10s, 20s,
+/// 40s... doubling.
+const RESPAWN_BACKOFF_BASE: Duration = Duration::from_secs(10);
+
+/// Ceiling for the respawn backoff.
+const RESPAWN_MAX_BACKOFF: Duration = Duration::from_secs(300);
+
+/// Owns the live sidecar process and brings it back when it dies.
+///
+/// [`SidecarRenderer::spawn`] is the one-shot constructor the state
+/// boots with; everything after that — a crashed child, a process
+/// that stopped answering — belongs here. Whoever notices (a
+/// transport error mid-render, a failed health probe) calls
+/// [`Self::request_respawn`]; the respawn itself runs on a detached
+/// thread so renders never wait for Node, at most one runs at a time,
+/// and consecutive failures back off exponentially (capped at
+/// [`RESPAWN_MAX_BACKOFF`]) so a broken Node installation cannot be
+/// fork-bombed.
+pub struct SidecarSupervisor {
+    options: SidecarOptions,
+    current: Mutex<Arc<SidecarRenderer>>,
+    /// Bumped every time a respawn swaps the live sidecar: readers
+    /// treat a generation they have not served as healthy (a fresh
+    /// spawn passed its full selftest by construction).
+    generation: AtomicU64,
+    respawning: AtomicBool,
+    failures: Mutex<u32>,
+    next_attempt: Mutex<Instant>,
+}
+
+impl SidecarSupervisor {
+    /// Wraps a live sidecar with the recipe that spawned it.
+    pub fn new(sidecar: Arc<SidecarRenderer>, options: SidecarOptions) -> Self {
+        Self {
+            options,
+            current: Mutex::new(sidecar),
+            generation: AtomicU64::new(1),
+            respawning: AtomicBool::new(false),
+            failures: Mutex::new(0),
+            // An Instant in the past: the first respawn may run at once.
+            next_attempt: Mutex::new(
+                Instant::now()
+                    .checked_sub(RESPAWN_BACKOFF_BASE)
+                    .unwrap_or_else(Instant::now),
+            ),
+        }
+    }
+
+    /// The live sidecar handle (possibly stale: callers react to its
+    /// failures by calling [`Self::request_respawn`]).
+    pub fn current(&self) -> Arc<SidecarRenderer> {
+        self.current
+            .lock()
+            .expect("sidecar supervisor mutex")
+            .clone()
+    }
+
+    /// The live generation (bumps on every successful respawn).
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    /// Whether the current sidecar answers its health probe.
+    pub fn alive(&self) -> bool {
+        self.current().health_probe()
+    }
+
+    /// Best-effort respawn: claims the one respawn slot and hands the
+    /// work to a detached thread. Requests inside the backoff window
+    /// return without spawning anything.
+    pub fn request_respawn(self: &Arc<Self>) {
+        if self.respawning.swap(true, Ordering::SeqCst) {
+            return; // somebody is already on it
+        }
+
+        // Claim the attempt pessimistically: the NEXT attempt's
+        // earliest start is scheduled before this one runs, so a
+        // failure leaves the backoff in place; a success resets it.
+        let due = {
+            let mut next_attempt = self.next_attempt.lock().expect("sidecar respawn mutex");
+            let now = Instant::now();
+            if now < *next_attempt {
+                false
+            } else {
+                let failures = *self.failures.lock().expect("sidecar respawn mutex");
+                *next_attempt = now + respawn_backoff(failures);
+                true
+            }
+        };
+        if !due {
+            self.respawning.store(false, Ordering::SeqCst);
+            return;
+        }
+
+        let supervisor = Arc::clone(self);
+        std::thread::spawn(move || supervisor.respawn_once());
+    }
+
+    /// One respawn attempt (detached thread): spawn a fresh sidecar
+    /// and swap it in, or record the failure for the backoff.
+    fn respawn_once(&self) {
+        match SidecarRenderer::spawn(&self.options) {
+            Ok(fresh) => {
+                *self.failures.lock().expect("sidecar respawn mutex") = 0;
+                *self.next_attempt.lock().expect("sidecar respawn mutex") = Instant::now();
+                // Dropping the swapped-out Arc kills its (already
+                // dead) child; the generation bump tells readers the
+                // fresh process needs no probe.
+                *self.current.lock().expect("sidecar supervisor mutex") = fresh;
+                self.generation.fetch_add(1, Ordering::Relaxed);
+                tracing::info!("the JHS sidecar respawned; a fresh generation is serving renders");
+            }
+            Err(error) => {
+                let mut failures = self.failures.lock().expect("sidecar respawn mutex");
+                *failures += 1;
+                tracing::warn!(
+                    %error,
+                    consecutive = *failures,
+                    "the JHS sidecar could not be respawned; retrying with backoff"
+                );
+            }
+        }
+        self.respawning.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The wait before the next attempt after `consecutive_failures`
+/// failed respawns: 10s, 20s, 40s... capped at [`RESPAWN_MAX_BACKOFF`].
+fn respawn_backoff(consecutive_failures: u32) -> Duration {
+    let factor = 1_u64.checked_shl(consecutive_failures.min(5)).unwrap_or(32);
+    RESPAWN_BACKOFF_BASE
+        .saturating_mul(factor as u32)
+        .min(RESPAWN_MAX_BACKOFF)
+}
+
 /// The `[templates] backend = "auto"` composition: sidecar first, boa
 /// when the sidecar is unavailable.
 ///
 /// Only **transport** failures ([`JhsError::Sidecar`]) fall back: a
 /// broken template is equally broken on boa, so its error is returned
-/// as-is. Once the sidecar has failed, renders go straight to boa and
-/// a health probe (at most one every [`PROBE_COOLDOWN`]) brings the
-/// sidecar back automatically.
+/// as-is. Once the sidecar has failed, renders go straight to boa, a
+/// health probe (at most one every [`PROBE_COOLDOWN`]) checks whether
+/// the old process recovered, and the [`SidecarSupervisor`] re-spawns
+/// a crashed process in the background — a fresh generation flips
+/// back to the sidecar without waiting for a probe slot, because a
+/// respawned sidecar passed its full selftest by construction.
 pub struct AutoRenderer {
-    sidecar: Arc<SidecarRenderer>,
+    sidecar: Arc<SidecarSupervisor>,
     boa: Arc<JhsEngine>,
     healthy: AtomicBool,
     last_probe: Mutex<Instant>,
+    /// The sidecar generation this renderer last served or probed: a
+    /// bump means a respawn landed and the new process is healthy by
+    /// construction — no probe cooldown applies to it.
+    last_generation: AtomicU64,
 }
 
 impl AutoRenderer {
-    /// Composes the sidecar and boa backends.
-    pub fn new(sidecar: Arc<SidecarRenderer>, boa: Arc<JhsEngine>) -> Self {
+    /// Composes the sidecar (under supervision, re-spawnable) and the
+    /// boa backends.
+    pub fn new(
+        sidecar: Arc<SidecarRenderer>,
+        options: SidecarOptions,
+        boa: Arc<JhsEngine>,
+    ) -> Self {
+        let supervisor = Arc::new(SidecarSupervisor::new(sidecar, options));
+        let last_generation = supervisor.generation();
         Self {
-            sidecar,
+            sidecar: supervisor,
             boa,
             healthy: AtomicBool::new(true),
             // An Instant in the past: the first probe may run at once.
@@ -565,6 +733,7 @@ impl AutoRenderer {
                     .checked_sub(PROBE_COOLDOWN)
                     .unwrap_or_else(Instant::now),
             ),
+            last_generation: AtomicU64::new(last_generation),
         }
     }
 
@@ -611,7 +780,8 @@ impl TemplateRenderer for AutoRenderer {
 
 impl AutoRenderer {
     /// Tries the sidecar (when healthy) and falls back to boa on
-    /// transport errors, probing for recovery under a cooldown.
+    /// transport errors, probing for recovery under a cooldown and
+    /// re-spawning a dead process in the background.
     fn dispatch<Render>(
         &self,
         sidecar_call: impl Fn(&SidecarRenderer) -> Result<Render, JhsError>,
@@ -620,8 +790,21 @@ impl AutoRenderer {
         // At most two rounds: (1) sidecar path, (2) recovery probe then
         // sidecar again — any failure in round 2 falls back for good.
         for _ in 0..2 {
+            // A respawned sidecar (a generation we have not served) is
+            // healthy by construction: spawn gates on the full
+            // selftest. Flip back without waiting for a probe slot.
+            let generation = self.sidecar.generation();
+            if self.last_generation.load(Ordering::Relaxed) != generation {
+                self.last_generation.store(generation, Ordering::Relaxed);
+                if !self.healthy.load(Ordering::Relaxed) {
+                    tracing::info!("a respawned JHS sidecar took over; resuming sidecar rendering");
+                }
+                self.healthy.store(true, Ordering::Relaxed);
+            }
+
             if self.healthy.load(Ordering::Relaxed) {
-                match sidecar_call(&self.sidecar) {
+                let sidecar = self.sidecar.current();
+                match sidecar_call(sidecar.as_ref()) {
                     Ok(value) => return Ok(value),
                     Err(error) => match error {
                         JhsError::Sidecar(message) => {
@@ -631,6 +814,10 @@ impl AutoRenderer {
                                 "the JHS sidecar failed mid-render; falling back to the \
                                  boa backend until it recovers"
                             );
+                            // The failed process may be dead, not just
+                            // wedged: ask for a respawn (deduplicated
+                            // and backed off by the supervisor).
+                            self.sidecar.request_respawn();
                             return boa_call(&self.boa);
                         }
                         template_error => return Err(template_error),
@@ -639,7 +826,8 @@ impl AutoRenderer {
             }
 
             // Unhealthy: probe (rate-limited), then loop for one more
-            // sidecar attempt; if the probe says dead, render on boa.
+            // sidecar attempt; a probe that says dead asks for a
+            // respawn instead of waiting to be asked again.
             let probe_due = {
                 let mut last_probe = self.last_probe.lock().expect("sidecar probe mutex");
                 if last_probe.elapsed() >= PROBE_COOLDOWN {
@@ -649,18 +837,80 @@ impl AutoRenderer {
                     false
                 }
             };
-            if probe_due && self.sidecar.health_probe() {
-                self.healthy.store(true, Ordering::Relaxed);
-                tracing::info!(
-                    "the JHS sidecar answered its health probe; resuming sidecar rendering"
-                );
-                continue;
+            if probe_due {
+                if self.sidecar.current().health_probe() {
+                    self.healthy.store(true, Ordering::Relaxed);
+                    tracing::info!(
+                        "the JHS sidecar answered its health probe; resuming sidecar rendering"
+                    );
+                    continue;
+                }
+                self.sidecar.request_respawn();
             }
             return boa_call(&self.boa);
         }
         // Unreachable: round 2 either renders on the recovered sidecar
         // or falls back inside its error branch.
         boa_call(&self.boa)
+    }
+}
+
+/// The strict sidecar backend with self-healing.
+///
+/// Strict means no silent fallback — a dead sidecar's renders answer
+/// the transport error (that is what `"auto"` is for) — but not no
+/// recovery: a failed process is re-spawned in the background and the
+/// next render after the swap rides the fresh process.
+pub struct StrictSidecar {
+    supervisor: Arc<SidecarSupervisor>,
+}
+
+impl StrictSidecar {
+    /// Wraps a live sidecar with the respawn recipe.
+    pub fn new(sidecar: Arc<SidecarRenderer>, options: SidecarOptions) -> Self {
+        Self {
+            supervisor: Arc::new(SidecarSupervisor::new(sidecar, options)),
+        }
+    }
+}
+
+impl TemplateRenderer for StrictSidecar {
+    fn render(
+        &self,
+        template_path: &str,
+        data: &Map<String, Value>,
+    ) -> Result<RenderOutput, JhsError> {
+        self.dispatch(|sidecar| sidecar.render(template_path, data))
+    }
+
+    fn render_string(
+        &self,
+        template: &str,
+        data: &Map<String, Value>,
+    ) -> Result<RenderOutput, JhsError> {
+        self.dispatch(|sidecar| sidecar.render_string(template, data))
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "sidecar"
+    }
+}
+
+impl StrictSidecar {
+    fn dispatch<Render>(
+        &self,
+        sidecar_call: impl Fn(&SidecarRenderer) -> Result<Render, JhsError>,
+    ) -> Result<Render, JhsError> {
+        let sidecar = self.supervisor.current();
+        match sidecar_call(sidecar.as_ref()) {
+            Err(JhsError::Sidecar(message)) => {
+                // The error surfaces as-is (strict), but the process
+                // gets its respawn on the way out.
+                self.supervisor.request_respawn();
+                Err(JhsError::Sidecar(message))
+            }
+            other => other,
+        }
     }
 }
 
@@ -763,5 +1013,198 @@ mod tests {
             },
             _ => JhsError::Sidecar(failure.message.clone()),
         }
+    }
+
+    // ── Supervision: respawn after a crash ──────────────────────────
+
+    use crate::template_engine::{JhsOptions, RequireOptions, DEFAULT_FORBIDDEN_MODULES};
+
+    /// Whether a usable Node.js runtime answers `node --version`
+    /// (mirrors tests/sidecar.rs: the whole section needs a real one).
+    fn node_available() -> bool {
+        std::process::Command::new("node")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    /// Spawn options against the repository's own trees.
+    fn supervisor_options() -> SidecarOptions {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        SidecarOptions {
+            node_command: String::from("node"),
+            script: root.join("sidecar/jhs-sidecar.mjs"),
+            views_dir: root.join("views"),
+            modules_dir: root.join("modules"),
+            // The port's default banner: the startup selftest requires
+            // require('fs') to be rejected, so an empty list would fail
+            // spawn() outright.
+            forbidden: DEFAULT_FORBIDDEN_MODULES
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            auto_escape: true,
+            require_enabled: true,
+            workers: 1,
+            startup_timeout: Duration::from_secs(8),
+            request_timeout: Duration::from_secs(4),
+            render_budget: Duration::from_secs(3),
+        }
+    }
+
+    /// The boa companion a state would build from the same options.
+    fn boa_for_options(options: &SidecarOptions) -> Arc<JhsEngine> {
+        Arc::new(JhsEngine::new(JhsOptions {
+            views_path: options.views_dir.clone(),
+            cache: true,
+            auto_escape: options.auto_escape,
+            tags: Default::default(),
+            loop_iteration_limit: 10_000_000,
+            require: RequireOptions {
+                enabled: options.require_enabled,
+                modules_dir: options.modules_dir.clone(),
+                forbidden: options.forbidden.clone(),
+            },
+        }))
+    }
+
+    /// Kills the supervisor's live child outright (the crash being
+    /// simulated); the handle is left empty so the renderer's Drop has
+    /// nothing left to kill.
+    fn kill_the_child(supervisor: &SidecarSupervisor) {
+        let current = supervisor.current();
+        let mut guard = current.child.lock().expect("sidecar child mutex");
+        if let Some(mut child) = guard.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    #[test]
+    fn auto_backend_respawns_a_dead_sidecar() {
+        if !node_available() {
+            eprintln!("skipping: no node on PATH");
+            return;
+        }
+        let options = supervisor_options();
+        let sidecar = SidecarRenderer::spawn(&options).expect("the sidecar spawns");
+        let renderer = AutoRenderer::new(sidecar, options.clone(), boa_for_options(&options));
+
+        assert_eq!(renderer.backend_name(), "sidecar");
+        kill_the_child(&renderer.sidecar);
+
+        // The crash surfaces as a boa fallback, never as an error.
+        let output = renderer
+            .render_string("after <?= \"crash\" ?>", &Map::new())
+            .expect("boa fallback renders");
+        assert_eq!(output.html, "after crash");
+        assert_eq!(renderer.backend_name(), "boa");
+
+        // The supervisor brings the sidecar back: the fresh generation
+        // flips the renderer without waiting for a probe slot (a real
+        // spawn + selftest takes a couple of seconds — poll with a
+        // generous bound).
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while renderer.backend_name() != "sidecar" && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+            let _ = renderer.render_string("poke", &Map::new());
+        }
+        assert_eq!(
+            renderer.backend_name(),
+            "sidecar",
+            "the sidecar must respawn"
+        );
+
+        let output = renderer
+            .render_string("revived <?= 6 * 7 ?>", &Map::new())
+            .expect("the respawned sidecar renders");
+        assert_eq!(output.html, "revived 42");
+    }
+
+    #[test]
+    fn strict_backend_recovers_after_a_sidecar_crash() {
+        if !node_available() {
+            eprintln!("skipping: no node on PATH");
+            return;
+        }
+        let options = supervisor_options();
+        let sidecar = SidecarRenderer::spawn(&options).expect("the sidecar spawns");
+        let renderer = StrictSidecar::new(sidecar, options.clone());
+
+        let output = renderer
+            .render_string("first <?= 1 ?>", &Map::new())
+            .expect("the sidecar renders");
+        assert_eq!(output.html, "first 1");
+        assert_eq!(renderer.backend_name(), "sidecar");
+
+        kill_the_child(&renderer.supervisor);
+
+        // Strict: the crash IS an error — no silent boa fallback.
+        let error = renderer
+            .render_string("x", &Map::new())
+            .expect_err("a dead strict sidecar errors");
+        assert!(matches!(error, JhsError::Sidecar(_)), "error: {error:?}");
+
+        // ...but not a permanent one: the respawn lands and the next
+        // renders ride the fresh process.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let revived = loop {
+            match renderer.render_string("revived <?= 2 ?>", &Map::new()) {
+                Ok(output) => break output,
+                Err(error) => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the strict sidecar must respawn; last error: {error}"
+                    );
+                }
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        };
+        assert_eq!(revived.html, "revived 2");
+    }
+
+    #[test]
+    fn failed_respawns_back_off_instead_of_fork_bombing() {
+        if !node_available() {
+            eprintln!("skipping: no node on PATH");
+            return;
+        }
+        let good = supervisor_options();
+        let sidecar = SidecarRenderer::spawn(&good).expect("the sidecar spawns");
+
+        // The supervisor's recipe points at a Node that does not
+        // exist, so every respawn attempt fails fast.
+        let mut broken = good.clone();
+        broken.node_command = String::from("wallermax-test-node-binary-that-does-not-exist");
+        let supervisor = Arc::new(SidecarSupervisor::new(sidecar, broken));
+
+        // First attempt: immediate.
+        supervisor.request_respawn();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while supervisor.respawning.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !supervisor.respawning.load(Ordering::SeqCst),
+            "the failed attempt must release the slot"
+        );
+        assert_eq!(
+            *supervisor.failures.lock().expect("sidecar respawn mutex"),
+            1,
+            "the failed attempt must be counted"
+        );
+
+        // An immediate second request is swallowed by the backoff
+        // window (the failure counter must not move).
+        supervisor.request_respawn();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            *supervisor.failures.lock().expect("sidecar respawn mutex"),
+            1,
+            "the backoff window must hold a second attempt back"
+        );
     }
 }

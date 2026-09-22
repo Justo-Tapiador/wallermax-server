@@ -30,6 +30,23 @@ function showBanner(id, message, kind) {
   node.style.display = "block";
 }
 
+/* The centered transition state: from the button press until the
+ * manager reflects the change. It waits a beat before appearing, so
+ * snappy actions never flash it — and while it is up, the backdrop
+ * swallows stray clicks (no double-starts, no double-saves). */
+async function withBusy(label, task) {
+  const overlay = $("busy");
+  if (!overlay) return task(); // a stripped-down shell: behave as before
+  $("busy-text").textContent = label;
+  const reveal = setTimeout(() => { overlay.style.display = "grid"; }, 130);
+  try {
+    return await task();
+  } finally {
+    clearTimeout(reveal);
+    overlay.style.display = "none";
+  }
+}
+
 function fmtDuration(seconds) {
   if (seconds === null || seconds === undefined) return "—";
   const s = Math.floor(seconds);
@@ -91,6 +108,9 @@ const CONFIG_FIELDS = [
   { section: "templates", key: "templates.views_dir", label: "Views dir", placeholder: "views" },
   { section: "metrics", key: "metrics.enabled", label: "Metrics enabled", check: true },
   { section: "tls", key: "tls.enabled", label: "TLS enabled", check: true },
+  { section: "tls", key: "tls.http_listen", label: "Plain-HTTP redirect", hint: "optional host:port that 308-redirects to HTTPS" },
+  { section: "tls", key: "tls.cert_path", label: "TLS certificate (PEM)", wide: true, hint: "PEM certificate chain — required while tls.enabled; relative to the server's working directory" },
+  { section: "tls", key: "tls.key_path", label: "TLS private key (PEM)", wide: true, hint: "PEM private key — required while tls.enabled; relative to the server's working directory" },
 ];
 
 const MIDDLEWARE_SWITCHES = [
@@ -115,6 +135,12 @@ const state = {
   logCursor: 0,
   logLines: [],
   timers: { status: null, logs: null, dashboard: null },
+  lastStatus: null,       // the process state behind the dashboard's banners
+  origin: "",             // the origin the endpoints derive from
+  serverTls: false,        // whether the configuration enables [tls] on the server
+  detectedOrigin: "",     // the server's own address, read from the configuration
+  siteUrl: "",            // the website URL behind the Open website buttons
+  portStatus: null,        // who holds the server's port, when someone does
 };
 
 /* ------------------------------------------------------------------ */
@@ -124,6 +150,7 @@ const state = {
 async function pollStatus() {
   try {
     const status = await invoke("server_status");
+    state.lastStatus = status;
     paintStatus(status);
   } catch (error) {
     /* a transient IPC problem must not kill the loop */
@@ -134,7 +161,23 @@ async function pollStatus() {
 async function pollDashboard() {
   try {
     const dash = await invoke("dashboard_fetch");
+    // The port probe answers the question the unreachable banner
+    // cannot: is the server's port already held by someone else (a
+    // leftover from an earlier session)? Only asked when it matters —
+    // nothing reachable and nothing supervised.
+    const running = state.lastStatus && state.lastStatus.state === "running";
+    if (!dash.reachable && !running) {
+      try {
+        state.portStatus = await invoke("port_status");
+      } catch (error) {
+        console.error("port probe failed", error);
+        state.portStatus = null;
+      }
+    } else {
+      state.portStatus = null;
+    }
     paintDashboard(dash);
+    paintTakeover();
   } catch (error) {
     showBanner("dash-error", String(error), "error");
   }
@@ -197,13 +240,51 @@ function paintStatus(status) {
   $("btn-stop").disabled = !running;
   $("btn-stop-side").disabled = !running;
 
+  // The website link lives exactly as long as the server does: shown
+  // while the process runs, gone the moment it stops. A button — not
+  // an anchor — so the click goes to the OS opener and never navigates
+  // the manager's own webview.
+  for (const node of [$("btn-open-site"), $("btn-open-site-side")]) {
+    node.style.display = running ? "" : "none";
+    node.title = running && state.siteUrl ? state.siteUrl : "";
+  }
+
   $("dash-state").textContent = running ? "Running" : exited ? "Exited" : "Stopped";
   $("dash-state-sub").textContent = running ? `pid ${status.pid}` : "process supervision";
 }
 
 function paintDashboard(dash) {
-  showBanner("dash-notice", dash.reachable ? "" : "The server is not answering yet — start it from the sidebar.", dash.reachable ? "" : "");
-  showBanner("dash-error", dash.reachable ? "" : (dash.error || "endpoint unreachable"), "error");
+  // The banners must say what is actually wrong. "Start it from the
+  // sidebar" is a lie when the process IS running and the endpoint is
+  // what refuses to answer — that is an origin/port mismatch, and the
+  // message has to point there.
+  const status = state.lastStatus;
+  const running = status && status.state === "running";
+  const exited = status && status.state === "exited";
+  if (dash.reachable) {
+    showBanner("dash-notice", "");
+    showBanner("dash-error", "");
+  } else if (running) {
+    const where = state.origin ? ` at ${state.origin}` : "";
+    // A TLS server behind an `http://` origin is the classic mismatch
+    // once certificates enter the picture — say so by name.
+    const tlsHint = state.serverTls && state.origin.startsWith("http://")
+      ? " The server serves TLS — Settings offers its https origin."
+      : "";
+    showBanner("dash-notice", `The server process is running (pid ${status.pid}) but its endpoint${where} is not answering — the origin in Settings must match the server's own host and port.${tlsHint}`, "error");
+    showBanner("dash-error", dash.error || "endpoint unreachable", "error");
+  } else if (exited) {
+    showBanner("dash-notice", "The server process has exited — the recent output is on the Logs page.", "");
+    showBanner("dash-error", "");
+  } else if (state.portStatus && state.portStatus.occupied) {
+    // The takeover banner below tells the whole story — the notice must
+    // not suggest a start that would only collide with the squatter.
+    showBanner("dash-notice", "");
+    showBanner("dash-error", "");
+  } else {
+    showBanner("dash-notice", "The server is not answering yet — start it from the sidebar.", "");
+    showBanner("dash-error", "");
+  }
   $("dash-uptime").textContent = dash.reachable ? fmtDuration(dash.uptime_seconds) : "—";
   $("dash-requests").textContent = fmtNumber(dash.requests_total);
   $("dash-rps").textContent = fmtNumber(dash.requests_per_second);
@@ -333,7 +414,9 @@ function buildForm() {
       input = document.createElement("input");
       input.type = "text";
       input.id = `cfg-${field.key}`;
-      input.placeholder = `default: ${field.placeholder}`;
+      // `hint` fields describe what to type (the TLS paths have no
+      // default to show); the others advertise the file's default.
+      input.placeholder = field.hint || (field.placeholder ? `default: ${field.placeholder}` : "");
     }
     input.dataset.key = field.key;
     wrap.appendChild(input);
@@ -399,29 +482,31 @@ function fieldKeys() {
 }
 
 async function saveForm() {
-  const pairs = [];
-  for (const input of document.querySelectorAll("#config-form [data-key]")) {
-    let value;
-    if (input.dataset.check) {
-      if (input.indeterminate) continue; // untouched: leave the file as it is
-      value = input.checked ? "true" : "false";
-    } else {
-      value = input.value.trim();
-      if (value === "") continue; // untouched: leave the file as it is
+  await withBusy("Saving the configuration…", async () => {
+    const pairs = [];
+    for (const input of document.querySelectorAll("#config-form [data-key]")) {
+      let value;
+      if (input.dataset.check) {
+        if (input.indeterminate) continue; // untouched: leave the file as it is
+        value = input.checked ? "true" : "false";
+      } else {
+        value = input.value.trim();
+        if (value === "") continue; // untouched: leave the file as it is
+      }
+      pairs.push([input.dataset.key, value]);
     }
-    pairs.push([input.dataset.key, value]);
-  }
-  if (pairs.length === 0) {
-    showBanner("config-banner", "Nothing to save — every field is untouched.", "");
-    return;
-  }
-  try {
-    await invoke("config_set_values", { file: state.file, values: pairs });
-    showBanner("config-banner", `Saved ${pairs.length} value${pairs.length === 1 ? "" : "s"} to ${state.file === "base" ? "wallermax.toml" : "wallermax.local.toml"} (validated, backup kept).`, "ok");
-  } catch (error) {
-    showBanner("config-banner", String(error), "error");
-  }
-  await loadBackups();
+    if (pairs.length === 0) {
+      showBanner("config-banner", "Nothing to save — every field is untouched.", "");
+      return;
+    }
+    try {
+      await invoke("config_set_values", { file: state.file, values: pairs });
+      showBanner("config-banner", `Saved ${pairs.length} value${pairs.length === 1 ? "" : "s"} to ${state.file === "base" ? "wallermax.toml" : "wallermax.local.toml"} (validated, backup kept).`, "ok");
+    } catch (error) {
+      showBanner("config-banner", String(error), "error");
+    }
+    await loadBackups();
+  });
 }
 
 async function loadRaw() {
@@ -438,13 +523,15 @@ async function loadRaw() {
 }
 
 async function saveRaw() {
-  try {
-    await invoke("config_write", { file: state.file, content: $("raw-editor").value });
-    showBanner("config-banner", "Layer saved (validated, backup kept).", "ok");
-  } catch (error) {
-    showBanner("config-banner", String(error), "error");
-  }
-  await loadBackups();
+  await withBusy("Saving the layer…", async () => {
+    try {
+      await invoke("config_write", { file: state.file, content: $("raw-editor").value });
+      showBanner("config-banner", "Layer saved (validated, backup kept).", "ok");
+    } catch (error) {
+      showBanner("config-banner", String(error), "error");
+    }
+    await loadBackups();
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -498,13 +585,15 @@ async function loadBackups() {
         if (!window.confirm(`Restore ${backup.file_name} over the current ${which === "base" ? "wallermax.toml" : "wallermax.local.toml"}?`)) {
           return;
         }
-        try {
-          await invoke("config_restore_backup", { file: which, fileName: backup.file_name });
-          toast(`Restored ${backup.file_name} (the replaced file was backed up too).`, "ok");
-        } catch (error) {
-          toast(String(error), "error");
-        }
-        await loadBackups();
+        await withBusy(`Restoring ${backup.file_name}…`, async () => {
+          try {
+            await invoke("config_restore_backup", { file: which, fileName: backup.file_name });
+            toast(`Restored ${backup.file_name} (the replaced file was backed up too).`, "ok");
+          } catch (error) {
+            toast(String(error), "error");
+          }
+          await loadBackups();
+        });
       });
       actions.appendChild(button);
       row.append(name, size, modified, actions);
@@ -526,38 +615,143 @@ async function loadSettings() {
     $("set-workdir").value = settings.working_dir;
     $("set-configdir").value = settings.config_dir;
     $("set-origin").value = settings.origin;
+    $("set-site").value = settings.site_url || "";
     $("set-health").value = settings.health_path;
     $("set-metrics").value = settings.metrics_path;
     $("set-stats").value = settings.stats_path;
     $("set-probe").value = settings.probe_window_ms;
     $("set-grace").value = settings.stop_grace_ms;
     $("origin-chip").textContent = settings.origin;
+    state.origin = settings.origin;
+    state.siteUrl = (settings.site_url || "").trim() || settings.origin;
+    await loadOriginHint();
   } catch (error) {
     toast(String(error), "error");
   }
 }
 
-async function saveSettings() {
-  const settings = {
-    server_command: $("set-command").value.trim(),
-    working_dir: $("set-workdir").value.trim(),
-    config_dir: $("set-configdir").value.trim(),
-    origin: $("set-origin").value.trim(),
-    health_path: $("set-health").value.trim(),
-    metrics_path: $("set-metrics").value.trim(),
-    stats_path: $("set-stats").value.trim(),
-    probe_window_ms: Number($("set-probe").value) || 4000,
-    stop_grace_ms: Number($("set-grace").value) || 5000,
-  };
-  try {
-    await invoke("settings_save", { settings });
-    toast("Settings saved and applied.", "ok");
-    $("origin-chip").textContent = settings.origin;
-    await loadPaths();
-    pollDashboard();
-  } catch (error) {
-    toast(String(error), "error");
+/* The server's own address, straight out of the configuration pair —
+ * the one-click correction for a mismatched origin (the classic
+ * "http://localhost" versus a server bound to 127.0.0.1:8080, or an
+ * `http://` origin against a server serving TLS on the same port). */
+async function loadOriginHint() {
+  const [host, port, tlsEnabled, httpListen] = await Promise.all([
+    configValue("server.host"),
+    configValue("server.port"),
+    configValue("tls.enabled"),
+    configValue("tls.http_listen"),
+  ]);
+  const detectedHost = host || "127.0.0.1";
+  const detectedPort = String(port || "8080");
+  const tls = String(tlsEnabled).toLowerCase() === "true";
+  state.serverTls = tls;
+  state.detectedOrigin = `${tls ? "https" : "http"}://${detectedHost}:${detectedPort}`;
+  const hint = $("origin-hint");
+  if (!hint) return;
+  $("origin-hint-text").textContent = tls
+    ? `the server's wallermax.toml serves TLS on ${detectedHost}:${detectedPort}${httpListen ? ` (plain ${httpListen} redirects to it)` : ""}`
+    : `the server's wallermax.toml binds ${detectedHost}:${detectedPort}`;
+  hint.style.display = "block";
+}
+
+/* One configuration value, read the way the server reads it: the local
+ * layer beats the base layer, and anything missing is null. */
+async function configValue(key) {
+  for (const file of ["local", "base"]) {
+    const value = await invoke("config_get_value", { file, key }).catch(() => null);
+    if (value !== null && value !== undefined && String(value).trim() !== "") return value;
   }
+  return null;
+}
+
+async function saveSettings() {
+  await withBusy("Saving the settings…", async () => {
+    const settings = {
+      server_command: $("set-command").value.trim(),
+      working_dir: $("set-workdir").value.trim(),
+      config_dir: $("set-configdir").value.trim(),
+      origin: $("set-origin").value.trim(),
+      site_url: $("set-site").value.trim(),
+      health_path: $("set-health").value.trim(),
+      metrics_path: $("set-metrics").value.trim(),
+      stats_path: $("set-stats").value.trim(),
+      probe_window_ms: Number($("set-probe").value) || 4000,
+      stop_grace_ms: Number($("set-grace").value) || 5000,
+    };
+    try {
+      await invoke("settings_save", { settings });
+      toast("Settings saved and applied.", "ok");
+      $("origin-chip").textContent = settings.origin;
+      await loadPaths();
+      await Promise.all([pollDashboard(), pollStatus()]);
+    } catch (error) {
+      toast(String(error), "error");
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* the port banner: who holds it, and the one-click takeover            */
+/* ------------------------------------------------------------------ */
+
+/* Painted after the unreachable banner: when something already holds
+ * the address a fresh server would bind, the banner names it — and,
+ * when every owner is the configured server program (the classic
+ * invisible leftover from an earlier session), offers to take the
+ * port over and start. */
+function paintTakeover() {
+  const node = $("dash-takeover");
+  const status = state.portStatus;
+  const running = state.lastStatus && state.lastStatus.state === "running";
+  if (!status || !status.occupied || running) {
+    node.style.display = "none";
+    return;
+  }
+  const who = status.owners.length
+    ? status.owners.map((owner) => `pid ${owner.pid} (${owner.image})`).join(", ")
+    : "a process this OS could not name";
+  const cause = status.owners.length
+    ? " — likely a server left over from an earlier manager session (servers run without a console window)."
+    : ".";
+  node.className = "banner error";
+  node.replaceChildren(
+    document.createTextNode(
+      `The server's address ${status.address} is already in use by ${who}${cause}`
+    )
+  );
+  if (status.takeover_ready) {
+    const button = document.createElement("button");
+    button.id = "btn-takeover";
+    button.className = "btn small";
+    button.textContent = "Take over the port and start";
+    button.addEventListener("click", takeoverStart);
+    node.append(document.createElement("br"), button);
+  }
+  node.style.display = "block";
+}
+
+async function takeoverStart() {
+  const button = $("btn-takeover");
+  if (button) button.disabled = true;
+  await withBusy("Taking over the port…", async () => {
+    try {
+      const report = await invoke("server_takeover");
+      if (report.probe.booted) {
+        showBanner("probe-banner", report.probe.output.trim()
+          ? `Takeover done — boot probe: healthy.\n${report.probe.output.trim()}`
+          : `Takeover done — the process is up (pid ${report.pid}).`, "ok");
+      } else {
+        showBanner("probe-banner",
+          `Takeover done, but the boot probe failed${report.probe.exit_code === null ? "" : ` (exit code ${report.probe.exit_code})`}.\n${report.probe.output.trim() || "no output captured"}`,
+          "error");
+      }
+    } catch (error) {
+      showBanner("probe-banner", String(error), "error");
+    }
+    state.portStatus = null;
+    paintTakeover();
+    await Promise.all([pollStatus(), pollDashboard()]);
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -565,31 +759,52 @@ async function saveSettings() {
 /* ------------------------------------------------------------------ */
 
 async function startServer() {
-  try {
-    const report = await invoke("server_start");
-    if (report.probe.booted) {
-      showBanner("probe-banner", report.probe.output.trim()
-        ? `Boot probe: healthy.\n${report.probe.output.trim()}`
-        : `Boot probe: the process is up (pid ${report.pid}).`, "ok");
-    } else {
-      showBanner("probe-banner",
-        `Boot probe: the process refused to start${report.probe.exit_code === null ? "" : ` (exit code ${report.probe.exit_code})`}.\n${report.probe.output.trim() || "no output captured"}`,
-        "error");
+  await withBusy("Starting the server…", async () => {
+    try {
+      const report = await invoke("server_start");
+      if (report.probe.booted) {
+        showBanner("probe-banner", report.probe.output.trim()
+          ? `Boot probe: healthy.\n${report.probe.output.trim()}`
+          : `Boot probe: the process is up (pid ${report.pid}).`, "ok");
+      } else {
+        showBanner("probe-banner",
+          `Boot probe: the process refused to start${report.probe.exit_code === null ? "" : ` (exit code ${report.probe.exit_code})`}.\n${report.probe.output.trim() || "no output captured"}`,
+          "error");
+      }
+    } catch (error) {
+      showBanner("probe-banner", String(error), "error");
+      // A refused start may be a busy port — the banner knows who holds
+      // it, so ask right away (the takeover button rides on it).
+      try {
+        state.portStatus = await invoke("port_status");
+      } catch (probeError) {
+        console.error("port probe failed", probeError);
+        state.portStatus = null;
+      }
+      paintTakeover();
     }
-  } catch (error) {
-    showBanner("probe-banner", String(error), "error");
-  }
-  pollStatus();
+    await pollStatus();
+  });
 }
 
 async function stopServer() {
+  await withBusy("Stopping the server…", async () => {
+    try {
+      await invoke("server_stop");
+      toast("Stop issued — the tree is taken down and the exit recorded.", "ok");
+    } catch (error) {
+      toast(String(error), "error");
+    }
+    await pollStatus();
+  });
+}
+
+async function openSite() {
   try {
-    await invoke("server_stop");
-    toast("Stop issued — the tree is taken down and the exit recorded.", "ok");
+    await invoke("open_site");
   } catch (error) {
     toast(String(error), "error");
   }
-  pollStatus();
 }
 
 /* ------------------------------------------------------------------ */
@@ -681,12 +896,14 @@ window.addEventListener("DOMContentLoaded", () => {
 
   $("btn-form-save").addEventListener("click", saveForm);
   $("btn-config-validate").addEventListener("click", async () => {
-    try {
-      await invoke("config_validate");
-      showBanner("config-banner", "The pair on disk validates against the server's real rules.", "ok");
-    } catch (error) {
-      showBanner("config-banner", String(error), "error");
-    }
+    await withBusy("Validating the pair…", async () => {
+      try {
+        await invoke("config_validate");
+        showBanner("config-banner", "The pair on disk validates against the server's real rules.", "ok");
+      } catch (error) {
+        showBanner("config-banner", String(error), "error");
+      }
+    });
   });
   $("btn-raw-save").addEventListener("click", saveRaw);
   $("btn-raw-reload").addEventListener("click", loadRaw);
@@ -695,6 +912,8 @@ window.addEventListener("DOMContentLoaded", () => {
   $("btn-stop").addEventListener("click", stopServer);
   $("btn-start-side").addEventListener("click", startServer);
   $("btn-stop-side").addEventListener("click", stopServer);
+  $("btn-open-site").addEventListener("click", openSite);
+  $("btn-open-site-side").addEventListener("click", openSite);
   $("btn-refresh-status").addEventListener("click", pollStatus);
   $("btn-refresh-dash").addEventListener("click", pollDashboard);
 
@@ -706,15 +925,23 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
   $("btn-tools-validate").addEventListener("click", async () => {
-    try {
-      await invoke("config_validate");
-      toast("The pair on disk validates.", "ok");
-    } catch (error) {
-      toast(String(error), "error");
-    }
+    await withBusy("Validating the pair…", async () => {
+      try {
+        await invoke("config_validate");
+        toast("The pair on disk validates.", "ok");
+      } catch (error) {
+        toast(String(error), "error");
+      }
+    });
   });
 
   $("btn-settings-save").addEventListener("click", saveSettings);
+
+  $("btn-use-origin").addEventListener("click", () => {
+    if (state.detectedOrigin) {
+      $("set-origin").value = state.detectedOrigin;
+    }
+  });
 
   $("log-filter").addEventListener("input", renderLogs);
   $("log-show-out").addEventListener("change", renderLogs);
@@ -728,4 +955,5 @@ window.addEventListener("DOMContentLoaded", () => {
   restartTimers();
   showPage("dashboard");
   loadPaths();
+  loadSettings();
 });

@@ -45,14 +45,15 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{
-    generate_refresh_token, hash_password, hash_refresh_token, validate_password,
-    validate_username, verify_password, MAX_REFRESH_TOKEN_LEN,
+    generate_refresh_token, hash_password_async, hash_refresh_token, validate_password,
+    validate_username, verify_password_async, MAX_REFRESH_TOKEN_LEN,
 };
 use crate::db::{NewRefreshToken, PublicUser, RepositoryError, UserRole};
 use crate::error::AppError;
 use crate::extractors::{bearer_token, AuthUser, JsonBody};
 use crate::middleware::request_id::RequestId;
 use crate::proxy;
+use crate::rate_limit::Decision;
 use crate::session;
 use crate::state::{AppState, AuthContext};
 use crate::util::{read_form, unix_now};
@@ -227,7 +228,9 @@ async fn register(
         UserRole::User
     };
 
-    let password_hash = match hash_password(&credentials.password) {
+    // Argon2id runs on the blocking pool: it is deliberately slow
+    // (~100 ms) and must never sit on an async worker thread.
+    let password_hash = match hash_password_async(credentials.password.clone()).await {
         Ok(hash) => hash,
         Err(error) => {
             tracing::error!(%error, "password hashing failed");
@@ -377,9 +380,51 @@ async fn login(
         }
     };
 
+    // Brute-force throttle (see LoginThrottle): keyed by the resolved
+    // client IP (trusted proxies honoured) and the submitted username.
+    // Checked before any credential work; JSON clients get the global
+    // limiter's 429 envelope, browsers the same invalid-credentials
+    // bounce a wrong password produces — the lockout state leaks
+    // nothing to the login modal.
+    let client_ip = client_ip_of(&state, &peer, &headers);
+    if let Decision::Rejected { retry_after_secs } = state
+        .login_throttle()
+        .check(client_ip, &credentials.username)
+    {
+        state.record_rate_limited();
+        tracing::warn!(
+            client_ip = %client_ip,
+            username = %credentials.username,
+            retry_after_secs,
+            "login attempt throttled"
+        );
+        if is_form {
+            let secure = secure_cookies(&state);
+            let target = redirect_with_error(&redirect, "login_error", "invalid", "#login");
+            return redirect_response(
+                &target,
+                Some(session::clear_cookie_value(secure, cookie_domain(&state))),
+            );
+        }
+        return AppError::rate_limited(retry_after_secs)
+            .into_response_with_request_id(request_id.as_deref());
+    }
+
     match issue_login(&state, &peer, &headers, &credentials).await {
-        Ok(success) => respond_login(&state, success, is_form, &redirect),
+        Ok(success) => {
+            state
+                .login_throttle()
+                .record_success(client_ip, &credentials.username);
+            respond_login(&state, success, is_form, &redirect)
+        }
         Err(error) => {
+            // Only credential rejections advance the lockout: a storage
+            // hiccup (5xx) must not lock honest users out.
+            if error.status_code() == StatusCode::UNAUTHORIZED {
+                state
+                    .login_throttle()
+                    .record_failure(client_ip, &credentials.username);
+            }
             if is_form {
                 // Browsers bounce back to the page they came from with
                 // `?login_error=<code>#login`, which re-opens the modal
@@ -420,11 +465,14 @@ async fn issue_login(
         .await
         .map_err(AppError::from)?
     else {
-        let _ = verify_password(&credentials.password, dummy_hash());
+        // Same Argon2 burn as a real check (see below), so timing
+        // cannot enumerate users — on the blocking pool, like the
+        // real one.
+        let _ = verify_password_async(credentials.password.clone(), dummy_hash().await).await;
         return Err(AppError::unauthorized("invalid username or password"));
     };
 
-    if !verify_password(&credentials.password, &user.password_hash) {
+    if !verify_password_async(credentials.password.clone(), user.password_hash.clone()).await {
         return Err(AppError::unauthorized("invalid username or password"));
     }
 
@@ -860,11 +908,22 @@ fn auth_context(state: &AppState) -> Result<&AuthContext, AppError> {
 /// Argon2 hash of a throwaway value, computed once.
 ///
 /// Login attempts for unknown usernames verify against it, spending the
-/// same CPU time as a real check so timing cannot enumerate users.
-fn dummy_hash() -> &'static str {
+/// same CPU time as a real check so timing cannot enumerate users. The
+/// first computation is as expensive as any other Argon2id hash, so it
+/// too rides the blocking pool; later calls serve the cached PHC string.
+async fn dummy_hash() -> String {
     use std::sync::OnceLock;
     static DUMMY: OnceLock<String> = OnceLock::new();
-    DUMMY.get_or_init(|| hash_password("wallermax-timing-equalizer").unwrap_or_default())
+    if let Some(cached) = DUMMY.get() {
+        return cached.clone();
+    }
+    let hashed = hash_password_async(String::from("wallermax-timing-equalizer"))
+        .await
+        .unwrap_or_default();
+    // A concurrent first-login may have won the race; both values are
+    // equally throwaway, so whoever lost simply keeps the winner's.
+    let _ = DUMMY.set(hashed);
+    DUMMY.get().cloned().unwrap_or_default()
 }
 
 /// Whether the request body is a browser form post.

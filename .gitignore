@@ -4,6 +4,13 @@
 # Local configuration overrides (see README.md)
 wallermax.local.toml
 
+# Timestamped backups wallermax-manager writes next to the config
+# layers before overwriting them (wallermax.toml.bak-<timestamp>). A
+# backup of the local layer can carry the same secrets as the file
+# itself (e.g. [auth] jwt_secret), so it must stay out of the repo too.
+wallermax.toml.bak-*
+wallermax.local.toml.bak-*
+
 # Environment files
 .env
 

@@ -1,20 +1,13 @@
-//! Prometheus exposition parsing and a minimal blocking HTTP GET — the
-//! dashboard's data plane.
-//!
-//! The manager only ever talks to the **local** server, so a hand-rolled
-//! `HTTP/1.1` client over `TcpStream` is enough: no TLS stack, no async
-//! runtime, no dependency to keep in sync with the server. What it lacks
-//! in generality it repays in robustness — nothing here can fail on an
-//! OpenSSL upgrade.
+//! Prometheus exposition parsing — the dashboard's data plane.
 //!
 //! Parsing keeps every family the endpoint exposes (including the ones
 //! today's dashboard does not show yet); the typed accessors simply answer
 //! `None` for families the server does not emit — **unknown families are
-//! ignored**, never fatal.
+//! ignored**, never fatal. Fetching lives next door in [`crate::http`]:
+//! the tiny client that speaks both of the local server's dialects,
+//! plain HTTP and TLS.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -231,139 +224,13 @@ fn parse_labels(text: Option<&str>) -> BTreeMap<String, String> {
     labels
 }
 
-/// Performs a blocking `GET` against `url` with a hard `timeout`, and
-/// returns the body of a 2xx answer. Only `http://` is supported — the
-/// manager talks to the local server; an `https://` origin is refused
-/// with a pointer at the limitation rather than failing mysteriously.
-///
-/// # Errors
-///
-/// A human-readable message for URL problems, connection failures,
-/// timeouts, non-2xx statuses and truncated answers.
-pub fn http_get_text(url: &str, timeout: Duration) -> Result<String, String> {
-    let (authority, path) = split_url(url)?;
-    let address = resolve(&authority)?;
-    let mut stream =
-        connect(&address).map_err(|error| format!("could not reach {url}: {error}"))?;
-    stream
-        .set_read_timeout(Some(timeout))
-        .map_err(|error| format!("could not arm the read timeout: {error}"))?;
-    stream
-        .set_write_timeout(Some(timeout))
-        .map_err(|error| format!("could not arm the write timeout: {error}"))?;
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: wallermax-manager\r\nAccept: */*\r\nConnection: close\r\n\r\n"
-    );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|error| format!("could not write to {url}: {error}"))?;
-
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .map_err(|error| format!("could not read from {url}: {error}"))?;
-    let response = String::from_utf8_lossy(&response);
-    let (head, body) = response
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| format!("truncated answer from {url}"))?;
-
-    let status_line = head.lines().next().unwrap_or_default();
-    let status = status_line
-        .split_ascii_whitespace()
-        .nth(1)
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| format!("malformed status line from {url}: {status_line:?}"))?;
-    if !(200..300).contains(&status) {
-        return Err(format!("GET {url} answered {status}"));
-    }
-
-    let chunked = head.lines().skip(1).any(|header| {
-        header
-            .to_ascii_lowercase()
-            .starts_with("transfer-encoding:")
-            && header.to_ascii_lowercase().contains("chunked")
-    });
-    let body = if chunked {
-        dechunk(body)
-    } else {
-        body.to_owned()
-    };
-    Ok(body)
-}
-
-/// Splits `http://host:port/path` into `(host:port, /path)`.
-fn split_url(url: &str) -> Result<(String, String), String> {
-    let rest = url.strip_prefix("http://").ok_or_else(|| {
-        format!(
-            "the manager only speaks plain HTTP to the local server; `{url}` is not an `http://` URL"
-        )
-    })?;
-    let (authority, path) = match rest.split_once('/') {
-        Some((authority, path)) => (authority, format!("/{path}")),
-        None => (rest, String::from("/")),
-    };
-    if authority.is_empty() {
-        return Err(format!("no host in `{url}`"));
-    }
-    Ok((authority.to_owned(), path))
-}
-
-/// Resolves `host:port` (defaulting port 80) to the first socket address.
-fn resolve(authority: &str) -> Result<SocketAddr, String> {
-    let port = match authority.rsplit_once(':') {
-        Some((_, port)) => port
-            .parse::<u16>()
-            .map_err(|_| format!("invalid port in `{authority}`"))?,
-        None => 80,
-    };
-    authority
-        .to_socket_addrs()
-        .map_err(|error| format!("could not resolve `{authority}`: {error}"))?
-        .find(|addr| addr.port() == port)
-        .ok_or_else(|| format!("no address answered for `{authority}`"))
-}
-
-/// Connects with a bounded dial so a dead endpoint fails fast.
-fn connect(address: &SocketAddr) -> std::io::Result<TcpStream> {
-    TcpStream::connect_timeout(address, Duration::from_secs(2))
-}
-
-/// Reassembles a chunked body. Tolerates a trailing truncated chunk (the
-/// connection closed early) by returning what was decoded so far.
-fn dechunk(body: &str) -> String {
-    let mut decoded = String::new();
-    let mut rest = body;
-    while let Some((size_line, remainder)) = rest.split_once('\n') {
-        let Ok(size) = usize::from_str_radix(size_line.trim(), 16) else {
-            break;
-        };
-        if size == 0 {
-            break;
-        }
-        let cut = remainder.len().min(size);
-        decoded.push_str(&remainder[..cut]);
-        // Skip the chunk terminator: CRLF per the standard, a bare LF
-        // tolerated; anything else means a truncated answer — keep what
-        // we have.
-        let tail = &remainder[cut..];
-        rest = match tail
-            .strip_prefix("\r\n")
-            .or_else(|| tail.strip_prefix('\n'))
-        {
-            Some(tail) => tail,
-            None => break,
-        };
-    }
-    decoded
-}
-
 /// Fetches and parses `url` in one step.
 ///
 /// # Errors
 ///
-/// See [`http_get_text`].
+/// See [`crate::http::http_get_text`].
 pub fn fetch_metrics(url: &str, timeout: Duration) -> Result<MetricsSnapshot, String> {
-    let text = http_get_text(url, timeout)?;
+    let text = crate::http::http_get_text(url, timeout)?;
     Ok(MetricsSnapshot::parse(&text))
 }
 
@@ -435,21 +302,5 @@ some_other_metric 42
             .expect_err("a dead endpoint must be reported");
         assert!(!error.is_empty());
         assert!(error.contains("127.0.0.1:1"), "names the endpoint: {error}");
-    }
-
-    #[test]
-    fn https_urls_are_refused_with_a_reason() {
-        let error = http_get_text("https://127.0.0.1:8443/metrics", Duration::from_secs(1))
-            .expect_err("https must be refused");
-        assert!(
-            error.contains("http://"),
-            "explains the limitation: {error}"
-        );
-    }
-
-    #[test]
-    fn chunked_bodies_are_reassembled() {
-        let dechunked = dechunk("4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n");
-        assert_eq!(dechunked, "Wikipedia");
     }
 }

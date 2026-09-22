@@ -19,8 +19,10 @@
 //! |------------------------|---------------------------------------------------|
 //! | [`settings`]          | The manager's own JSON settings (survives restarts)|
 //! | [`config_manager`]    | Layered TOML editing: validate, backup, write     |
-//! | [`process_manager`]   | Spawn, boot probe, log capture, stop (tree-kill)  |
-//! | [`metrics`]           | Prometheus text parsing + a tiny blocking HTTP GET|
+//! | [`process_manager`]   | Spawn, boot probe, logs, tree-kill stop, lifetime |
+//! | [`http`]              | The endpoint client: http/https GET, redirects    |
+//! | [`metrics`]           | Prometheus text parsing (fetched by [`http`])     |
+//! | [`ports`]             | Who listens on the server's port (pre-flight)    |
 //! | [`app`]               | The facade the Tauri commands delegate to         |
 //!
 //! ## Zero-drift validation
@@ -48,6 +50,10 @@
 //!   tree down. Console children cannot be closed gracefully on Windows;
 //!   the server's storage (SQLite, atomic writes) is crash-safe by design,
 //!   and `taskkill`'s output is captured (never sprayed on the console).
+//!   The child is also tied to the manager's lifetime through a
+//!   kill-on-close job object, so a manager that goes away — however it
+//!   goes away — never leaves an invisible server behind holding the
+//!   port.
 //!
 //! A boot probe watches the first seconds of every start: a process that
 //! dies reports its captured output as the refusal reason, a process
@@ -56,20 +62,23 @@
 
 //! ## Safety posture
 //!
-//! The crate stays `unsafe`-free with one deliberate, contained exception,
-//! mirroring the server's own `require_bridge` pattern:
+//! The crate stays `unsafe`-free with two deliberate, contained
+//! exceptions, mirroring the server's own `require_bridge` pattern:
 //! [`process_manager`] signals the process group it created on Unix
-//! through `libc::kill` — a two-argument syscall whose safety argument is
-//! written next to the call. The exception is scoped to that helper with
-//! `deny` plus a function-local allow; everywhere else `unsafe` remains a
-//! hard error.
+//! through `libc::kill`, and ties the server's lifetime to the
+//! manager's on Windows through the Win32 job-object calls — a handful
+//! of raw syscalls whose safety arguments are written next to each
+//! call. Both exceptions are scoped to their helper with `deny` plus a
+//! function-local allow; everywhere else `unsafe` remains a hard error.
 
 #![deny(unsafe_code)]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
 pub mod app;
 pub mod config_manager;
+pub mod http;
 pub mod metrics;
+pub mod ports;
 pub mod process_manager;
 pub mod settings;
 

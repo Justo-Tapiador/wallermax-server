@@ -264,7 +264,12 @@ pub async fn build_state(config: &AppConfig) -> Result<AppState, ServerError> {
         let registration_enabled = config.auth.registration_enabled;
         Some(AuthContext {
             repository: Arc::new(SqliteUserRepository::new(pool.clone())),
-            jwt: JwtService::new(
+            // The guard mints an ephemeral per-process secret when the
+            // configuration still carries the public development
+            // placeholder from wallermax.toml (see
+            // JwtService::new_guarded) — a public secret must never
+            // sign production tokens.
+            jwt: JwtService::new_guarded(
                 &config.auth.jwt_secret,
                 &config.auth.issuer,
                 config.auth.token_ttl_secs,

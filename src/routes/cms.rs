@@ -88,7 +88,9 @@ use axum::Router;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
-use crate::auth::{hash_password, validate_password, validate_username, verify_password};
+use crate::auth::{
+    hash_password_async, validate_password, validate_username, verify_password_async,
+};
 use crate::db::{
     BodyFormat, NewMenu, NewMenuItem, NewPage, PageSummary, PageUpdate, RecentRevision,
     RepositoryError, User, UserRole, CMS_ORGANIZATION_KEY,
@@ -3648,7 +3650,9 @@ async fn create_user(
         .await;
     };
 
-    let password_hash = match hash_password(&form.password) {
+    // Argon2id on the blocking pool — it is deliberately slow and
+    // must never sit on an async worker thread.
+    let password_hash = match hash_password_async(form.password.clone()).await {
         Ok(hash) => hash,
         Err(error) => {
             tracing::error!(%error, "password hashing failed");
@@ -3798,7 +3802,7 @@ async fn update_user(
             return render_user_error(&state, &parts, Some(id), &user.username, &form.role, &error)
                 .await;
         }
-        match hash_password(&form.password) {
+        match hash_password_async(form.password.clone()).await {
             Ok(hash) => Some(hash),
             Err(error) => {
                 tracing::error!(%error, "password hashing failed");
@@ -4020,14 +4024,15 @@ async fn change_password(
         return password_error(&redirect, "session");
     };
 
-    if !verify_password(&form.current_password, &record.password_hash) {
+    // Argon2id on the blocking pool (see hash_password_async).
+    if !verify_password_async(form.current_password.clone(), record.password_hash.clone()).await {
         return password_error(&redirect, "current");
     }
     if validate_password(&form.new_password, auth.min_password_len).is_err() {
         return password_error(&redirect, "new");
     }
 
-    let password_hash = match hash_password(&form.new_password) {
+    let password_hash = match hash_password_async(form.new_password.clone()).await {
         Ok(hash) => hash,
         Err(error) => {
             tracing::error!(%error, "password hashing failed");
